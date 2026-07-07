@@ -40,7 +40,7 @@ artifacts (Dockerfile/compose), and the documented security properties (auth, we
 "no telemetry", "footage never leaves without config").
 
 **Out of scope, but we still want to know:** vulnerabilities in upstream projects we integrate
-(go2rtc, FFmpeg, eufy-security-ws, camera firmware). Report those upstream first; tell us too
+(go2rtc, FFmpeg, community bridge sidecars, camera firmware). Report those upstream first; tell us too
 so we can pin, mitigate or document.
 
 ## Design-level security properties

@@ -36,7 +36,7 @@ and an executable shell; see [ROADMAP.md](ROADMAP.md) for what exists vs. what i
 | `server/vidette/db/` | SQLite store (WAL, append-only migrations, single-writer discipline) |
 | `server/vidette/auth/` | scrypt hashing, sessions, scoped tokens, FastAPI deps |
 | `server/vidette/streams/` | go2rtc manager: config generation, health, WHEP/snapshot proxy client |
-| `server/vidette/adapters/` | Camera adapter SDK + adapters (rtsp ✅, eufy designed) |
+| `server/vidette/adapters/` | Camera adapter SDK + adapters (rtsp ✅; Eufy has **no** adapter — it rides `rtsp` via NAS (RTSP), see docs/cameras/eufy.md) |
 | `server/vidette/pipeline/` | Cascade tier protocols and (future M2) orchestrator |
 | `server/vidette/recording/` | Recorder (ffmpeg supervision), segments, exporter, janitor, retention planner |
 | `server/vidette/notify/` | Notifier protocol, webhook HMAC signing |

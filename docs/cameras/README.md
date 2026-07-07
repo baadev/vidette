@@ -20,7 +20,7 @@ the parts the vendor would rather not document.
 |---|---|---|---|---|
 | Any RTSP camera | native | C→A | 📐 M1 | [onvif-rtsp.md](onvif-rtsp.md) |
 | ONVIF (discovery, PTZ, events) | native | C→A | 📐 M1–M2 | [onvif-rtsp.md](onvif-rtsp.md) |
-| **Eufy** | bridge: eufy-security-ws | B | 📐 M2 preview → M3 stable | [eufy.md](eufy.md) |
+| **Eufy** | built-in NAS (RTSP) — supported models only; no bridge exists | C | 🚧 M1 (plain `rtsp` adapter) | [eufy.md](eufy.md) |
 | Reolink | native RTSP/HTTP | C | 📐 M1 | [onvif-rtsp.md](onvif-rtsp.md) |
 | Hikvision / Dahua / Amcrest | native RTSP/ONVIF | C | 📐 M1 | [onvif-rtsp.md](onvif-rtsp.md) |
 | TP-Link Tapo | native RTSP/ONVIF | C | 📐 M1 | [onvif-rtsp.md](onvif-rtsp.md) |

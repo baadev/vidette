@@ -43,8 +43,8 @@ Decode only the **substream** (the main stream goes to disk untouched — see
 day/night transition damping, and per-region sensitivity. Output: motion regions + a global
 "scene active" bit that wakes Tier 1.
 
-Design notes: camera-side motion events (ONVIF, vendor push) are used as *additional* wake
-signals when available — useful for battery cameras that sleep (Eufy), where we cannot decode
+Design notes: camera-side motion events (ONVIF, bridge-adapter push) are used as *additional*
+wake signals when available — useful for battery cameras that sleep, where we cannot decode
 continuously.
 
 ### Tier 1 — detection

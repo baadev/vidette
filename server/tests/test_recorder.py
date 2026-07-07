@@ -189,7 +189,7 @@ def _supervisor_config(media_dir: Path, tmp_path: Path) -> VidetteConfig:
             "storage": {"media_dir": str(media_dir), "database": str(tmp_path / "db.sqlite")},
             "cameras": {
                 "front-door": {"adapter": "rtsp", "source": {"main": "rtsp://cam/1"}},
-                "backyard": {"adapter": "eufy"},
+                "backyard": {"adapter": "rtsp"},  # no source → gateway skips it
                 "paused": {"adapter": "rtsp", "source": {"main": "rtsp://cam/2"},
                            "record": {"mode": "off"}},
             },
@@ -229,7 +229,7 @@ async def test_supervisor_skips_gateway_missing_and_off_cameras(
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/ffmpeg")
 
     db = _FakeDb()
-    gateway = _FakeGateway(skipped={"backyard": "eufy adapter is designed for M2"})
+    gateway = _FakeGateway(skipped={"backyard": "the rtsp adapter requires 'source.main'"})
     supervisor = RecorderSupervisor(
         _supervisor_config(media_dir, tmp_path), db, gateway, media_dir=media_dir  # type: ignore[arg-type]
     )

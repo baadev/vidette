@@ -11,8 +11,9 @@
 - **A box.** Anything from a Raspberry Pi 5 to a mini-PC. The sweet spot is an Intel N100
   (~$150, ~7 W idle). Sizing guide: [hardware.md](hardware.md).
 - **Docker** with the compose plugin.
-- **A camera.** Any RTSP/ONVIF camera works natively; Eufy and other closed ecosystems go
-  through [adapters](cameras/README.md).
+- **A camera.** Any RTSP/ONVIF camera works natively — including Eufy models with the
+  built-in NAS (RTSP) feature ([which ones](cameras/eufy.md)); other ecosystems:
+  [support matrix](cameras/README.md).
 - **Storage.** Budget roughly 20–45 GB per camera per day for continuous 1080p–2K recording
   before compaction — the [storage math](architecture/storage.md#sizing) helps you pick a disk.
 

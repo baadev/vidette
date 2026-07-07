@@ -6,6 +6,15 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Eufy: NAS (RTSP) is the only integration path.** The planned bridge adapter over
+  `eufy-security-ws` was removed before shipping — Anker's backend migration shut down the
+  legacy API the community client relied on, so a bridge is not technically viable today.
+  Eufy models with the built-in NAS (RTSP) feature connect through the plain `rtsp` adapter;
+  `docs/cameras/eufy.md` was rewritten accordingly, and `vidette validate` now answers
+  `adapter: eufy` with a hint pointing at the guide. (Roadmap rows for bridge live view,
+  vendor events and HomeBase clip ingestion were withdrawn — marked blocked, not pretended.)
+
 ### Added — M1 "Watch" (in progress)
 - Recording pipeline: managed go2rtc gateway (config generated from `cameras:`, atomic
   writes, hot reload, health), codec-copy fMP4 segment recorder with crash-only supervision

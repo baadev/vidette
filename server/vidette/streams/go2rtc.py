@@ -93,7 +93,7 @@ class Go2rtcManager:
         """VidetteConfig → go2rtc config dict (streams + api/rtsp/webrtc listeners).
 
         Async because stream endpoints come from adapters (`stream_endpoints`); adapters
-        raising AdapterNotReadyError (e.g. eufy at M1) are skipped, not fatal.
+        raising AdapterNotReadyError are skipped, not fatal.
         """
         adapters = available_adapters()
         streams: dict[str, list[str]] = {}

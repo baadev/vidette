@@ -82,7 +82,6 @@ baseline on the reference clip set.
 | Event engine: lifecycle, dedupe, review UI, favorites | 📐 |
 | Notifications: signed webhooks, web push (VAPID), Apprise channels | 📐 |
 | MQTT + Home Assistant discovery (camera, motion, person, event entities) | 📐 |
-| Eufy adapter **preview** via eufy-security-ws sidecar (live, events, clip pull) | 📐 |
 | Prometheus `/metrics` | 📐 |
 | Reference clip set + accuracy harness (public, versioned) | 📐 |
 
@@ -101,7 +100,6 @@ compaction ≥ 60 % size reduction on archived continuous footage.
 | Providers: Ollama / llama.cpp local; OpenAI / Anthropic / Google opt-in | 📐 |
 | Intent scoring v1 (approach/dwell/touch × VLM verdict fusion) | 📐 |
 | Semantic search: SigLIP-class embeddings + sqlite-vec + FTS5 | 📐 |
-| Eufy adapter stable: HomeBase clip ingestion ("your recordings, finally yours") | 📐 |
 | Archive compaction (HEVC/AV1 re-encode of cold continuous footage, hw-accel) | 📐 |
 | Off-site event backup (S3-compatible) + nightly DB snapshot | 📐 |
 | Clip redaction on export (blur regions) | 🔭 |
@@ -142,7 +140,8 @@ The complete list of key functionality and its implementation state.
 | Manual RTSP sources (main/sub streams) | ✅ | M1 |
 | ONVIF discovery, profiles, PTZ | 📐 | M1–M2 |
 | Adapter SDK (typed protocol, entry points, sidecar bridges) | ✅ interfaces / 📐 3rd-party runtime | M0/M2 |
-| Eufy via eufy-security-ws (live, events, station clip pull) | 📐 | M2–M3 |
+| Eufy via built-in NAS (RTSP) on supported models — plain `rtsp` adapter, no bridge ([guide](docs/cameras/eufy.md)) | 🚧 | M1 |
+| Eufy cloud/P2P bridge | ❌ blocked — vendor shut the legacy API ([why](docs/cameras/eufy.md#why-there-is-no-bridge)); becomes 🔭 only if upstream revives | — |
 | Two-way audio | 🔭 | M5 |
 
 ### Recording & storage

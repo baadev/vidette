@@ -64,12 +64,12 @@ Semantics: [storage design](architecture/storage.md).
 ```yaml
 cameras:
   front-door:                     # id: [a-z0-9-], stable, used in URLs/topics
-    adapter: rtsp                 # rtsp | onvif (M1) | eufy (M2 preview) | ...
+    adapter: rtsp                 # rtsp (✅) | onvif (📐 M1) — Eufy uses rtsp via NAS (RTSP)
     name: "Front door"            # display name; defaults to id
     source:                       # adapter-specific for bridge adapters (see their docs)
       main: rtsp://user:${CAM_PASSWORD}@10.0.20.11:554/stream1
       sub:  rtsp://user:${CAM_PASSWORD}@10.0.20.11:554/stream2
-    options: {}                   # adapter-specific extras (e.g. eufy: bridge_url, station_sn)
+    options: {}                   # adapter-specific extras (reserved for bridge adapters)
     record:
       mode: continuous            # continuous | motion | events | off
       retention: null             # override global storage.retention for this camera

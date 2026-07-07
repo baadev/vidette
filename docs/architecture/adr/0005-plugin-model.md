@@ -21,6 +21,13 @@ Two-layer model ([plugins.md](../plugins.md)):
    versions) speaking their native APIs (WebSocket/HTTP/MQTT); the in-process adapter stays a
    thin, typed client. First user: `eufy-security-ws`.
 
+> **Update 2026-07-07:** the planned first user never shipped — Anker's backend migration
+> killed the legacy API under `eufy-security-ws` before the adapter was built; Eufy is
+> served by its native NAS (RTSP) feature through the plain `rtsp` adapter instead
+> ([details](../../cameras/eufy.md#why-there-is-no-bridge)). The **decision stands
+> unchanged**: the fault isolation it prescribes is precisely what limited this breakage to
+> a docs page. Candidate first users are now `ring-mqtt` / `docker-wyze-bridge`, demand-gated.
+
 Capability flags are contractual: the UI renders what adapters claim, and (M5) a conformance
 suite verifies claims against behavior.
 

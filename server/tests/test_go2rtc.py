@@ -9,7 +9,14 @@ import httpx
 import pytest
 import yaml
 
+from vidette.adapters.base import (
+    AdapterInfo,
+    AdapterNotReadyError,
+    Capability,
+    StreamEndpoint,
+)
 from vidette.core.config import CameraConfig, CameraSource, VidetteConfig
+from vidette.streams import go2rtc as go2rtc_module
 from vidette.streams.go2rtc import GatewayError, Go2rtcManager
 
 MAIN_URL = "rtsp://user:pw@203.0.113.10:554/stream1"
@@ -42,9 +49,37 @@ async def test_build_config_maps_main_and_sub(test_config: VidetteConfig) -> Non
     assert manager.skipped == {}
 
 
-async def test_build_config_skips_eufy_camera(test_config: VidetteConfig) -> None:
+async def test_build_config_skips_not_ready_adapter(
+    test_config: VidetteConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A designed-but-inert bridge adapter (docs/architecture/plugins.md) must be skipped
+    with its reason recorded — never fatal for the healthy cameras."""
+
+    class NotReadyAdapter:
+        info = AdapterInfo(
+            id="future-bridge",
+            display_name="Future bridge",
+            maturity="designed",
+            capabilities=Capability.NONE,
+            docs_url="https://example.invalid/docs",
+        )
+
+        async def stream_endpoints(
+            self, camera_id: str, config: CameraConfig
+        ) -> list[StreamEndpoint]:
+            raise AdapterNotReadyError("future-bridge is designed — see its docs page")
+
+    real_available = go2rtc_module.available_adapters
+
+    def patched() -> dict[str, object]:
+        registry: dict[str, object] = dict(real_available())
+        registry["future-bridge"] = NotReadyAdapter()
+        return registry
+
+    monkeypatch.setattr(go2rtc_module, "available_adapters", patched)
+
     config = test_config.model_copy(deep=True)
-    config.cameras["backyard"] = CameraConfig(adapter="eufy")
+    config.cameras["backyard"] = CameraConfig(adapter="future-bridge")
     manager = make_manager(config)
     built = await manager.build_config()
     await manager.close()
@@ -53,7 +88,7 @@ async def test_build_config_skips_eufy_camera(test_config: VidetteConfig) -> Non
     assert "backyard__sub" not in built["streams"]
     assert built["streams"]["front-door"] == [MAIN_URL]  # healthy cameras unaffected
     assert "backyard" in manager.skipped
-    assert "M2" in manager.skipped["backyard"]  # reason points at the milestone/docs
+    assert "designed" in manager.skipped["backyard"]
 
 
 async def test_build_config_skips_unknown_adapter(test_config: VidetteConfig) -> None:

@@ -19,6 +19,7 @@ EXAMPLE = REPO_ROOT / "deploy" / "config.example.yaml"
 
 EXAMPLE_ENV = {
     "CAM_PASSWORD": "example-password",
+    "EUFY_RTSP_PASSWORD": "example-password",
     "VIDETTE_WEBHOOK_SECRET": "example-secret",
     "TG_BOT_TOKEN": "123:abc",
     "TG_CHAT_ID": "42",
@@ -30,18 +31,20 @@ def test_example_config_is_valid() -> None:
     report = validate_config_text(EXAMPLE.read_text(encoding="utf-8"), env=EXAMPLE_ENV)
     assert report.valid, report.errors
     # The example configures design-stage features on purpose; honesty warnings must fire.
-    assert any("M1" in w for w in report.warnings)
+    assert any("M2" in w for w in report.warnings)  # notifications delivery
+    assert any("M4" in w for w in report.warnings)  # plain-language policies
 
 
 def test_example_config_contents() -> None:
-    config, warnings = load_config(EXAMPLE, env=EXAMPLE_ENV)
+    config, _ = load_config(EXAMPLE, env=EXAMPLE_ENV)
     assert "front-door" in config.cameras
     front_door = config.cameras["front-door"]
     assert front_door.source is not None
     assert "example-password" in front_door.source.main  # ${CAM_PASSWORD} interpolated
     assert front_door.zones["street"].kind.value == "public"
-    assert config.cameras["backyard"].adapter == "eufy"
-    assert any("eufy" in w for w in warnings)
+    backyard = config.cameras["backyard"]
+    assert backyard.adapter == "rtsp"  # Eufy connects via its NAS (RTSP) feature — no bridge
+    assert backyard.source is not None and backyard.source.main.startswith("rtsp://")
 
 
 @pytest.mark.parametrize(
@@ -130,3 +133,11 @@ def test_trusted_faces_enabled_warns_designed() -> None:
     report = validate_config_text("understanding:\n  faces:\n    enabled: true\n")
     assert report.valid
     assert any("trusted-faces" in w and "M4" in w for w in report.warnings)
+
+
+def test_eufy_adapter_gets_a_helpful_hint() -> None:
+    """The old bridge path is gone; pointing `adapter: eufy` at the NAS (RTSP) guide is the
+    kindest thing the validator can do."""
+    report = validate_config_text("cameras:\n  backyard:\n    adapter: eufy\n")
+    assert report.valid
+    assert any("NAS (RTSP)" in w and "docs/cameras/eufy.md" in w for w in report.warnings)

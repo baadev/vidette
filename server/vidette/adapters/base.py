@@ -97,10 +97,9 @@ class CameraAdapter(Protocol):
 
 def builtin_adapters() -> dict[str, CameraAdapter]:
     # Imported lazily to avoid import cycles at module load.
-    from vidette.adapters.eufy import EufyAdapter
     from vidette.adapters.rtsp import RtspAdapter
 
-    adapters: list[CameraAdapter] = [RtspAdapter(), EufyAdapter()]
+    adapters: list[CameraAdapter] = [RtspAdapter()]
     return {adapter.info.id: adapter for adapter in adapters}
 
 

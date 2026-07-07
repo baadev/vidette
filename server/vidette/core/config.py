@@ -351,14 +351,19 @@ def designed_feature_warnings(config: VidetteConfig) -> list[str]:
     if not config.cameras:
         warnings.append("cameras: none configured — Vidette will start, but watch nothing")
     for camera_id, camera in config.cameras.items():
-        warnings.append(
-            f"cameras.{camera_id}: streaming/recording lands in M1 — "
-            f"today the config is validated and reserved ({roadmap})"
-        )
-        if camera.adapter == "eufy":
+        if camera.record.mode in (RecordMode.motion, RecordMode.events):
             warnings.append(
-                f"cameras.{camera_id}: the eufy adapter is designed for M2 "
-                f"(docs/cameras/eufy.md) — config accepted, not yet functional"
+                f"cameras.{camera_id}: record.mode '{camera.record.mode.value}' falls back "
+                f"to continuous until detection lands in M2 ({roadmap}) — recording more "
+                "than asked, never less"
+            )
+        if camera.adapter == "eufy":
+            # The most likely misconfiguration from Eufy owners: there is no bridge adapter
+            # (Anker shut down the legacy API the community client relied on).
+            warnings.append(
+                f"cameras.{camera_id}: there is no 'eufy' adapter — Eufy cameras connect "
+                "through their built-in NAS (RTSP) feature using `adapter: rtsp`, and only "
+                "on models that support it; see docs/cameras/eufy.md"
             )
     if config.server.auth.mode is AuthMode.none:
         warnings.append(

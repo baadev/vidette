@@ -47,14 +47,15 @@ cameras:
       # public: tracks that never leave this zone are suppressed — the passers-by killer
       street: { kind: public, points: [[0.0, 0.8], [1.0, 0.8], [1.0, 1.0], [0.0, 1.0]] }
 
-  # Eufy via the eufy-security-ws bridge — 📐 M2 preview (docs/cameras/eufy.md).
+  # Eufy cameras: the ONLY integration path is the camera's built-in NAS (RTSP) feature,
+  # available on supported models (Eufy app → camera → Settings → General → Storage →
+  # NAS (RTSP)). No bridge, no cloud — it's a plain RTSP source. Details, supported-model
+  # notes and battery caveats: docs/cameras/eufy.md.
   backyard:
-    adapter: eufy
-    name: "Backyard"
-    options:
-      bridge_url: ws://eufy-ws:3000
-    record:
-      mode: events         # battery camera: record what the station/events give us
+    adapter: rtsp
+    name: "Backyard (eufyCam via NAS/RTSP)"
+    source:
+      main: rtsp://user:${EUFY_RTSP_PASSWORD}@10.0.20.30/live0
 
 understanding:
   detector:

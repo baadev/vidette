@@ -57,9 +57,9 @@ answer about what "intent recognition" can and cannot do.
 
 ## What Vidette is
 
-- **A universal NVR core.** Any RTSP/ONVIF camera works out of the box. Branded ecosystems
-  (Eufy first) connect through [adapters](docs/cameras/README.md) — vendor pain is a plugin,
-  not a fork.
+- **A universal NVR core.** Any RTSP/ONVIF camera works out of the box — including Eufy
+  models with the NAS (RTSP) feature. Closed ecosystems connect through
+  [adapters](docs/cameras/README.md) — vendor pain is a plugin, not a fork.
 - **An understanding cascade.** Motion → detection → trajectory geometry → vision-language
   reasoning, each tier ~10–100× more expensive and invoked ~10–100× more rarely. Full local
   processing; cloud models strictly opt-in.
@@ -173,7 +173,7 @@ The full inventory lives in [ROADMAP.md](ROADMAP.md).
 | Detection cascade tiers 0–2 (motion, objects, trajectories, zones) | 📐 | M2 |
 | Events, webhooks (signed), web push, Apprise channels | 📐 | M2 |
 | MQTT + Home Assistant discovery | 📐 | M2 |
-| Eufy adapter (via `eufy-security-ws` bridge) — preview | 📐 | M2 |
+| Eufy via built-in NAS (RTSP), supported models — [guide + caveats](docs/cameras/eufy.md) | 🚧 | M1 |
 | VLM scene descriptions + intent scoring (local via Ollama, opt-in cloud) | 📐 | M3 |
 | Semantic search over events ("someone touched the gate") | 📐 | M3 |
 | Off-site event backup (S3-compatible) | 📐 | M3 |
@@ -187,7 +187,7 @@ The full inventory lives in [ROADMAP.md](ROADMAP.md).
 |---|---|---|
 | Any RTSP camera | native | 📐 M1 |
 | ONVIF (discovery, PTZ, events) | native | 📐 M1–M2 |
-| Eufy | bridge ([eufy-security-ws](https://github.com/bropat/eufy-security-ws)) | 📐 M2 preview |
+| Eufy | built-in NAS (RTSP) — **supported models only**, [check yours](docs/cameras/eufy.md) | 🚧 M1 |
 | Reolink, Amcrest/Dahua, Hikvision, Tapo | native RTSP/ONVIF | 📐 M1 |
 | UniFi Protect, Ring, Wyze, HomeKit | bridges | 🔭 |
 
@@ -228,7 +228,6 @@ Vidette deliberately reuses the best of the ecosystem instead of rewriting it:
 [go2rtc](https://github.com/AlexxIT/go2rtc) (stream gateway),
 [FFmpeg](https://ffmpeg.org) (recording/remux),
 [ONNX Runtime](https://onnxruntime.ai) (inference everywhere),
-[bropat's eufy-security-client/-ws](https://github.com/bropat/eufy-security-client) (Eufy bridge),
 [Apprise](https://github.com/caronc/apprise) (100+ notification services),
 [SQLite](https://sqlite.org) (+ sqlite-vec for semantic search).
 [Frigate](https://github.com/blakeblackshear/frigate) deserves a special mention as prior art —
@@ -246,9 +245,10 @@ cheap objective signals (zones, trajectories, dwell) and uses the VLM only as th
 with budgets, calibrated thresholds and your feedback closing the loop. You stay the judge;
 Vidette cuts the noise. [Longer answer](docs/faq.md#can-it-really-recognize-intent).
 
-**Are you affiliated with Eufy/Anker?** No. Eufy support builds on community reverse-engineering
-(thank you, [@bropat](https://github.com/bropat)) and carries an honest
-[risk note](docs/cameras/eufy.md#upstream-risk) about the vendor's API migration.
+**Are you affiliated with Eufy/Anker?** No. Eufy is the itch that started the project. The
+only integration path is the camera's built-in **NAS (RTSP)** feature on supported models —
+the community cloud/P2P bridge died with the vendor's API migration, which is
+[the thesis in one story](docs/cameras/eufy.md#why-there-is-no-bridge).
 
 ## Contributing & contact
 

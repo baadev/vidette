@@ -9,7 +9,7 @@ Rationale: [ADR-0001](adr/0001-runtime-and-languages.md).
 flowchart TB
     subgraph cams [Cameras]
       C1["RTSP / ONVIF"]
-      C2["Eufy (via eufy-security-ws sidecar)"]
+      C2["Eufy via NAS (RTSP) — supported models"]
       C3["Other adapters"]
     end
 
@@ -113,5 +113,5 @@ Full guidance: [security-model.md](security-model.md).
   real deployment proves it insufficient ([ADR-0008](adr/0008-database.md)).
 - **Not a home-automation hub.** HA/MQTT are first-class *integrations*, not something we
   reimplement.
-- **Not a fork farm.** go2rtc, FFmpeg, ONNX Runtime, Apprise, eufy-security-ws are consumed
-  as upstreams; we contribute fixes upstream instead of vendoring.
+- **Not a fork farm.** go2rtc, FFmpeg, ONNX Runtime, Apprise and community bridge projects
+  are consumed as upstreams; we contribute fixes upstream instead of vendoring.

@@ -12,7 +12,7 @@ Vidette starts one layer higher and makes different bets:
 |---|---|---|
 | Core question | *what objects are in frame?* | *what is happening, and do you care?* |
 | Alerting model | objects/zones (+ GenAI descriptions as an add-on) | the cascade: geometry + VLM verdicts fused into intent, plain-language policies as the primary UX |
-| Closed ecosystems (Eufy, …) | not the focus | first-class adapter goal, docs-as-product |
+| Closed ecosystems | not the focus | docs-as-product rescue guides (e.g. [Eufy via NAS/RTSP](cameras/eufy.md)) + a sidecar adapter pattern for bridgeable ones |
 | Event outputs | strong HA/MQTT story | equal-first: signed webhooks with text+media, Apprise, HA/MQTT |
 | Storage stance | recording + retention | + compaction tiers, off-site event backup, loud reliability monitoring |
 
@@ -79,11 +79,13 @@ and [security model](architecture/security-model.md).
 ## Are you affiliated with Eufy or Anker?
 
 No. Eufy is simply the itch that started the project — well-regarded hardware behind
-frustrating software. Support rides on community reverse-engineering (bropat's
-`eufy-security-client`/`-ws`), with an honest [upstream-risk note](cameras/eufy.md#upstream-risk):
-Anker is migrating its cloud platform and community bridges may break. Which is, of course,
-the argument for owning your recording layer in the first place. All trademarks belong to
-their owners.
+frustrating software. The only integration path is the camera's built-in **NAS (RTSP)**
+feature, available on supported models — a plain local stream, no cloud in the path
+([guide](cameras/eufy.md)). The community's reverse-engineered cloud/P2P bridge
+(bropat's heroic `eufy-security-client`) stopped being viable when Anker migrated its
+backend and began shutting the legacy API — which is, of course,
+[the argument for owning your recording layer](cameras/eufy.md#why-there-is-no-bridge)
+in the first place. All trademarks belong to their owners.
 
 ## What about Scrypted? ZoneMinder? Shinobi?
 

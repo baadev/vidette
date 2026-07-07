@@ -37,7 +37,6 @@ vidette = "vidette.__main__:main"
 
 [project.entry-points."vidette.adapters"]
 rtsp = "vidette.adapters.rtsp:RtspAdapter"
-eufy = "vidette.adapters.eufy:EufyAdapter"
 
 [dependency-groups]
 dev = [
