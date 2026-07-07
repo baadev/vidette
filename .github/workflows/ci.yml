@@ -26,7 +26,7 @@ jobs:
         run: uv run pytest -q
       - name: Example config validates
         run: |
-          CAM_PASSWORD=x VIDETTE_WEBHOOK_SECRET=x TG_BOT_TOKEN=x TG_CHAT_ID=x \
+          CAM_PASSWORD=x EUFY_RTSP_PASSWORD=x VIDETTE_WEBHOOK_SECRET=x TG_BOT_TOKEN=x TG_CHAT_ID=x \
             uv run vidette validate ../deploy/config.example.yaml
 
   web:
