@@ -19,7 +19,10 @@ fmt:
 	cd server && uv run ruff check --fix .
 
 dev:
-	cd server && uv run uvicorn vidette.api.app:create_app --factory --reload --port 8642
+	@mkdir -p config media-dev
+	@test -f config/dev.yaml || printf 'server:\n  auth:\n    mode: none  # dev only\nstorage:\n  media_dir: $(CURDIR)/media-dev\n  database: $(CURDIR)/config/dev.db\n' > config/dev.yaml
+	cd server && VIDETTE_CONFIG=$(CURDIR)/config/dev.yaml VIDETTE_GO2RTC_URL=http://127.0.0.1:1984 VIDETTE_GO2RTC_RTSP=rtsp://127.0.0.1:8554 \
+		uv run uvicorn vidette.api.app:create_app --factory --reload --port 8642
 
 web:
 	cd web && npm run dev

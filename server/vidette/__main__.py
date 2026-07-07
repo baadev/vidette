@@ -29,10 +29,15 @@ def _cmd_validate(path: Path) -> int:
     return 0
 
 
-def _cmd_serve(host: str, port: int) -> int:
+def _cmd_serve(host: str, port: int, config: Path | None) -> int:
+    import os
+
     import uvicorn
 
-    print(f"vidette v{__version__} — M0 design preview · http://{host}:{port}")
+    if config is not None:
+        os.environ["VIDETTE_CONFIG"] = str(config)
+    config_path = os.environ.get("VIDETTE_CONFIG", "/config/vidette.yaml")
+    print(f"vidette v{__version__} — M1 · http://{host}:{port} · config: {config_path}")
     uvicorn.run("vidette.api.app:create_app", factory=True, host=host, port=port)
     return 0
 
@@ -48,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     serve = subparsers.add_parser("serve", help="run the API + web app")
     serve.add_argument("--host", default="0.0.0.0")  # container default
     serve.add_argument("--port", type=int, default=8642)
+    serve.add_argument("--config", type=Path, default=None, help="config file path")
 
     validate = subparsers.add_parser("validate", help="validate a config file")
     validate.add_argument("config", type=Path)
@@ -55,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "validate":
         return _cmd_validate(args.config)
-    return _cmd_serve(args.host, args.port)
+    return _cmd_serve(args.host, args.port, args.config)
 
 
 if __name__ == "__main__":

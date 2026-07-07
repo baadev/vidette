@@ -1,8 +1,8 @@
 # Generic RTSP / ONVIF cameras
 
-> **Status: 📐 M1** (manual RTSP, ONVIF discovery) → M2 (ONVIF events, PTZ). This is
-> Vidette's native tongue: if your camera speaks RTSP, it needs no vendor, no cloud, no
-> bridge — and it will still work in ten years.
+> **Status:** manual RTSP ✅ (M1, works today) · ONVIF discovery 📐 → M2 (with events, PTZ).
+> This is Vidette's native tongue: if your camera speaks RTSP, it needs no vendor, no cloud,
+> no bridge — and it will still work in ten years.
 
 ## Find your RTSP URLs
 

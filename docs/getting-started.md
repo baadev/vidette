@@ -1,9 +1,10 @@
 # Getting started
 
-> **Status: M0.** Today the stack brings up the app shell, API and config validator. Streaming
-> and recording land in **M1** — this page is written for that flow and marks what is not live
-> yet. Onboarding is a product surface for us: if any step below takes you more than a few
-> minutes or a single retry, [that's a bug — report it](https://github.com/baadev/vidette/issues).
+> **Status: M1 (alpha).** The flow below works today for RTSP cameras: record, watch live,
+> review, export. Reference budgets are not yet published; treat this as an alpha that never
+> lies about itself. Onboarding is a product surface for us: if any step takes more than a
+> few minutes or a single retry,
+> [that's a bug — report it](https://github.com/baadev/vidette/issues).
 
 ## What you need
 
@@ -22,10 +23,8 @@ git clone https://github.com/baadev/vidette.git && cd vidette
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-Open **http://localhost:8642**. You'll see the shell and the system status.
-
-*(M1: the first-run wizard forces you to create the admin account before anything is served —
-there are no default credentials, ever.)*
+Open **http://localhost:8642**. The first-run wizard makes you create the admin account —
+there are no default credentials, ever.
 
 ## 2. Configure your first camera
 
@@ -59,11 +58,18 @@ docker compose -f deploy/docker-compose.yml exec vidette vidette validate /confi
 You'll get either a clean bill, or exact errors with paths, plus warnings for any configured
 feature that is still design-stage (so the config never silently lies to you).
 
-## 3. Watch, record, review *(M1)*
+Then restart the stack (config is read at boot; hot reload lands with the config API in M2)
+— Vidette generates the go2rtc gateway config and starts recording.
 
-- **Live wall** at `/live` — every camera, one screen, sub-second WebRTC.
-- **Timeline** at `/review` — scrub like a video editor; motion and events are marked.
-- **Export** — drag a range, get an MP4 (remuxed, instant, no re-encode).
+## 3. Watch, record, review
+
+- **Live** (`#/live`) — every camera on one screen over WebRTC; keys `1–9` focus a camera,
+  `Esc` returns to the grid. If WebRTC can't get through, tiles fall back to refreshing
+  snapshots and say so.
+- **Review** (`#/review`) — pick a day, scan the 24-hour strip, click an hour, play
+  segments. (Fast scrub-strip previews are 📐 designed — see ROADMAP.)
+- **Export** — set a range, get an MP4 in seconds (remuxed, no re-encode; precision is
+  segment/keyframe granularity).
 
 ## 4. Turn on understanding *(M2–M3)*
 

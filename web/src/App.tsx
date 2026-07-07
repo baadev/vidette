@@ -1,80 +1,148 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { UNAUTHORIZED_EVENT, api, type Me } from "./api";
+import { LivePage } from "./pages/Live";
+import { LoginPage } from "./pages/Login";
+import { ReviewPage } from "./pages/Review";
+import { SystemPage } from "./pages/System";
 
-type Health = { status: string; version: string };
+type Route = "live" | "review" | "system";
 
-type SystemInfo = {
-  milestone: string;
-  designed_routes: { path: string; milestone: string }[];
-};
-
-const TIERS = [
-  { name: "T0 · Motion gate", detail: "~free, always on", milestone: "M2" },
-  { name: "T1 · Detection", detail: "tiny model, on motion", milestone: "M2" },
-  { name: "T2 · Trajectory geometry", detail: "pure math: approach · dwell · touch", milestone: "M2" },
-  { name: "T3 · Scene reasoning", detail: "VLM, rare & budgeted", milestone: "M3" },
-  { name: "T4 · Your policy", detail: "plain language, compiled & inspectable", milestone: "M4" },
+const ROUTES: { route: Route; hash: string; label: string }[] = [
+  { route: "live", hash: "#/live", label: "Live" },
+  { route: "review", hash: "#/review", label: "Review" },
+  { route: "system", hash: "#/system", label: "System" },
 ];
 
-export function App() {
-  const [health, setHealth] = useState<Health | null>(null);
-  const [system, setSystem] = useState<SystemInfo | null>(null);
-  const [error, setError] = useState<string | null>(null);
+function parseRoute(hash: string): Route {
+  if (hash.startsWith("#/review")) return "review";
+  if (hash.startsWith("#/system")) return "system";
+  return "live"; // default, including "" and unknown hashes
+}
 
+function useRoute(): Route {
+  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
   useEffect(() => {
-    fetch("/healthz")
-      .then((r) => r.json() as Promise<Health>)
-      .then(setHealth)
-      .catch(() => setError("API unreachable — is the vidette container running?"));
-    fetch("/api/v1/system")
-      .then((r) => r.json() as Promise<SystemInfo>)
-      .then(setSystem)
-      .catch(() => undefined);
+    const onHashChange = () => setRoute(parseRoute(window.location.hash));
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  return route;
+}
+
+type Boot =
+  | { phase: "loading" }
+  | { phase: "unreachable" }
+  | { phase: "wizard" }
+  | { phase: "login" }
+  | { phase: "authed"; user: Me };
+
+export function App() {
+  const [boot, setBoot] = useState<Boot>({ phase: "loading" });
+  const route = useRoute();
+
+  const bootstrapFlow = useCallback(async () => {
+    setBoot({ phase: "loading" });
+    try {
+      const status = await api.authStatus();
+      if (!status.bootstrapped) {
+        setBoot({ phase: "wizard" });
+        return;
+      }
+      const user = await api.me();
+      setBoot(user ? { phase: "authed", user } : { phase: "login" });
+    } catch {
+      setBoot({ phase: "unreachable" });
+    }
   }, []);
 
-  return (
-    <main className="shell">
-      <header>
-        <h1 className="wordmark">
-          VIDE<span className="accent">TT</span>E
-        </h1>
-        <p className="tagline">Self-hosted video security that understands intent — not just motion.</p>
-      </header>
+  useEffect(() => {
+    void bootstrapFlow();
+  }, [bootstrapFlow]);
 
-      <section className="card status">
-        <h2>System</h2>
-        {error && <p className="error">{error}</p>}
-        {health && (
-          <p>
-            <span className="dot ok" /> API <strong>{health.status}</strong> · v{health.version} ·
-            milestone <strong>{system?.milestone ?? "M0"}</strong> — design preview
+  // Any authenticated request answering 401 (session expired, revoked, server restarted)
+  // drops the shell back to the login screen.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setBoot((previous) => (previous.phase === "authed" ? { phase: "login" } : previous));
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, []);
+
+  const handleAuthed = useCallback((user: Me) => {
+    setBoot({ phase: "authed", user });
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await api.logout();
+    } catch {
+      // The session cookie may already be gone; either way the shell locks.
+    }
+    setBoot({ phase: "login" });
+  }, []);
+
+  if (boot.phase === "loading") {
+    return (
+      <div className="boot-screen">
+        <p className="muted">Contacting API…</p>
+      </div>
+    );
+  }
+
+  if (boot.phase === "unreachable") {
+    return (
+      <div className="boot-screen">
+        <div className="card">
+          <h2>API unreachable</h2>
+          <p className="error">
+            Could not reach the Vidette API — check that the server (or container) is running,
+            then retry.
           </p>
-        )}
-        {!health && !error && <p>Contacting API…</p>}
-        <p className="muted">
-          Live wall, timeline and events land in M1–M2. What works today: this shell, the API
-          skeleton and <code>vidette validate</code> for your config.
-        </p>
-      </section>
+          <button type="button" className="primary" onClick={() => void bootstrapFlow()}>
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
-      <section className="card">
-        <h2>The cascade</h2>
-        <ol className="cascade">
-          {TIERS.map((tier) => (
-            <li key={tier.name}>
-              <span className="tier-name">{tier.name}</span>
-              <span className="tier-detail">{tier.detail}</span>
-              <span className="badge">{tier.milestone}</span>
-            </li>
+  if (boot.phase === "wizard" || boot.phase === "login") {
+    return <LoginPage mode={boot.phase} onAuthed={handleAuthed} />;
+  }
+
+  return (
+    <div className="app">
+      <header className="app-header">
+        <a className="wordmark wordmark-small" href="#/live">
+          VIDE<span className="accent">TT</span>E
+        </a>
+        <nav className="tabs" aria-label="Primary">
+          {ROUTES.map(({ route: tab, hash, label }) => (
+            <a
+              key={tab}
+              href={hash}
+              className={route === tab ? "tab active" : "tab"}
+              aria-current={route === tab ? "page" : undefined}
+            >
+              {label}
+            </a>
           ))}
-        </ol>
-      </section>
-
-      <footer>
-        <a href="https://github.com/baadev/vidette">GitHub</a>
-        <a href="https://github.com/baadev/vidette/blob/main/ROADMAP.md">Roadmap</a>
-        <a href="/api/docs">API docs</a>
-        <a href="mailto:alex@baadev.com">Contact</a>
-      </footer>
-    </main>
+        </nav>
+        <div className="session">
+          <span className="session-user" title={`role: ${boot.user.role}`}>
+            {boot.user.username}
+          </span>
+          <button type="button" className="ghost" onClick={() => void handleLogout()}>
+            Log out
+          </button>
+        </div>
+      </header>
+      <main className="app-main">
+        {route === "live" && <LivePage />}
+        {route === "review" && <ReviewPage />}
+        {route === "system" && <SystemPage />}
+      </main>
+    </div>
   );
 }

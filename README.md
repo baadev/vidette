@@ -17,11 +17,12 @@ trouble coming, and the one trusted to tell a passing farmer from an approaching
 
 </div>
 
-> **Status: M0 — design preview.** Vidette is being built docs-first: the full architecture is
-> published for review *before* the code lands, so early adopters can shape it. What runs today:
-> the app shell, the configuration schema and validator, the API skeleton, and CI. Star/watch the
-> repo to catch **M1 (streaming & recording)**. Feedback:
-> [open an issue](https://github.com/baadev/vidette/issues) or write to **alex@baadev.com**.
+> **Status: M1 — streaming & recording, in progress.** What runs today from this repo:
+> RTSP ingest through a managed go2rtc gateway, codec-copy segment recording with an SQLite
+> index, retention + disk-health janitor, range export (remux), signed-session auth with a
+> first-run admin wizard, a WebRTC live wall and an hour-strip review UI with MP4 export.
+> M1 closes when the [reference budgets](ROADMAP.md#m1--watch) are measured and published.
+> Feedback: [issues](https://github.com/baadev/vidette/issues) · **alex@baadev.com**.
 
 ## Why
 
@@ -162,9 +163,13 @@ The full inventory lives in [ROADMAP.md](ROADMAP.md).
 | Capability | Status | Milestone |
 |---|---|---|
 | Architecture, config schema, API skeleton, CI | ✅ | M0 |
-| RTSP/ONVIF ingest via go2rtc, codec-copy recording | 📐 | M1 |
-| Multi-camera live wall (WebRTC, sub-second) | 📐 | M1 |
-| Timeline review + range export (remux, no re-encode) | 📐 | M1 |
+| RTSP ingest via managed go2rtc, codec-copy recording + SQLite index | ✅ | M1 |
+| Auth: first-run admin wizard, sessions, scoped API tokens | ✅ | M1 |
+| Retention classes + watermark cleanup + disk health events | ✅ | M1 |
+| Multi-camera live wall (WebRTC via authenticated WHEP proxy) | ✅ | M1 |
+| Range export (remux, no re-encode) via UI + API | ✅ | M1 |
+| Timeline review (hour strip + segment playback; scrub-strip previews pending) | 🚧 | M1 |
+| ONVIF discovery, PTZ | 📐 | M1–M2 |
 | Detection cascade tiers 0–2 (motion, objects, trajectories, zones) | 📐 | M2 |
 | Events, webhooks (signed), web push, Apprise channels | 📐 | M2 |
 | MQTT + Home Assistant discovery | 📐 | M2 |
@@ -191,9 +196,9 @@ requests double as the demand map that orders the adapter backlog. Details: [doc
 
 ## Quickstart
 
-> M0 honesty: this brings up the app shell, the API and the config validator — streaming lands
-> in M1. If you want to kick the tires of the design instead, start with
-> [architecture/overview.md](docs/architecture/overview.md).
+> M1 honesty: this records, plays live and exports for RTSP cameras today (built from
+> source; published images come with the M1 release). Reference budgets are not yet
+> published — treat it as an enthusiastic alpha that never lies about itself.
 
 ```bash
 git clone https://github.com/baadev/vidette.git && cd vidette

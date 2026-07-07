@@ -23,6 +23,7 @@ internal/
 # Runtime data — never commit footage, databases or secrets
 config/
 media/
+media-dev/
 *.db
 *.db-wal
 *.db-shm

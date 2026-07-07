@@ -32,12 +32,12 @@ services:
     image: alexxit/go2rtc:1.9
     restart: unless-stopped
     volumes:
-      - ./go2rtc.example.yaml:/config/go2rtc.yaml   # M1: vidette generates this from cameras:
+      - ../config:/config    # vidette generates /config/go2rtc.yaml from your cameras:
     ports:
-      - "8554:8554"          # RTSP restream (LAN only)
-      - "8555:8555/tcp"      # WebRTC
+      - "8555:8555/tcp"      # WebRTC media (browsers connect here directly)
       - "8555:8555/udp"
-    # go2rtc admin API (1984) is deliberately NOT published — compose network only.
+    # Deliberately NOT published: admin API (1984) and RTSP restream (8554) stay on the
+    # compose network — browsers reach streams via Vidette's authenticated WHEP proxy.
 
   # Optional local VLM for Tier 3 (M3):  docker compose --profile vlm up -d
   ollama:

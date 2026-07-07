@@ -33,11 +33,15 @@ and an executable shell; see [ROADMAP.md](ROADMAP.md) for what exists vs. what i
 | Path | What lives here |
 |---|---|
 | `server/vidette/core/` | Config schema (pydantic, the executable spec) and event bus/models |
-| `server/vidette/adapters/` | Camera adapter SDK + adapters (rtsp real-ish, eufy designed) |
-| `server/vidette/pipeline/` | Cascade tier protocols and (future) orchestrator |
-| `server/vidette/recording/` | Retention planner (pure, tested); recorder lands in M1 |
+| `server/vidette/db/` | SQLite store (WAL, append-only migrations, single-writer discipline) |
+| `server/vidette/auth/` | scrypt hashing, sessions, scoped tokens, FastAPI deps |
+| `server/vidette/streams/` | go2rtc manager: config generation, health, WHEP/snapshot proxy client |
+| `server/vidette/adapters/` | Camera adapter SDK + adapters (rtsp ✅, eufy designed) |
+| `server/vidette/pipeline/` | Cascade tier protocols and (future M2) orchestrator |
+| `server/vidette/recording/` | Recorder (ffmpeg supervision), segments, exporter, janitor, retention planner |
 | `server/vidette/notify/` | Notifier protocol, webhook HMAC signing |
-| `server/vidette/api/` | FastAPI app: health, system, config validation, 501 stubs |
+| `server/vidette/api/` | FastAPI app + routers (auth/cameras/recordings/streams/system); 501 stubs for M2+ |
+| `server/vidette/runtime.py` | AppRuntime: boots/stops every subsystem in order (lifespan) |
 | `server/tests/` | Pytest suite — includes the test that keeps `config.example.yaml` valid |
 | `web/` | React + Vite + TS shell (dark theme, status page) |
 | `deploy/` | Dockerfile, compose stack, annotated `config.example.yaml`, go2rtc example |

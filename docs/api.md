@@ -1,8 +1,7 @@
 # API
 
-> **Status:** skeleton ✅ (`/healthz`, `/api/v1/system`, `/api/v1/config/validate`); the rest
-> 📐 M1–M2. Unimplemented designed routes are mounted **today** and return
-> `501 {"status": "designed", "milestone": "..."}` — the API is honest about the roadmap.
+> **Status:** the M1 surface is ✅ live — auth, cameras, recordings, streams, export, system.
+> Events (M2) and policies (M4) remain honest `501 {"status": "designed", …}` stubs.
 > Interactive OpenAPI docs are served at `/api/docs`.
 
 ## Principles
@@ -20,8 +19,8 @@
 
 | Method | Use | Status |
 |---|---|---|
-| Session cookie (httpOnly, SameSite=Lax) | the web UI | 📐 M1 |
-| `Authorization: Bearer <token>` — scoped personal access tokens | automations, scripts | 📐 M1 |
+| Session cookie (httpOnly, SameSite=Lax, 14 d) | the web UI | ✅ |
+| `Authorization: Bearer vd_…` — scoped personal access tokens | automations, scripts | ✅ |
 
 Scopes: `read:events`, `read:streams`, `read:config`, `write:config`, `admin`. Tokens are
 created in settings, shown once, revocable, and audit-logged.
@@ -30,12 +29,13 @@ created in settings, shown once, revocable, and audit-logged.
 
 | Resource | Routes | Milestone |
 |---|---|---|
-| System | `GET /healthz` · `GET /api/v1/system` | ✅ |
-| Config | `POST /api/v1/config/validate` ✅ · `GET/PUT /api/v1/config` + `POST …/apply` 📐 | M0 / M1 |
-| Cameras | `GET /api/v1/cameras` · `GET /api/v1/cameras/{id}` (state, health, capabilities) | 📐 M1 |
-| Streams | `GET /api/v1/streams/{camera}/live` → WebRTC/MSE negotiation via go2rtc | 📐 M1 |
-| Recordings | `GET /api/v1/recordings?camera=&from=&to=` (timeline index) | 📐 M1 |
-| Export | `POST /api/v1/export {camera, from, to}` → async job → MP4 (remux) | 📐 M1 |
+| System | `GET /healthz` (public) · `GET /api/v1/system` · `GET /api/v1/system/events` | ✅ |
+| Auth | `GET /api/v1/auth/status` (public) · `POST …/bootstrap` · `POST …/login` · `POST …/logout` · `GET …/me` · `POST/GET/DELETE …/tokens` | ✅ M1 |
+| Config | `POST /api/v1/config/validate` ✅ · `GET/PUT /api/v1/config` + `POST …/apply` 📐 | M0 / M2 |
+| Cameras | `GET /api/v1/cameras` · `GET /api/v1/cameras/{id}` (recorder state, probe, stream readiness) | ✅ M1 |
+| Streams | `GET /api/v1/streams/{camera}` · `POST …/whep` (SDP in/out, authenticated proxy to go2rtc) · `GET …/snapshot.jpeg` | ✅ M1 |
+| Recordings | `GET /api/v1/recordings?camera=&from_ts=&to_ts=` · `GET …/summary?camera=&day=` · `GET …/segments/{id}/file` | ✅ M1 |
+| Export | `POST /api/v1/export` → job · `GET /api/v1/export/{id}` · `GET …/download` | ✅ M1 |
 | Events | `GET /api/v1/events?since=&camera=&kind=&q=` (`q` = semantic+FTS, M3) · `GET /api/v1/events/{id}` · media: `…/clip.mp4`, `…/snapshot.webp` · `POST …/feedback {verdict: up|down}` | 📐 M2 |
 | Policies | `GET/PUT /api/v1/policies` · `POST /api/v1/policies/{id}/dry-run` | 📐 M4 |
 | Live events | `WS /api/v1/ws` — subscribes to topic patterns (`event.*`, `system.*`) | 📐 M2 |

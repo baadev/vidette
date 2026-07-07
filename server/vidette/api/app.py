@@ -2,30 +2,38 @@
 
 Honesty rule (docs/project/principles.md): designed-but-unimplemented routes are mounted and
 return `501 {"status": "designed", "milestone": ...}` — the API self-documents the roadmap
-instead of 404-ing or, worse, faking.
+instead of 404-ing or, worse, faking. As of M1, cameras/recordings/streams/export are real;
+events (M2) and policies (M4) remain honest 501s.
 """
 
 from __future__ import annotations
 
 import os
 import platform
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from vidette import __version__
+from vidette.auth.deps import current_principal, require_scope
+from vidette.auth.service import Principal
 from vidette.core.config import validate_config_text
+from vidette.runtime import AppRuntime
 
 _ROADMAP_URL = "https://github.com/baadev/vidette/blob/main/ROADMAP.md"
 
+# Module-level on purpose: with `from __future__ import annotations`, FastAPI resolves the
+# stringified `Annotated[..., Depends(_REQUIRE_READ_CONFIG)]` against module globals —
+# a closure-local here silently degrades the dependency into a query parameter.
+_REQUIRE_READ_CONFIG = require_scope("read:config")
+
 # (path, methods, milestone) — remove entries as milestones ship; tests pin this behavior.
 DESIGNED_ROUTES: tuple[tuple[str, tuple[str, ...], str], ...] = (
-    ("/api/v1/cameras", ("GET",), "M1"),
-    ("/api/v1/streams/{camera}/live", ("GET",), "M1"),
-    ("/api/v1/recordings", ("GET",), "M1"),
-    ("/api/v1/export", ("POST",), "M1"),
     ("/api/v1/events", ("GET",), "M2"),
     ("/api/v1/policies", ("GET", "PUT"), "M4"),
 )
@@ -42,20 +50,32 @@ _FALLBACK_PAGE = f"""<!doctype html>
 </style></head><body><main>
 <h1>VIDE<b>TT</b>E</h1>
 <p>Self-hosted video security that understands intent — not just motion.</p>
-<p>Status: <strong>M0 design preview</strong> (v{__version__}). The web app is served here
-once built; the API is live at <a href="/api/docs">/api/docs</a>.</p>
-<p>Try: <code>GET /healthz</code> · <code>GET /api/v1/system</code> ·
-<code>POST /api/v1/config/validate</code></p>
+<p>The web app is served here once built (set <code>VIDETTE_WEB_DIST</code>); the API is
+live at <a href="/api/docs">/api/docs</a> (v{__version__}).</p>
 <p><a href="https://github.com/baadev/vidette">github.com/baadev/vidette</a></p>
 </main></body></html>"""
 
 
-def create_app() -> FastAPI:
+def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> FastAPI:
+    """`runtime=None` builds from the environment at startup (production path); tests pass
+    a prepared runtime and usually `workers=False`."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        rt = runtime if runtime is not None else AppRuntime.from_environment()
+        app.state.runtime = rt
+        await rt.start(workers=workers)
+        try:
+            yield
+        finally:
+            await rt.stop()
+
     app = FastAPI(
         title="Vidette",
         version=__version__,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
 
     @app.get("/healthz")
@@ -63,12 +83,33 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     @app.get("/api/v1/system")
-    async def system() -> dict[str, object]:
+    async def system(
+        request: Request, principal: Annotated[Principal, Depends(current_principal)]
+    ) -> dict[str, object]:
+        rt: AppRuntime = request.app.state.runtime
+        gateway = await rt.go2rtc.health()
         return {
             "name": "vidette",
             "version": __version__,
-            "milestone": "M0",
+            "milestone": "M1",
             "python": platform.python_version(),
+            "config_warnings": rt.config_warnings,
+            "auth_mode": rt.config.server.auth.mode.value,
+            "gateway": {
+                "reachable": gateway.reachable,
+                "version": gateway.version,
+                "streams": sorted(gateway.streams),
+                "detail": gateway.detail,
+            },
+            "recorders": {
+                camera: {
+                    "state": status.state,
+                    "last_segment_at": status.last_segment_at,
+                    "last_error": status.last_error,
+                    "restarts": status.restarts,
+                }
+                for camera, status in rt.recorder.status().items()
+            },
             "designed_routes": [
                 {"path": path, "milestone": milestone}
                 for path, _methods, milestone in DESIGNED_ROUTES
@@ -77,7 +118,9 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/v1/config/validate")
-    async def config_validate(request: Request) -> Response:
+    async def config_validate(
+        request: Request, principal: Annotated[Principal, Depends(_REQUIRE_READ_CONFIG)]
+    ) -> Response:
         body = await request.body()
         try:
             text = body.decode("utf-8")
@@ -87,8 +130,21 @@ def create_app() -> FastAPI:
                 content={"valid": False, "errors": ["body must be UTF-8 YAML"], "warnings": []},
             )
         report = validate_config_text(text)
-        return JSONResponse(status_code=200 if report.valid else 422,
-                            content=report.model_dump())
+        return JSONResponse(
+            status_code=200 if report.valid else 422, content=report.model_dump()
+        )
+
+    from vidette.api.routers.auth import router as auth_router
+    from vidette.api.routers.cameras import router as cameras_router
+    from vidette.api.routers.recordings import router as recordings_router
+    from vidette.api.routers.streams import router as streams_router
+    from vidette.api.routers.system import router as system_router
+
+    app.include_router(auth_router)
+    app.include_router(cameras_router)
+    app.include_router(recordings_router)
+    app.include_router(streams_router)
+    app.include_router(system_router)
 
     def _register_designed(path: str, methods: tuple[str, ...], milestone: str) -> None:
         async def designed() -> JSONResponse:
@@ -97,8 +153,14 @@ def create_app() -> FastAPI:
                 content={"status": "designed", "milestone": milestone, "docs": _ROADMAP_URL},
             )
 
-        app.add_api_route(path, designed, methods=list(methods), include_in_schema=True,
-                          name=f"designed:{path}", tags=["designed"])
+        app.add_api_route(
+            path,
+            designed,
+            methods=list(methods),
+            include_in_schema=True,
+            name=f"designed:{path}",
+            tags=["designed"],
+        )
 
     for route_path, route_methods, route_milestone in DESIGNED_ROUTES:
         _register_designed(route_path, route_methods, route_milestone)
@@ -107,6 +169,7 @@ def create_app() -> FastAPI:
     if web_dist.is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
     else:
+
         @app.get("/", include_in_schema=False)
         async def index() -> HTMLResponse:
             return HTMLResponse(_FALLBACK_PAGE)

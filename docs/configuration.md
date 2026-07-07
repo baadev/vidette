@@ -171,6 +171,19 @@ integrations:
     discovery: true               # Home Assistant MQTT discovery
 ```
 
+## Environment variables
+
+Deployment-level knobs live in the environment, not the YAML (they describe *where things
+run*, not *what to do*):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VIDETTE_CONFIG` | `/config/vidette.yaml` | config file path (missing file → wizard mode) |
+| `VIDETTE_GO2RTC_URL` | `http://go2rtc:1984` | gateway admin API (compose-internal) |
+| `VIDETTE_GO2RTC_RTSP` | `rtsp://go2rtc:8554` | gateway restream base the recorder reads from |
+| `VIDETTE_GO2RTC_CONF` | next to the database | where the generated go2rtc config is written |
+| `VIDETTE_WEB_DIST` | `/app/web-dist` | built web app directory |
+
 ## `telemetry`
 
 ```yaml

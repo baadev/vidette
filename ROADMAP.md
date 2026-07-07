@@ -37,7 +37,7 @@ CI is green; the compose stack starts and validates a real config.
 | Web app shell (dark, fast, honest status page) | ✅ |
 | Compose stack (vidette + go2rtc, optional ollama profile) | ✅ |
 | CI (ruff, mypy strict, pytest; web typecheck + build) | ✅ |
-| Architecture RFC issue open for community review | 🚧 (opens with the repo) |
+| Architecture RFC issue open for community review | ✅ ([#1](https://github.com/baadev/vidette/issues/1)) |
 
 ## M1 — Watch
 
@@ -46,18 +46,23 @@ if we lose frames, nothing else matters.
 
 **Done when (budgets):** 4×1080p cameras on an Intel N100: < 25 % CPU total, live view p50
 latency < 1 s (WebRTC), zero dropped segments over 7 days, cold start → first live frame < 3 s.
+*The budgets are not yet measured — M1 stays open until they are published.*
 
 | Item | Status |
 |---|---|
-| go2rtc lifecycle management (config generation, health, restarts) | 📐 |
-| RTSP/ONVIF adapters (manual URL + ONVIF discovery) | 📐 |
-| Codec-copy recorder → fMP4 segments + SQLite index | 📐 |
-| Retention classes (continuous/motion/events/favorites) + watermark cleanup | 📐 |
-| Live wall: all cameras, one screen, sub-second, keyboard-first | 📐 |
-| Timeline: scrub-strip previews, day/hour zoom, gap rendering | 📐 |
-| Range export: remuxed MP4 (no re-encode) via UI + API | 📐 |
-| First-run wizard: create admin, add first camera, verify stream | 📐 |
-| Disk health: free-space watermarks, write probes, loud failure events | 📐 |
+| go2rtc lifecycle management (config generation, hot reload, health) | ✅ |
+| RTSP adapter (manual URLs, main+sub) | ✅ |
+| ONVIF adapter (discovery, profiles) | 📐 |
+| Codec-copy recorder → fMP4 segments + SQLite index (watchdog, backoff, hour-rollover safe) | ✅ |
+| Retention classes (continuous/motion/events/favorites) + watermark cleanup runtime | ✅ |
+| Auth: first-run admin bootstrap, sessions, scoped API tokens | ✅ |
+| Live wall: WebRTC via authenticated WHEP proxy, snapshot fallback, keyboard-first | ✅ |
+| Timeline: hour strip + segment playback + gap rendering | ✅ |
+| Timeline scrub-strip previews (fast visual scrubbing) | 📐 |
+| Range export: remuxed MP4 (no re-encode) via UI + API | ✅ |
+| First-run wizard: add-camera + stream-verification steps (admin step ✅) | 🚧 |
+| Disk health: free-space watermarks, write probes, loud failure events | ✅ |
+| Reference-budget benchmark run + published numbers | 🚧 |
 
 ## M2 — Detect
 
@@ -134,21 +139,21 @@ The complete list of key functionality and its implementation state.
 ### Ingest & cameras
 | Capability | Status | Milestone |
 |---|---|---|
-| Manual RTSP sources (main/sub streams) | 📐 | M1 |
+| Manual RTSP sources (main/sub streams) | ✅ | M1 |
 | ONVIF discovery, profiles, PTZ | 📐 | M1–M2 |
-| Adapter SDK (typed protocol, entry points, sidecar bridges) | ✅ interfaces / 📐 runtime | M0/M2 |
+| Adapter SDK (typed protocol, entry points, sidecar bridges) | ✅ interfaces / 📐 3rd-party runtime | M0/M2 |
 | Eufy via eufy-security-ws (live, events, station clip pull) | 📐 | M2–M3 |
 | Two-way audio | 🔭 | M5 |
 
 ### Recording & storage
 | Capability | Status | Milestone |
 |---|---|---|
-| Codec-copy fMP4 segment recorder | 📐 | M1 |
-| Retention classes + watermark cleanup (pure planner implemented & tested) | ✅ logic / 📐 runtime | M0/M1 |
+| Codec-copy fMP4 segment recorder + SQLite index | ✅ | M1 |
+| Retention classes + watermark cleanup (planner + runtime, tested) | ✅ | M1 |
 | Scrub-strip previews for fast timelines | 📐 | M1 |
 | Archive compaction (HEVC/AV1) | 📐 | M3 |
 | Off-site event backup (S3-compatible) | 📐 | M3 |
-| Disk health monitoring | 📐 | M1 |
+| Disk health monitoring (watermarks, write probes, loud events) | ✅ | M1 |
 
 ### Understanding
 | Capability | Status | Milestone |
@@ -166,10 +171,11 @@ The complete list of key functionality and its implementation state.
 ### Review & UX
 | Capability | Status | Milestone |
 |---|---|---|
-| Live wall (all cameras, WebRTC sub-second) | 📐 | M1 |
-| Timeline scrubbing + range export | 📐 | M1 |
+| Live wall (all cameras, WebRTC via authed WHEP proxy, keyboard-first) | ✅ | M1 |
+| Timeline (hour strip, segment playback) + range export | ✅ | M1 |
+| Scrub-strip preview scrubbing | 📐 | M1 |
 | Event feed with clips, favorites, feedback | 📐 | M2 |
-| First-run wizard (< 5 minutes to first camera) | 📐 | M1 |
+| First-run wizard (admin ✅; add-camera + verify steps 🚧) | 🚧 | M1 |
 | PWA + web push | 📐 | M2/M5 |
 
 ### Outputs & integrations
@@ -178,15 +184,17 @@ The complete list of key functionality and its implementation state.
 | Signed webhooks (HMAC implemented & tested) | ✅ signing / 📐 delivery | M0/M2 |
 | Apprise channels (Telegram, Discord, …) | 📐 | M2 |
 | MQTT + Home Assistant discovery | 📐 | M2 |
-| REST + WebSocket API (OpenAPI) | ✅ skeleton / 📐 M1–M2 surface | M0+ |
+| REST API: auth, cameras, recordings, streams (WHEP/snapshot), export, system events | ✅ | M1 |
+| WebSocket event stream | 📐 | M2 |
 | Prometheus metrics | 📐 | M2 |
 
 ### Operations & security
 | Capability | Status | Milestone |
 |---|---|---|
 | Config schema + validation (CLI, API) | ✅ | M0 |
-| Single-container deploy + go2rtc sidecar compose | ✅ shell | M0 |
-| Forced admin bootstrap, session + scoped API tokens | 📐 | M1 |
+| Single-container deploy + go2rtc sidecar compose | ✅ | M0/M1 |
+| Forced admin bootstrap, session + scoped API tokens | ✅ | M1 |
+| Published container images (ghcr) | 🚧 | M1 release |
 | Zero telemetry by default | ✅ (policy & code) | M0 |
 | SBOM + signed releases | 🔭 | M5 |
 

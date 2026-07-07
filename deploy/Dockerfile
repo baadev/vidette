@@ -11,7 +11,11 @@ RUN npm run build
 # --- runtime ---------------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
 
-RUN useradd --system --uid 1000 --create-home vidette \
+# ffmpeg: segment recording + range export (codec-copy only — no transcoding at runtime)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 1000 --create-home vidette \
     && mkdir -p /config /media/vidette \
     && chown -R vidette:vidette /config /media/vidette
 
