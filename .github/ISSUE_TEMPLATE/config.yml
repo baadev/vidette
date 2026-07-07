@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/baadev/vidette/blob/main/SECURITY.md
+    about: Please do NOT open a public issue — see the reporting instructions.
+  - name: Email the maintainer
+    url: mailto:alex@baadev.com
+    about: Design feedback, partnerships, anything that doesn't fit an issue.

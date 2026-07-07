@@ -1,0 +1,21 @@
+# go2rtc configuration — M0/M1 transitional.
+# From M1, Vidette generates this file from your `cameras:` section automatically;
+# until then you can point go2rtc at your streams manually and use its UI on the
+# compose network (port 1984, deliberately unpublished).
+#
+# Reference: https://github.com/AlexxIT/go2rtc
+
+streams:
+  # front-door:
+  #   - rtsp://cam:PASSWORD@10.0.20.11:554/stream1
+  # front-door-sub:
+  #   - rtsp://cam:PASSWORD@10.0.20.11:554/stream2
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"

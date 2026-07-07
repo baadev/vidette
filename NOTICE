@@ -1,0 +1,9 @@
+Vidette
+Copyright 2026 Alexander Belov and Vidette contributors
+
+This product includes software developed as part of the Vidette project
+(https://github.com/baadev/vidette).
+
+Vidette integrates with, but does not redistribute, third-party projects
+including go2rtc, FFmpeg, ONNX Runtime, Apprise, SQLite and the
+eufy-security-client ecosystem. Their licenses apply to their artifacts.

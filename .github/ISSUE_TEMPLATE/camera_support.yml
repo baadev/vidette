@@ -1,0 +1,40 @@
+name: Camera support request
+description: Ask for an ecosystem/model — these requests order the adapter backlog
+labels: [camera-support]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the demand map: adapters get built in the order people show up here.
+        Even partial protocol notes move your ecosystem up the list.
+        **Redact all passwords/tokens.**
+  - type: input
+    id: brand_model
+    attributes:
+      label: Brand and model
+      placeholder: e.g. Eufy eufyCam 3 (T8160) + HomeBase 3
+    validations:
+      required: true
+  - type: dropdown
+    id: connectivity
+    attributes:
+      label: What does it speak, as far as you know?
+      multiple: true
+      options:
+        - RTSP (confirmed working)
+        - ONVIF
+        - vendor cloud/P2P only
+        - existing community bridge (name it below)
+        - no idea — that's fine
+  - type: textarea
+    id: notes
+    attributes:
+      label: Protocol notes / stream URLs / bridge links (secrets redacted)
+      description: RTSP URL patterns, ONVIF quirks, community projects you know of.
+  - type: dropdown
+    id: testing
+    attributes:
+      label: Could you test an adapter preview against your hardware?
+      options: ["yes", "maybe", "no"]
+    validations:
+      required: true

@@ -1,0 +1,48 @@
+name: Bug report
+description: Something behaves wrong (docs confusion counts as a bug too)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks — bug reports at this stage are unusually valuable. **Never paste credentials
+        or camera URLs with passwords**; replace secrets with `***`.
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: v0.0.1 / main @ abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: Deployment
+      options: [docker compose, docker (manual), source checkout, other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened vs. what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config (secrets redacted)
+      render: yaml
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (`docker compose logs vidette`)
+      render: shell

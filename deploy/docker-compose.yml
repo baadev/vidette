@@ -1,0 +1,60 @@
+# Vidette stack: app + go2rtc stream gateway (+ optional local VLM via `--profile vlm`).
+# Quickstart: docker compose -f deploy/docker-compose.yml up -d --build  →  http://localhost:8642
+
+name: vidette
+
+services:
+  vidette:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # image: ghcr.io/baadev/vidette:latest   # published images arrive with M1
+    restart: unless-stopped
+    ports:
+      - "8642:8642"
+    volumes:
+      - ../config:/config
+      - vidette-media:/media/vidette
+    environment:
+      - TZ=${TZ:-UTC}
+      # Secrets referenced from config/vidette.yaml as ${VAR} live here or in an .env file:
+      # - CAM_PASSWORD=
+      # - VIDETTE_WEBHOOK_SECRET=
+    depends_on:
+      - go2rtc
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8642/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  go2rtc:
+    image: alexxit/go2rtc:1.9
+    restart: unless-stopped
+    volumes:
+      - ./go2rtc.example.yaml:/config/go2rtc.yaml   # M1: vidette generates this from cameras:
+    ports:
+      - "8554:8554"          # RTSP restream (LAN only)
+      - "8555:8555/tcp"      # WebRTC
+      - "8555:8555/udp"
+    # go2rtc admin API (1984) is deliberately NOT published — compose network only.
+
+  # Optional local VLM for Tier 3 (M3):  docker compose --profile vlm up -d
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [vlm]
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    # NVIDIA GPU: uncomment
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  vidette-media:
+  ollama:

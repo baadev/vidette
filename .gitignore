@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Node / web
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Maintainer-local documents (growth strategy, brand book) — never published
+internal/
+
+# Runtime data — never commit footage, databases or secrets
+config/
+media/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
