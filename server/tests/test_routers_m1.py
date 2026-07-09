@@ -431,6 +431,7 @@ def test_stream_info_urls(harness: Harness) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "webrtc": "/api/v1/streams/front-door/whep",
+        "mse": "/api/v1/streams/front-door/mse",
         "snapshot": "/api/v1/streams/front-door/snapshot.jpeg",
     }
 

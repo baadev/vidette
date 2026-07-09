@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, snapshotUrl, type Camera } from "../api";
-import { WhepPlayer, type PlayerState } from "../player";
+import { acquireLivePlayer, releaseLivePlayer, type PlayerState } from "../player";
 import "./pages.css";
 
 /** Snapshot refresh cadence while a tile is in snapshot-fallback mode. */
@@ -16,27 +16,50 @@ type TileProps = {
 };
 
 /**
- * One camera tile: a WHEP-driven `<video>` that falls back to a periodically
- * refreshed snapshot `<img>` (with a retry button) when live view fails.
+ * One camera tile. The `<video>` element and its player come from the keep-alive pool
+ * ({@link acquireLivePlayer}): navigating away parks the connected player for a minute,
+ * so coming back re-attaches instantly instead of renegotiating. Transport order is
+ * WebRTC → MSE → refreshing snapshots (with a retry button).
  */
 function CameraTile({ camera, index, focused }: TileProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const mediaRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<PlayerState>("connecting");
+  const [transport, setTransport] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [snapTick, setSnapTick] = useState(() => Date.now());
+  const stateRef = useRef<PlayerState>("connecting");
 
-  // (Re)start the player when the camera changes or the user retries.
+  // Attach a pooled (possibly already-live) player; park it again on unmount.
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    setState("connecting");
-    const player = new WhepPlayer(video, camera.id);
-    player.onstate = setState;
-    void player.start();
+    const container = mediaRef.current;
+    if (!container) return;
+    const { player, video } = acquireLivePlayer(camera.id);
+    container.prepend(video);
+    const apply = (s: PlayerState): void => {
+      stateRef.current = s;
+      setState(s);
+      setTransport(player.transport);
+    };
+    player.onstate = apply;
+    apply(player.state);
+    player.start();
     return () => {
-      player.stop();
+      player.onstate = undefined;
+      video.remove();
+      if (stateRef.current === "failed") {
+        // Don't park a dead player — the next mount (or Retry) starts fresh.
+        player.stop();
+      } else {
+        releaseLivePlayer(camera.id, player, video);
+      }
     };
   }, [camera.id, attempt]);
+
+  // The pooled <video> is a raw element — mirror the failed state onto it by hand.
+  useEffect(() => {
+    const video = mediaRef.current?.querySelector("video");
+    video?.classList.toggle("live-hidden", state === "failed");
+  }, [state]);
 
   // While failed, refresh the snapshot every couple of seconds.
   useEffect(() => {
@@ -49,14 +72,7 @@ function CameraTile({ camera, index, focused }: TileProps) {
   const failed = state === "failed";
   return (
     <figure className={`live-tile${focused ? " live-tile-focused" : ""}`}>
-      <div className="live-media">
-        <video
-          ref={videoRef}
-          muted
-          autoPlay
-          playsInline
-          className={failed ? "live-hidden" : undefined}
-        />
+      <div className="live-media" ref={mediaRef}>
         {failed && (
           <img
             src={`${snapshotUrl(camera.id)}?t=${snapTick}`}
@@ -68,7 +84,12 @@ function CameraTile({ camera, index, focused }: TileProps) {
       <figcaption className="live-caption">
         {index < 9 && <kbd className="live-key">{index + 1}</kbd>}
         <span className="live-name">{camera.name}</span>
-        <span className={`live-state live-state-${state}`}>{state === "live" ? "live" : state}</span>
+        <span
+          className={`live-state live-state-${state}`}
+          title={transport ? `transport: ${transport}` : undefined}
+        >
+          {state === "live" ? `live · ${transport ?? "…"}` : state}
+        </span>
       </figcaption>
       {failed && (
         <div className="live-fallback">

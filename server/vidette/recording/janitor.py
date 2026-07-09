@@ -192,6 +192,7 @@ class Janitor:
         # 4) Housekeeping.
         await self._db.purge_expired_sessions(now)
         await self._exporter.cleanup_old()
+        await self._db.checkpoint()  # keep the main DB file real (WAL → db, TRUNCATE)
 
         self._media_bytes = await self._db.media_bytes_total()
         self._last_run_at = now

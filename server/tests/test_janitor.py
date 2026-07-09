@@ -32,6 +32,7 @@ class FakeDb:
         self.rows: list[SegmentRow] = []
         self.system_events: list[tuple[str, dict[str, Any]]] = []
         self.purge_calls: list[float] = []
+        self.checkpoint_calls = 0
 
     async def all_segments(self) -> list[SegmentRow]:
         return list(self.rows)
@@ -49,6 +50,9 @@ class FakeDb:
     async def purge_expired_sessions(self, now: float) -> int:
         self.purge_calls.append(now)
         return 0
+
+    async def checkpoint(self) -> None:
+        self.checkpoint_calls += 1
 
     async def media_bytes_total(self) -> int:
         return sum(row.size_bytes for row in self.rows)

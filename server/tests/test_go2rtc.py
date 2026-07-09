@@ -358,3 +358,27 @@ async def test_restream_url_unknown_camera(test_config: VidetteConfig) -> None:
     with pytest.raises(GatewayError, match="unknown camera 'nope'"):
         manager.restream_url("nope")
     await manager.close()
+
+
+async def test_build_config_advertises_webrtc_candidates(test_config: VidetteConfig) -> None:
+    """Containerized go2rtc only knows bridge/STUN addresses — the operator's LAN
+    candidates must reach the generated config so browsers get a reachable ICE path."""
+    manager = Go2rtcManager(test_config, webrtc_candidates=["192.168.10.20:8555"])
+    built = await manager.build_config()
+    await manager.close()
+    assert built["webrtc"] == {"listen": ":8555", "candidates": ["192.168.10.20:8555"]}
+
+    plain = make_manager(test_config)
+    built_plain = await plain.build_config()
+    await plain.close()
+    assert built_plain["webrtc"] == {"listen": ":8555"}  # no empty candidates key
+
+
+async def test_mse_ws_url(test_config: VidetteConfig) -> None:
+    manager = Go2rtcManager(test_config, api_url="http://gateway:1984")
+    try:
+        assert manager.mse_ws_url("front-door") == "ws://gateway:1984/api/ws?src=front-door"
+        with pytest.raises(GatewayError, match="unknown camera"):
+            manager.mse_ws_url("ghost")
+    finally:
+        await manager.close()

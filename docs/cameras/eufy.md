@@ -63,11 +63,12 @@ verified reports replace "commonly reported" rows.
 
 ## Reality checks
 
-- **Battery cameras.** RTSP is a continuous protocol; a battery camera either sleeps (stream
-  drops, recorder reconnect-loops) or streams and eats its battery. Mains-powered and
-  solar-supported models are the realistic candidates for continuous recording. For
-  sleepy battery models, `record.mode: motion` (M2) will reduce the pain but cannot change
-  the physics.
+- **Battery cameras.** RTSP is a continuous protocol; a battery camera either sleeps (the
+  stream drops) or streams and eats its battery. Vidette handles the sleep honestly: after
+  repeated silent connections it backs off up to 5 minutes (instead of keeping the camera
+  awake), the camera card says it is probably sleeping, and recording resumes automatically
+  when the camera answers — e.g. after its own motion wake. Mains-powered and solar-topped
+  models are the realistic candidates for true continuous recording.
 - **Resolution caps.** Some models cap the RTSP stream below the sensor's native recording
   resolution. What `ffprobe` shows is what you get.
 - **No vendor events.** The RTSP path carries video only — doorbell presses and Eufy's

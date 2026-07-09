@@ -48,9 +48,17 @@ RecorderState = Literal["idle", "starting", "recording", "backoff", "stopped"]
 SystemEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 _BACKOFF_MAX_S = 60.0
+# Stalls back off much further than crashes: a stall streak usually means a battery camera
+# is asleep (field case: Eufy S3 Pro over NAS-RTSP). Hammering it every ~45 s kept the
+# camera awake, drained its battery, and leaked one orphaned gateway session per attempt.
+_STALL_BACKOFF_MAX_S = 300.0
 _READ_TICK_S = 5.0
 _STDERR_TAIL_LINES = 20
-_EXIT_EVENT_EVERY = 5  # emit recorder.exited on the 1st failure, then every 5th
+_EXIT_EVENT_EVERY = 5  # emit recorder.exited/.stalled on the 1st failure, then every 5th
+_SLEEPY_HINT = (
+    "if this is a battery camera it is probably sleeping — retries continue with growing "
+    "backoff (up to 5 min); recording resumes automatically when the camera answers"
+)
 
 
 @dataclass
@@ -76,6 +84,7 @@ class CameraRecorder:
         stall_after_s: float = 45.0,
         input_args: tuple[str, ...] = ("-rtsp_transport", "tcp"),
         initial_backoff_s: float = 1.0,  # test seam: keeps failure tests fast
+        read_tick_s: float = _READ_TICK_S,  # test seam: stall tests need sub-second ticks
     ) -> None:
         self.camera_id = camera_id
         self.camera = camera
@@ -87,6 +96,7 @@ class CameraRecorder:
         self._stall_after_s = stall_after_s
         self._input_args = input_args
         self._initial_backoff_s = initial_backoff_s
+        self._read_tick_s = read_tick_s
 
         self._state: RecorderState = "idle"
         self._last_segment_at: float | None = None
@@ -222,7 +232,9 @@ class CameraRecorder:
             assert proc.stdout is not None  # PIPE requested above
             while True:
                 try:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=_READ_TICK_S)
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=self._read_tick_s
+                    )
                 except TimeoutError:
                     if self._stopping.is_set():
                         break
@@ -230,10 +242,20 @@ class CameraRecorder:
                         self._ensure_hour_dirs()  # survive hour rollovers
                     if time.monotonic() - last_activity > self._stall_after_s:
                         stalled = True
-                        await self._emit(
-                            "recorder.stalled",
-                            {"camera": self.camera_id, "stall_after_s": self._stall_after_s},
-                        )
+                        # Rate-limited like recorder.exited — a sleeping battery camera
+                        # stalls every cycle and must not flood the event log/webhooks.
+                        if (
+                            consecutive_failures == 0
+                            or (consecutive_failures + 1) % _EXIT_EVENT_EVERY == 0
+                        ):
+                            await self._emit(
+                                "recorder.stalled",
+                                {
+                                    "camera": self.camera_id,
+                                    "stall_after_s": self._stall_after_s,
+                                    "consecutive_failures": consecutive_failures + 1,
+                                },
+                            )
                         break
                     continue
                 if not line:
@@ -278,6 +300,8 @@ class CameraRecorder:
                 if stalled
                 else f"ffmpeg exited with code {returncode}"
             )
+            if stalled and consecutive_failures >= 2:
+                reason += f" — {_SLEEPY_HINT}"
             self._last_error = reason + (f" — {tail[-300:]}" if tail else "")
             if consecutive_failures == 1 or consecutive_failures % _EXIT_EVENT_EVERY == 0:
                 await self._emit(
@@ -293,7 +317,8 @@ class CameraRecorder:
             self._state = "backoff"
             if await self._backoff_wait(backoff):
                 break
-            backoff = min(_BACKOFF_MAX_S, backoff * 2)
+            cap = _STALL_BACKOFF_MAX_S if stalled else _BACKOFF_MAX_S
+            backoff = min(cap, backoff * 2)
 
         self._state = "stopped"
 

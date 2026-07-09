@@ -18,12 +18,35 @@ from __future__ import annotations
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, WebSocket
 
 from vidette.auth.service import ANONYMOUS_ADMIN, AuthService, Principal
 from vidette.core.config import AuthMode
 
 SESSION_COOKIE = "vidette_session"
+
+
+async def ws_principal(websocket: WebSocket) -> Principal | None:
+    """Handshake-time authentication for WebSocket routes (mirrors `current_principal`).
+
+    Returns None instead of raising so endpoints can reject with a close frame before
+    accepting. An explicit bearer attempt never falls back to cookies — same rule as the
+    HTTP dependency.
+    """
+    runtime = websocket.app.state.runtime
+    if runtime.config.server.auth.mode is AuthMode.none:
+        return ANONYMOUS_ADMIN
+    auth: AuthService = runtime.auth
+    header = websocket.headers.get("Authorization")
+    if header is not None:
+        scheme, _, credentials = header.partition(" ")
+        token = credentials.strip()
+        if scheme.lower() == "bearer" and token:
+            return await auth.authenticate_bearer(token)
+    session_token = websocket.cookies.get(SESSION_COOKIE)
+    if session_token:
+        return await auth.authenticate_session(session_token)
+    return None
 
 
 def _unauthorized() -> HTTPException:

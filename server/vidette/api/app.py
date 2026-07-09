@@ -153,6 +153,7 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
     from vidette.api.routers.push import router as push_router
     from vidette.api.routers.recordings import router as recordings_router
     from vidette.api.routers.streams import router as streams_router
+    from vidette.api.routers.streams import ws_router as streams_ws_router
     from vidette.api.routers.system import router as system_router
     from vidette.api.routers.ws import router as ws_router
 
@@ -164,6 +165,7 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
     app.include_router(push_router)
     app.include_router(recordings_router)
     app.include_router(streams_router)
+    app.include_router(streams_ws_router)
     app.include_router(system_router)
     app.include_router(ws_router)
 

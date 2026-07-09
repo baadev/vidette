@@ -14,6 +14,7 @@ against (auth, recorder, janitor, API routers). Implementation notes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sqlite3
@@ -252,7 +253,11 @@ class Database:
         try:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA synchronous=NORMAL")
+            # FULL (not NORMAL): fsync the WAL on every commit. NORMAL leaves commits in the
+            # OS page cache until a checkpoint — a hard VM kill (observed: macOS sleep
+            # terminating Docker Desktop's VM) silently discarded them, including the admin
+            # account. Our write rate (~1 commit/10 s per camera) makes the fsync cost noise.
+            await conn.execute("PRAGMA synchronous=FULL")
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.execute("PRAGMA busy_timeout=5000")
             await self._migrate(conn)
@@ -283,9 +288,23 @@ class Database:
             )
             await conn.commit()
 
+    async def checkpoint(self) -> None:
+        """Move WAL contents into the main DB file (TRUNCATE mode).
+
+        With synchronous=FULL every commit is already crash-durable in the WAL; the
+        checkpoint keeps the main file real (a 4 KB .db beside an ever-growing WAL is
+        fragile against accidental WAL deletion and confuses backups). The janitor calls
+        this every tick; close() calls it on clean shutdown.
+        """
+        async with self._write_lock:
+            with contextlib.suppress(sqlite3.OperationalError):
+                await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     async def close(self) -> None:
         if self._conn is None:
             return
+        with contextlib.suppress(Exception):
+            await self.checkpoint()
         conn, self._conn = self._conn, None
         await conn.close()
 

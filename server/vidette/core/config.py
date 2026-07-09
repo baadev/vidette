@@ -97,6 +97,11 @@ class ServerConfig(StrictModel):
     port: int = Field(default=8642, ge=1, le=65535)
     base_url: str | None = None
     auth: AuthConfig = AuthConfig()
+    # ICE candidates advertised by the WebRTC gateway, e.g. ["192.168.10.20:8555"].
+    # Inside a container go2rtc only knows its bridge/STUN addresses, which LAN browsers
+    # cannot reach — set your host's LAN IP here (or VIDETTE_WEBRTC_CANDIDATES) for direct
+    # WebRTC. Live view works without it: the player falls back to MSE over WebSocket.
+    webrtc_candidates: list[str] = Field(default_factory=list)
 
 
 class Retention(StrictModel):

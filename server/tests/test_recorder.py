@@ -264,3 +264,82 @@ async def test_supervisor_reports_missing_ffmpeg(
     assert all(entry.state == "idle" for entry in status.values())
     assert any(kind == "recorder.ffmpeg_missing" for kind, _ in db.events)
     assert all("ffmpeg" in (entry.last_error or "") for entry in status.values())
+
+
+async def test_sleeping_camera_stall_streak_backs_off_and_rate_limits(
+    tmp_path: Path, media_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A battery camera that answers the connection but never sends data (Eufy S3 Pro
+    asleep — field incident) must not be hammered forever: recorder.stalled is emitted
+    1st + every 5th, backoff grows past the crash cap toward the 5-minute stall cap, and
+    the status hints at a sleeping camera."""
+
+    class SilentProc:
+        """Stays alive, never produces stdout — the shape of a sleeping camera."""
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+
+        def terminate(self) -> None:
+            if self.returncode is None:
+                self.returncode = -15
+                self.stdout.feed_eof()
+
+        def kill(self) -> None:
+            self.terminate()
+
+        async def wait(self) -> int:
+            while self.returncode is None:
+                await asyncio.sleep(0.005)
+            return self.returncode
+
+    async def fake_exec(*args: object, **kwargs: object) -> SilentProc:
+        return SilentProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    backoffs: list[float] = []
+
+    async def on_event(kind: str, payload: dict[str, Any]) -> None:
+        events.append((kind, payload))
+
+    async def on_segment(camera: str, notice: SegmentNotice) -> None:  # pragma: no cover
+        raise AssertionError("a silent camera must never produce segments")
+
+    recorder = CameraRecorder(
+        "porch",
+        _camera(),
+        source_url="rtsp://gateway/porch",
+        media_dir=media_dir,
+        on_segment=on_segment,
+        on_event=on_event,
+        stall_after_s=0.05,
+        read_tick_s=0.02,
+        initial_backoff_s=1.0,  # doubling reaches the 300 s cap within ~10 cycles
+    )
+    real_wait = recorder._backoff_wait
+
+    async def spying_wait(seconds: float) -> bool:
+        backoffs.append(seconds)
+        return await real_wait(min(seconds, 0.001))  # record real values, sleep fast
+
+    monkeypatch.setattr(recorder, "_backoff_wait", spying_wait)
+
+    await recorder.start()
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if len(backoffs) >= 12:
+            break
+    status = recorder.status()
+    await recorder.stop()
+
+    stalled_events = [p for k, p in events if k == "recorder.stalled"]
+    # Rate-limited: streak failures 1, 5, 10 → not one event per cycle.
+    assert [p["consecutive_failures"] for p in stalled_events][:3] == [1, 5, 10]
+    # Backoff kept doubling past the 60 s crash cap and settled at the 300 s stall cap.
+    assert max(backoffs) == 300.0
+    assert status.last_error is not None and "sleeping" in status.last_error

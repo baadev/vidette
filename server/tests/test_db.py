@@ -282,3 +282,42 @@ async def test_system_events_order_limit_since(tmp_path: Path) -> None:
         assert await database.recent_system_events(since=103.0) == []
     finally:
         await database.close()
+
+
+async def test_durability_pragmas_and_checkpoint(tmp_path: Path) -> None:
+    """Commits must be crash-durable (synchronous=FULL) and the checkpoint must move WAL
+    contents into the main file — a 4 KB .db beside a giant WAL is what lost the admin
+    account when a VM hard-kill discarded unsynced WAL pages (field incident, 2026-07-09)."""
+    database = Database(tmp_path / "durable.db")
+    await database.connect()
+    try:
+        async with database._db.execute("PRAGMA synchronous") as cur:
+            row = await cur.fetchone()
+        assert row is not None and int(row[0]) == 2  # 2 == FULL
+
+        await database.create_user("admin", "hash", role="admin")
+        await database.checkpoint()
+
+        wal = tmp_path / "durable.db-wal"
+        assert (tmp_path / "durable.db").stat().st_size > 4096  # data lives in the main file
+        assert not wal.exists() or wal.stat().st_size == 0  # TRUNCATE emptied the WAL
+    finally:
+        await database.close()
+
+
+async def test_close_checkpoints_the_wal(tmp_path: Path) -> None:
+    database = Database(tmp_path / "closer.db")
+    await database.connect()
+    await database.create_user("admin", "hash", role="admin")
+    await database.close()
+
+    wal = tmp_path / "closer.db-wal"
+    assert not wal.exists() or wal.stat().st_size == 0
+
+    # And the user is readable by a fresh connection with no WAL present.
+    reopened = Database(tmp_path / "closer.db")
+    await reopened.connect()
+    try:
+        assert await reopened.count_users() == 1
+    finally:
+        await reopened.close()

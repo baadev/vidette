@@ -83,11 +83,18 @@ class AppRuntime:
             if gateway_conf_env
             else config.storage.database.parent / "go2rtc.yaml"
         )
+        candidates_env = os.environ.get("VIDETTE_WEBRTC_CANDIDATES", "")
+        webrtc_candidates = (
+            [c.strip() for c in candidates_env.split(",") if c.strip()]
+            if candidates_env
+            else config.server.webrtc_candidates
+        )
         self.go2rtc = Go2rtcManager(
             config,
             api_url=os.environ.get("VIDETTE_GO2RTC_URL", DEFAULT_API_URL),
             rtsp_base=os.environ.get("VIDETTE_GO2RTC_RTSP", DEFAULT_RTSP_BASE),
             config_path=gateway_conf,
+            webrtc_candidates=webrtc_candidates,
         )
         self.recorder = RecorderSupervisor(
             config, self.db, self.go2rtc, media_dir=config.storage.media_dir

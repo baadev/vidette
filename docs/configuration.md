@@ -33,6 +33,9 @@ server:
   base_url: null          # public URL used in notification links, e.g. https://vidette.example.com
   auth:
     mode: builtin         # builtin | none  (none = kiosk LANs only; loud permanent warning)
+  webrtc_candidates: []   # e.g. ["192.168.1.20:8555"] — your host's LAN address for direct
+                          # (sub-second) WebRTC. Optional: without it, live view falls back
+                          # to MSE over WebSocket automatically. Env: VIDETTE_WEBRTC_CANDIDATES
 ```
 
 No credentials live here: the first run forces admin creation

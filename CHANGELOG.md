@@ -6,6 +6,32 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-09
+
+Field fixes from the first real battery-camera deployment (Eufy S3 Pro over NAS-RTSP).
+
+### Fixed
+- **Data loss on hard VM kill:** SQLite now runs `synchronous=FULL` in WAL mode (every
+  commit fsynced) and the WAL is checkpointed each janitor tick and on shutdown. Before:
+  commits lived only in an unsynced WAL — macOS sleep hard-killing Docker Desktop's VM
+  discarded them, including the admin account (hence the re-appearing setup wizard).
+- **Sleeping-camera hammering:** a camera that stalls repeatedly (battery model asleep) now
+  backs off up to 5 minutes instead of reconnecting every ~45 s — which kept the camera
+  awake, drained its battery, leaked one orphaned gateway session per cycle (40 in
+  10 minutes observed), and spammed `recorder.stalled` events (now rate-limited). Status
+  text says the camera is probably sleeping and that recording resumes automatically.
+- **Live view in containers:** WebRTC's SDP answer only carried STUN-discovered public-IP
+  candidates with ephemeral ports — unreachable from a LAN browser, so tiles fell back to
+  snapshots. Two-part fix: an **MSE transport** (fMP4 over an authenticated same-origin
+  WebSocket, relayed to go2rtc — works in every topology) as automatic fallback, and a
+  `server.webrtc_candidates` / `VIDETTE_WEBRTC_CANDIDATES` setting to advertise a LAN
+  address for direct sub-second WebRTC.
+
+### Added
+- Player keep-alive pool: navigating away parks the connected stream for 60 s, so
+  returning to Live re-attaches instantly instead of renegotiating.
+- Tile status now names the transport (`live · webrtc` / `live · mse`).
+
 ## [0.1.0] — 2026-07-09
 
 First tagged release: Watch (M1) + Detect (M2) complete, published as a multi-arch container

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -79,6 +80,7 @@ class Go2rtcManager:
         api_url: str = DEFAULT_API_URL,
         rtsp_base: str = DEFAULT_RTSP_BASE,
         config_path: Path | None = None,
+        webrtc_candidates: Sequence[str] = (),
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         """`transport` is a keyword-only test seam (httpx.MockTransport); never set in prod."""
@@ -86,8 +88,17 @@ class Go2rtcManager:
         self.api_url = api_url.rstrip("/")
         self.rtsp_base = rtsp_base.rstrip("/")
         self.config_path = config_path
+        self.webrtc_candidates = tuple(webrtc_candidates)
         self.skipped: dict[str, str] = {}
         self._client = httpx.AsyncClient(timeout=_TIMEOUT_SECONDS, transport=transport)
+
+    def mse_ws_url(self, camera_id: str) -> str:
+        """go2rtc's MSE WebSocket for a camera — consumed by Vidette's authenticated proxy
+        (the gateway API is never exposed to browsers directly)."""
+        if camera_id not in self.config.cameras:
+            raise GatewayError(f"unknown camera '{camera_id}'")
+        ws_base = self.api_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        return f"{ws_base}/api/ws?src={camera_id}"
 
     async def build_config(self) -> dict[str, Any]:
         """VidetteConfig → go2rtc config dict (streams + api/rtsp/webrtc listeners).
@@ -116,10 +127,13 @@ class Go2rtcManager:
                 name = camera_id if endpoint.role == "main" else f"{camera_id}{_SUB_SUFFIX}"
                 streams[name] = [endpoint.url]
         self.skipped = skipped
+        webrtc: dict[str, Any] = {"listen": ":8555"}
+        if self.webrtc_candidates:
+            webrtc["candidates"] = list(self.webrtc_candidates)
         return {
             "api": {"listen": ":1984"},
             "rtsp": {"listen": ":8554"},
-            "webrtc": {"listen": ":8555"},
+            "webrtc": webrtc,
             "streams": streams,
         }
 

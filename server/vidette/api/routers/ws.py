@@ -12,9 +12,8 @@ Close codes (WebSocket application range, mirroring the HTTP status family):
   cookie, or connect with an `Authorization: Bearer vd_…` header.
 - 4400: invalid `topics` value — fix the pattern list and reconnect.
 
-Authentication mirrors `auth.deps.current_principal` but runs as a local helper, not a
-dependency: it must complete before `accept()`, and a raising dependency would surface as
-a bare handshake failure instead of the 4401 close code.
+Authentication runs through `auth.deps.ws_principal` before `accept()` — a raising
+dependency would surface as a bare handshake failure instead of the 4401 close code.
 
 Frames received from the client are ignored (the stream is one-way); the receive loop
 exists to notice disconnects. Backpressure lives in the bus (bounded queues, drop-oldest,
@@ -31,9 +30,7 @@ from typing import cast
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from vidette.auth.deps import SESSION_COOKIE
-from vidette.auth.service import ANONYMOUS_ADMIN, Principal
-from vidette.core.config import AuthMode
+from vidette.auth.deps import ws_principal
 from vidette.core.events import Subscription
 from vidette.runtime import AppRuntime
 
@@ -46,28 +43,6 @@ _TOPIC_PREFIXES = ("event.", "system.")
 
 CLOSE_UNAUTHENTICATED = 4401
 CLOSE_INVALID_TOPICS = 4400
-
-
-async def _ws_principal(websocket: WebSocket) -> Principal | None:
-    """Handshake-time authentication (mirrors `auth.deps.current_principal`).
-
-    Returns None instead of raising so the endpoint can reject with a close frame before
-    accepting. An explicit bearer attempt never falls back to cookies — same rule as the
-    HTTP dependency.
-    """
-    runtime = cast(AppRuntime, websocket.app.state.runtime)
-    if runtime.config.server.auth.mode is AuthMode.none:
-        return ANONYMOUS_ADMIN
-    header = websocket.headers.get("Authorization")
-    if header is not None:
-        scheme, _, credentials = header.partition(" ")
-        token = credentials.strip()
-        if scheme.lower() == "bearer" and token:
-            return await runtime.auth.authenticate_bearer(token)
-    session_token = websocket.cookies.get(SESSION_COOKIE)
-    if session_token:
-        return await runtime.auth.authenticate_session(session_token)
-    return None
 
 
 def _parse_topics(raw: str | None) -> list[str] | None:
@@ -104,7 +79,7 @@ async def _forward(websocket: WebSocket, subscription: Subscription) -> None:
 async def live_stream(websocket: WebSocket) -> None:
     runtime = cast(AppRuntime, websocket.app.state.runtime)
 
-    principal = await _ws_principal(websocket)
+    principal = await ws_principal(websocket)
     if principal is None:
         await websocket.close(
             code=CLOSE_UNAUTHENTICATED,
