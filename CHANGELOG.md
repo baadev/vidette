@@ -6,6 +6,19 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-07-09
+
+Two live-tile fixes chasing the burst-publishing camera from v0.1.2 (its RTSP stream
+appears and disappears with the camera's own recording sessions).
+
+### Fixed
+- **MSE could wait forever:** a stream WebSocket that opens but never delivers media left
+  the tile in "connecting" indefinitely — it now falls back to snapshots (with the
+  server's diagnosis) after 15 s without playback.
+- **Live view never came back on its own:** a failed tile now quietly retries the live
+  transports every 30 s, so live resumes the moment the camera publishes again — no
+  manual Retry needed.
+
 ## [0.1.2] — 2026-07-09
 
 Round two of field fixes from the same Eufy S3 Pro deployment — this time on permanent

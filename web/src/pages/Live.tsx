@@ -9,6 +9,13 @@ const SNAPSHOT_REFRESH_MS = 2000;
 /** How often a failed tile re-asks the server *why* capture is degraded. */
 const DIAGNOSIS_REFRESH_MS = 15000;
 
+/**
+ * How often a failed tile quietly retries the live transports. Burst-publishing cameras
+ * (battery Eufys, flaky RTSP) come back without warning — live view must come back with
+ * them, not wait for a manual Retry click.
+ */
+const AUTO_RETRY_MS = 30000;
+
 /** Server diagnoses can be long (stderr tails) — keep the tile readable. */
 function shortDiagnosis(error: string): string {
   const cut = error.length > 180 ? `${error.slice(0, 180)}…` : error;
@@ -77,6 +84,13 @@ function CameraTile({ camera, index, focused }: TileProps) {
     const timer = window.setInterval(() => setSnapTick(Date.now()), SNAPSHOT_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [state]);
+
+  // While failed, periodically retry the live transports — the camera may be back.
+  useEffect(() => {
+    if (state !== "failed") return;
+    const timer = window.setTimeout(() => setAttempt((a) => a + 1), AUTO_RETRY_MS);
+    return () => window.clearTimeout(timer);
+  }, [state, attempt]);
 
   // While failed, keep the server's diagnosis fresh so the tile says *why*.
   const [diagnosis, setDiagnosis] = useState<string | null>(camera.last_error);

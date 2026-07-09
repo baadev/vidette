@@ -136,6 +136,14 @@ const MSE_KEEP_BEHIND_S = 15;
 const MSE_TRIM_AT_S = 30;
 
 /**
+ * How long MSE gets to actually *play* before giving up. A WebSocket that opens but never
+ * delivers media (camera asleep / not publishing) would otherwise sit in "connecting"
+ * forever — the tile must fall back to snapshots and show the server's diagnosis instead.
+ * Generous on purpose: a healthy stream may take several seconds to ship its first keyframe.
+ */
+const MSE_PLAYING_DEADLINE_MS = 15000;
+
+/**
  * MSE player: fMP4 over an authenticated same-origin WebSocket
  * (`/api/v1/streams/{camera}/mse`, relayed by the server to go2rtc).
  *
@@ -153,9 +161,11 @@ export class MsePlayer {
   private objectUrl: string | null = null;
   private stopped = false;
   private sawLive = false;
+  private deadline = 0;
   private readonly onPlaying = (): void => {
     if (!this.stopped && !this.sawLive) {
       this.sawLive = true;
+      window.clearTimeout(this.deadline);
       this.emit("live");
     }
   };
@@ -168,6 +178,9 @@ export class MsePlayer {
   start(): void {
     if (this.stopped || this.ws) return;
     this.emit("connecting");
+    this.deadline = window.setTimeout(() => {
+      if (!this.stopped && !this.sawLive) this.fail();
+    }, MSE_PLAYING_DEADLINE_MS);
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const url = `${scheme}://${location.host}/api/v1/streams/${encodeURIComponent(this.camera)}/mse`;
     const ws = new WebSocket(url);
@@ -198,6 +211,7 @@ export class MsePlayer {
 
   stop(): void {
     this.stopped = true;
+    window.clearTimeout(this.deadline);
     this.video.removeEventListener("playing", this.onPlaying);
     if (this.ws) {
       this.ws.onmessage = null;
