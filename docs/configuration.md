@@ -84,8 +84,21 @@ cameras:
 ```
 
 Zone kinds and their semantics (`entry`, `object`, `private`, `public`) are defined in the
-[cascade doc](architecture/ai-pipeline.md#tier-2--trajectory-geometry). Draw them in the UI
-(M2); the YAML stays the source of truth and is exportable from the editor.
+[cascade doc](architecture/ai-pipeline.md#tier-2--trajectory-geometry). Draw them in the
+web app's zone editor: for UI-managed cameras it saves directly; for file-defined cameras it
+produces a YAML snippet to paste here — Vidette never rewrites your config file.
+
+### Cameras from the UI (managed cameras)
+
+Cameras created on the web app's **Cameras** page live in the database, not in this file.
+The merge rules, chosen so both audiences win:
+
+- This YAML file is the infrastructure-as-code source of truth — the UI **never edits it**.
+- UI-managed cameras are merged in at boot and hot-applied on change (capture restarts for
+  a few seconds when the camera set changes).
+- An id defined in both places resolves to the file, with a loud warning; delete the UI
+  copy to silence it.
+- `GET /api/v1/config/cameras` shows every camera with its origin (`file` / `managed`).
 
 ## `understanding`
 

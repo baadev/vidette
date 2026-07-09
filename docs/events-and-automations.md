@@ -125,9 +125,12 @@ via HA MQTT discovery:
 |---|---|
 | `vidette/<camera>/event` | the canonical event JSON |
 | `vidette/<camera>/person` | `on/off` occupancy |
-| `vidette/<camera>/motion` | `on/off` |
-| `vidette/<camera>/snapshot` | JPEG bytes of the last event |
-| `vidette/system/health` | recorder/disk/adapter health |
+| `vidette/status` | `online/offline` availability (retained, LWT) |
+| `vidette/system/event` | system events (disk pressure, camera health, …) as JSON |
+
+Deliberately *not* published: raw per-frame motion topics (events are the signal — motion-level
+chatter is exactly the noise this product exists to remove) and snapshot bytes over MQTT
+(fetch them over the authenticated HTTP API instead).
 
 Cookbook (M2 ships these as copy-paste HA blueprints):
 

@@ -710,7 +710,575 @@ kbd {
   justify-content: flex-end;
 }
 
+/* --- cameras page ----------------------------------------------------------------------------- */
+
+.cameras-page .cam-head-refresh {
+  margin-left: auto;
+}
+
+.cam-result {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.cam-result-line {
+  margin: 0;
+  color: var(--ok);
+}
+
+.cam-result .warnings {
+  margin: 0;
+}
+
+.cam-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.cam-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.cam-thumb {
+  flex: none;
+  width: 7.5rem;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+
+.cam-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cam-thumb-empty {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.cam-info {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.cam-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cam-name {
+  font-weight: 600;
+}
+
+.cam-id {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.cam-source {
+  font-size: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 0.55em;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.cam-source-managed {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cam-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.cam-probe {
+  margin: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.cam-probe-ok {
+  color: var(--ok);
+}
+
+.cam-probe-warn {
+  color: var(--accent);
+}
+
+.cam-probe-bad {
+  color: var(--danger);
+}
+
+.cam-row-error {
+  font-size: 0.85rem;
+}
+
+.cam-actions {
+  flex: none;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.cam-actions .ghost {
+  text-align: center;
+}
+
+.cam-delete:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.cam-confirm {
+  display: grid;
+  gap: 0.4rem;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+
+.cam-confirm-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.cam-confirm-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cam-confirm-row input {
+  flex: 1;
+  min-width: 8rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.35rem 0.6rem;
+}
+
+.cam-danger {
+  background: var(--danger);
+  color: var(--bg);
+  border: 1px solid var(--danger);
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.85rem;
+}
+
+.cam-danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+/* --- cameras: add/edit form ------------------------------------------------------------------- */
+
+.cam-add-card {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.cam-add-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.cam-add-head h2 {
+  margin: 0;
+}
+
+.cam-add-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cam-devices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cam-device {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+}
+
+.cam-device-info {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.cam-device-addr {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.cam-device-xaddr {
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cam-device-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.cam-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.cam-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem 1rem;
+}
+
+.cam-form .field {
+  margin-bottom: 0;
+}
+
+.cam-form select,
+.zone-draft select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  color-scheme: dark;
+}
+
+.cam-id-invalid {
+  color: var(--danger);
+}
+
+.cam-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.cam-check input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.cam-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* --- zone editor ------------------------------------------------------------------------------- */
+
+.zone-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.zone-editor {
+  width: min(58rem, 100%);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  display: grid;
+  gap: 0.9rem;
+  outline: none;
+}
+
+.zone-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.zone-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.zone-head-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.zone-body {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(14rem, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.zone-stage-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.zone-stage {
+  position: relative;
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.zone-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.zone-stage-empty {
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.zone-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.zone-svg polygon {
+  cursor: pointer;
+}
+
+.zone-stage-drawing .zone-svg,
+.zone-stage-drawing .zone-svg polygon {
+  cursor: crosshair;
+}
+
+.zone-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--bg);
+  pointer-events: none;
+}
+
+.zone-tag {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  font-size: 0.7rem;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 65%, transparent);
+  border-radius: 4px;
+  padding: 0 0.4em;
+  white-space: nowrap;
+  max-width: 90%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zone-side {
+  display: grid;
+  gap: 0.6rem;
+  align-content: start;
+}
+
+.zone-side h3 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.zone-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.zone-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.zone-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  color: var(--text);
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.zone-item:hover {
+  border-color: var(--muted);
+}
+
+.zone-item-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.zone-swatch {
+  flex: none;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 3px;
+}
+
+.zone-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.zone-item-kind {
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.zone-delete:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.zone-draft {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.zone-draft .field {
+  margin-bottom: 0;
+}
+
+.zone-draft-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.zone-error {
+  font-size: 0.9rem;
+}
+
+.zone-foot {
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.zone-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.zone-yaml {
+  margin: 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.zone-yaml code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
 /* --- narrow screens (~380px) ---------------------------------------------------------------- */
+
+@media (max-width: 46rem) {
+  .zone-body {
+    grid-template-columns: 1fr;
+  }
+}
 
 @media (max-width: 40rem) {
   .hour-strip {
@@ -742,5 +1310,38 @@ kbd {
   .setup-footer button.primary,
   .setup-actions button.primary {
     width: 100%;
+  }
+
+  .cam-row {
+    flex-wrap: wrap;
+  }
+
+  .cam-thumb {
+    width: 100%;
+  }
+
+  .cam-actions {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .cam-actions .ghost {
+    flex: 1;
+  }
+
+  .zone-editor {
+    padding: 0.75rem;
+  }
+
+  .zone-head-actions,
+  .zone-foot-row,
+  .zone-draft-actions {
+    width: 100%;
+  }
+
+  .zone-draft-actions button,
+  .zone-foot-row button {
+    flex: 1;
   }
 }

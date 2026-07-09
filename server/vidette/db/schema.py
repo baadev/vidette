@@ -87,9 +87,33 @@ CREATE INDEX idx_events_camera_started_at ON events(camera, started_at);
 CREATE INDEX idx_events_started_at ON events(started_at);
 """
 
+_V3_MANAGEMENT: Final[str] = """
+-- UI-managed cameras: the hand-written YAML stays the IaC source of truth; cameras created
+-- from the web UI live here and are merged at load (YAML wins on id collision).
+CREATE TABLE managed_cameras (
+    id         TEXT PRIMARY KEY,   -- same [a-z0-9-] rules as YAML camera ids
+    config     TEXT NOT NULL,      -- JSON of a validated CameraConfig
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+-- Web-push subscriptions (VAPID); endpoint is the natural unique key.
+CREATE TABLE push_subscriptions (
+    endpoint     TEXT PRIMARY KEY,
+    subscription TEXT NOT NULL,    -- full JSON subscription object from the browser
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at   REAL NOT NULL
+);
+
+-- Event favorites: pinned events survive every cleanup; their footage is upgraded to the
+-- 'favorite' segment class so retention never eats it.
+ALTER TABLE events ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+"""
+
 MIGRATIONS: Final[list[str]] = [
     _V1_INITIAL,
     _V2_EVENTS,
+    _V3_MANAGEMENT,
 ]
 
 SCHEMA_VERSION: Final[int] = len(MIGRATIONS)

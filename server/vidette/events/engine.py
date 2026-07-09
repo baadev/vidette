@@ -8,12 +8,14 @@ matching policy's sensitivity preset — decide whether a track becomes an event
   whose zones are only `public` — or empty while the camera has a public zone at all —
   never promotes, no matter what else fires;
 - a promotion that satisfies a matching policy → **confirmed**: persisted, snapshot saved
-  (best effort), the canonical payload published as ``event.confirmed``;
+  (best effort, retried while the event stays open), the canonical payload published as
+  ``event.confirmed``;
 - a promotion no policy wants → **dismissed**: persisted, searchable, silent.
 
 One open event per camera at a time; further promotions extend it (kinds/zones union,
 geometry maxima). An open event closes once its tracks have been gone for
-`CLOSE_AFTER_ABSENT_S`; confirmed ones then publish ``event.ended``.
+`CLOSE_AFTER_ABSENT_S`; confirmed ones then get their footage upgraded to the ``event``
+retention class (docs/architecture/storage.md) and publish ``event.ended``.
 
 Crash containment: recording is sacred — every public entry point catches and logs;
 nothing here may raise into the pipeline. Policy evaluation is the M2 *geometric
@@ -39,6 +41,17 @@ from vidette.pipeline.track import IouTracker
 logger = logging.getLogger(__name__)
 
 CLOSE_AFTER_ABSENT_S = 10.0
+
+# A confirmed event's promotion can race the stream gateway's warmup: the first snapshot
+# then fails and, without retries, the event would stay snapshotless forever (observed
+# live). While the event is open, missing snapshots are retried on every detection/tick
+# pass — at most every SNAPSHOT_RETRY_AFTER_S seconds, SNAPSHOT_MAX_ATTEMPTS total tries.
+SNAPSHOT_RETRY_AFTER_S = 5.0
+SNAPSHOT_MAX_ATTEMPTS = 5
+
+# Pre/post-roll seconds of footage pulled along when an event's segments change retention
+# class (close → `event`; the events API reuses this pad when starring → `favorite`).
+EVENT_FOOTAGE_PAD_S = 5.0
 
 _TARGET_KINDS = (ZoneKind.entry, ZoneKind.object)
 
@@ -141,6 +154,8 @@ class _OpenEvent:
     event: Event
     track_ids: set[int]
     last_seen_ts: float
+    snapshot_attempts: int = 0
+    snapshot_last_attempt_ts: float = 0.0
 
 
 @dataclass
@@ -214,6 +229,7 @@ class EventEngine:
                 elif promotion_reason(track, state.zone_kinds, self._spec, Sensitivity.balanced):
                     # Promoted on the geometry, wanted by no policy → kept, searchable, silent.
                     await self._promote(camera_id, state, ts, track, policy=None)
+            await self._retry_missing_snapshots(ts)
             await self._close_absent(ts)
         except Exception:
             logger.exception(
@@ -222,8 +238,9 @@ class EventEngine:
             )
 
     async def tick(self, ts: float) -> None:
-        """Close open events whose tracks are gone; safe to call on any timer. Never raises."""
+        """Retry missing snapshots + close events whose tracks are gone. Never raises."""
         try:
+            await self._retry_missing_snapshots(ts)
             await self._close_absent(ts)
         except Exception:
             logger.exception("event engine tick failed — pipeline continues")
@@ -281,7 +298,8 @@ class EventEngine:
                 geometry=_facts(track),
                 policy=policy,
             )
-            state.open_event = _OpenEvent(event=event, track_ids={track.track_id}, last_seen_ts=ts)
+            opened = _OpenEvent(event=event, track_ids={track.track_id}, last_seen_ts=ts)
+            state.open_event = opened
             await self._db.insert_event(
                 event.id,
                 event.camera,
@@ -293,7 +311,7 @@ class EventEngine:
                 policy=event.policy,
             )
             if confirmed:
-                await self._attach_snapshot(event)
+                await self._attach_snapshot(opened, ts)
                 await self._bus.publish(
                     "event.confirmed", canonical_payload(event, "event.confirmed")
                 )
@@ -315,11 +333,18 @@ class EventEngine:
             event.state = EventState.confirmed
             event.policy = policy
             await self._db.update_event(event.id, state=EventState.confirmed.value)
-            await self._attach_snapshot(event)
+            await self._attach_snapshot(open_event, ts)
             await self._bus.publish("event.confirmed", canonical_payload(event, "event.confirmed"))
 
-    async def _attach_snapshot(self, event: Event) -> None:
-        """Best effort: a missing snapshot must never block or kill the event."""
+    async def _attach_snapshot(self, open_event: _OpenEvent, ts: float) -> None:
+        """Best effort: a missing snapshot must never block or kill the event.
+
+        Each call counts as one attempt; failures are retried from
+        `_retry_missing_snapshots` while the event stays open.
+        """
+        event = open_event.event
+        open_event.snapshot_attempts += 1
+        open_event.snapshot_last_attempt_ts = ts
         try:
             data = await self._snapshot_fn(event.camera)
             path = self._media_dir / event.camera / "events" / event.id / "snapshot.jpeg"
@@ -329,13 +354,44 @@ class EventEngine:
             await self._db.update_event(event.id, snapshot_path=str(path))
         except Exception as exc:
             logger.warning(
-                "snapshot for event %s (camera '%s') failed: %s — event proceeds without it",
+                "snapshot for event %s (camera '%s') failed (attempt %d/%d): %s — event "
+                "proceeds without it",
                 event.id,
                 event.camera,
+                open_event.snapshot_attempts,
+                SNAPSHOT_MAX_ATTEMPTS,
                 exc,
             )
 
+    async def _retry_missing_snapshots(self, ts: float) -> None:
+        """Re-attempt failed snapshots of open confirmed events (gateway warmup race).
+
+        Runs on every detection/tick pass; throttled to one attempt per
+        `SNAPSHOT_RETRY_AFTER_S`, capped at `SNAPSHOT_MAX_ATTEMPTS` total. Failures stay
+        contained in `_attach_snapshot`.
+        """
+        for state in self._cameras.values():
+            open_event = state.open_event
+            if open_event is None:
+                continue
+            event = open_event.event
+            if (
+                event.state is not EventState.confirmed
+                or event.media.snapshot_path is not None
+                or open_event.snapshot_attempts >= SNAPSHOT_MAX_ATTEMPTS
+                or ts - open_event.snapshot_last_attempt_ts < SNAPSHOT_RETRY_AFTER_S
+            ):
+                continue
+            await self._attach_snapshot(open_event, ts)
+
     async def _close_absent(self, ts: float) -> None:
+        """Close events whose tracks are gone; confirmed ones keep their footage.
+
+        Only *confirmed* events get their segments upgraded to the ``event`` retention
+        class (± `EVENT_FOOTAGE_PAD_S` of pre/post-roll). Dismissed events are deliberately
+        excluded: they stay persisted and searchable, but their footage ages out on the
+        continuous/motion schedule — "kept, silent" must not cost 90 days of disk.
+        """
         for state in self._cameras.values():
             open_event = state.open_event
             if open_event is None or ts - open_event.last_seen_ts <= CLOSE_AFTER_ABSENT_S:
@@ -345,6 +401,21 @@ class EventEngine:
             event.ended_at = datetime.fromtimestamp(ts, tz=UTC)
             await self._db.update_event(event.id, ended_at=ts)
             if event.state is EventState.confirmed:
+                try:
+                    await self._db.upgrade_segments_class(
+                        event.camera,
+                        event.started_at.timestamp() - EVENT_FOOTAGE_PAD_S,
+                        ts + EVENT_FOOTAGE_PAD_S,
+                        "event",
+                    )
+                except Exception:
+                    # Notification delivery outranks bookkeeping: still publish the end.
+                    logger.exception(
+                        "retention upgrade for event %s (camera '%s') failed — its footage "
+                        "stays on the continuous/motion schedule",
+                        event.id,
+                        event.camera,
+                    )
                 await self._bus.publish("event.ended", canonical_payload(event, "event.ended"))
 
 

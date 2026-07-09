@@ -355,7 +355,7 @@ async def test_dispatcher_skips_webpush_with_one_notice_per_boot() -> None:
         notices = emit.topics("notify.webpush_unavailable")
         assert len(notices) == 1  # once per boot, not per message
         assert notices[0]["channel"] == "push"
-        assert "M2" in notices[0]["message"]
+        assert "no webpush notifier is registered" in notices[0]["message"]
         assert "push" not in dispatcher.status().per_channel  # skipped, not failed
     finally:
         await dispatcher.stop()

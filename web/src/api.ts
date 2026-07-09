@@ -64,6 +64,8 @@ export type EventInfo = {
   summary: string | null;
   policy: string | null;
   feedback: "up" | "down" | null;
+  /** Starred by the user (see `api.setEventFavorite`). */
+  favorite: boolean;
   snapshot: string | null;
   clip: string;
 };
@@ -77,6 +79,40 @@ export type Me = {
   username: string;
   role: string;
 };
+
+/** One polygon zone; points are normalized [x, y] pairs in 0–1 image coordinates. */
+export type CameraZone = {
+  kind: "entry" | "object" | "private" | "public";
+  points: [number, number][];
+};
+
+/** Camera config as accepted and returned by the `/config/cameras` endpoints. */
+export type CameraConfigPayload = {
+  adapter: string;
+  name?: string | null;
+  source?: { main: string; sub?: string | null } | null;
+  options?: Record<string, unknown>;
+  record?: { mode: "continuous" | "motion" | "events" | "off" };
+  detect?: { enabled: boolean; fps?: number; resolution?: number };
+  understand?: boolean;
+  zones?: Record<string, CameraZone>;
+};
+
+/**
+ * A configured camera. `source` says where it is defined: `file` entries come
+ * from `/config/vidette.yaml` and are read-only via the API; `managed` entries
+ * were created through the API and can be edited/deleted here.
+ */
+export type CameraEntry = {
+  id: string;
+  source: "file" | "managed";
+  editable: boolean;
+  config: CameraConfigPayload;
+  warnings?: string[];
+};
+
+/** One device found by ONVIF discovery. */
+export type DiscoveredDevice = { address: string; xaddr: string; scopes: string[] };
 
 export class ApiError extends Error {
   status: number;
@@ -154,6 +190,19 @@ async function postJson<T>(path: string, body: unknown, on401: On401 = "signal")
   return (await response.json()) as T;
 }
 
+async function putJson<T>(path: string, body: unknown, on401: On401 = "signal"): Promise<T> {
+  const response = await send(
+    path,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+    },
+    on401,
+  );
+  return (await response.json()) as T;
+}
+
 export const api = {
   authStatus(): Promise<AuthStatus> {
     return getJson<AuthStatus>(`${BASE}/auth/status`);
@@ -209,11 +258,17 @@ export const api = {
     return getJson<ExportJob>(`${BASE}/export/${encodeURIComponent(id)}`);
   },
 
-  events(opts?: { camera?: string; sinceTs?: number; limit?: number }): Promise<EventInfo[]> {
+  events(opts?: {
+    camera?: string;
+    sinceTs?: number;
+    limit?: number;
+    favoriteOnly?: boolean;
+  }): Promise<EventInfo[]> {
     const query = new URLSearchParams();
     if (opts?.camera) query.set("camera", opts.camera);
     if (opts?.sinceTs !== undefined) query.set("since_ts", String(opts.sinceTs));
     if (opts?.limit !== undefined) query.set("limit", String(opts.limit));
+    if (opts?.favoriteOnly) query.set("favorite", "true");
     const qs = query.toString();
     return getJson<EventInfo[]>(qs ? `${BASE}/events?${qs}` : `${BASE}/events`);
   },
@@ -235,6 +290,71 @@ export const api = {
     });
     return await response.text();
   },
+
+  /** All configured cameras (file-defined and API-managed), with their configs. */
+  configCameras(): Promise<CameraEntry[]> {
+    return getJson<CameraEntry[]>(`${BASE}/config/cameras`);
+  },
+
+  /** Create a managed camera. 409 if the id exists; 422 with a problem detail on bad config. */
+  createCamera(id: string, config: CameraConfigPayload): Promise<CameraEntry> {
+    return postJson<CameraEntry>(`${BASE}/config/cameras`, { id, config });
+  },
+
+  /** Replace a managed camera's config. 409 for file-defined cameras, 404 for unknown ids. */
+  updateCamera(id: string, config: CameraConfigPayload): Promise<CameraEntry> {
+    return putJson<CameraEntry>(`${BASE}/config/cameras/${encodeURIComponent(id)}`, { config });
+  },
+
+  async deleteCamera(id: string): Promise<void> {
+    // 204, no body; 409 for file-defined cameras, 404 for unknown ids.
+    await send(`${BASE}/config/cameras/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
+  /** Scan the local network for ONVIF devices. */
+  discoverCameras(): Promise<{ devices: DiscoveredDevice[] }> {
+    return postJson<{ devices: DiscoveredDevice[] }>(`${BASE}/config/cameras/discover`, {});
+  },
+
+  /** Ask the server to check a configured camera right now. */
+  probeCamera(id: string): Promise<{ status: string; detail: string }> {
+    return postJson<{ status: string; detail: string }>(
+      `${BASE}/config/cameras/${encodeURIComponent(id)}/probe`,
+      {},
+    );
+  },
+
+  /** Public VAPID key for Web Push subscriptions. */
+  vapidKey(): Promise<{ key: string }> {
+    return getJson<{ key: string }>(`${BASE}/push/vapid-key`);
+  },
+
+  async pushSubscribe(subscription: unknown): Promise<void> {
+    // 204, no body.
+    await send(`${BASE}/push/subscriptions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(subscription),
+    });
+  },
+
+  async pushUnsubscribe(endpoint: string): Promise<void> {
+    // 204, no body.
+    await send(`${BASE}/push/subscriptions`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ endpoint }),
+    });
+  },
+
+  async setEventFavorite(id: string, favorite: boolean): Promise<void> {
+    // 204, no body.
+    await send(`${BASE}/events/${encodeURIComponent(id)}/favorite`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ favorite }),
+    });
+  },
 };
 
 export const segmentFileUrl = (id: number): string => `${BASE}/recordings/segments/${id}/file`;
@@ -248,3 +368,7 @@ export const exportDownloadUrl = (id: string): string =>
 /** Direct media URL of an hour's preview MP4 — 404 until it has been generated. */
 export const previewUrl = (camera: string, hourStartTs: number): string =>
   `${BASE}/recordings/preview?camera=${encodeURIComponent(camera)}&hour_start_ts=${hourStartTs}`;
+
+/** WebSocket endpoint for live server events (same-origin, ws/wss follows the page). */
+export const wsUrl = (): string =>
+  `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/v1/ws`;

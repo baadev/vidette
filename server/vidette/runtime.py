@@ -44,7 +44,11 @@ from vidette.core.config import VidetteConfig, load_config
 from vidette.core.events import InProcessEventBus
 from vidette.db import Database
 from vidette.events.engine import EventEngine
+from vidette.notify.apprise_channel import AppriseNotifier
 from vidette.notify.dispatcher import NotificationDispatcher
+from vidette.notify.mqtt import MqttPublisher
+from vidette.notify.webhook import WebhookNotifier
+from vidette.notify.webpush import WebPushNotifier
 from vidette.pipeline.base import Detection
 from vidette.pipeline.detect import NullDetector, OnnxDetector
 from vidette.pipeline.runner import PipelineSupervisor
@@ -63,6 +67,10 @@ def default_config_path() -> Path:
 
 class AppRuntime:
     def __init__(self, config: VidetteConfig, *, config_warnings: list[str] | None = None) -> None:
+        # The YAML file is the IaC source of truth; UI-managed cameras (DB) are merged in
+        # at start() and on reload_cameras(). `file_cameras` stays the pristine YAML view.
+        self._file_config = config
+        self.file_cameras = dict(config.cameras)
         self.config = config
         self.config_warnings = list(config_warnings or [])
         self.db = Database(config.storage.database)
@@ -107,8 +115,17 @@ class AppRuntime:
             self.emit,
         )
         self.notifier = NotificationDispatcher(
-            config, self.bus, emit=self.emit, base_url=config.server.base_url
+            config,
+            self.bus,
+            emit=self.emit,
+            base_url=config.server.base_url,
+            notifiers={
+                "webhook": WebhookNotifier(),
+                "apprise": AppriseNotifier(),
+                "webpush": WebPushNotifier(self.db),
+            },
         )
+        self.mqtt = MqttPublisher(config, self.bus, emit=self.emit)
 
         self._detector_task: asyncio.Task[None] | None = None
         self._engine_tick_task: asyncio.Task[None] | None = None
@@ -182,6 +199,67 @@ class AppRuntime:
             {"model": detector.spec.key, "provider": detector.provider},
         )
 
+    # --- managed cameras: merge + hot-apply -------------------------------------------------
+
+    async def _merged_config(self) -> tuple[VidetteConfig, list[str]]:
+        from vidette.core.managed import merge_managed_cameras
+
+        rows = await self.db.list_managed_cameras()
+        return merge_managed_cameras(self._file_config, rows)
+
+    def _swap_config(self, merged: VidetteConfig) -> None:
+        """Point every passive config holder at the new merged config."""
+        self.config = merged
+        self.go2rtc.config = merged
+        self.exporter._config = merged
+        self.janitor._config = merged
+        self.previews._config = merged
+
+    def _rebuild_capture(self, merged: VidetteConfig) -> None:
+        """Recreate the stateful capture chain (engine → recorder → pipeline) for `merged`.
+
+        Open events and tracker state are dropped on purpose: a camera-set change is an
+        explicit admin action and a clean slate beats half-migrated trackers.
+        """
+        self.engine = EventEngine(
+            merged,
+            self.db,
+            self.bus,
+            snapshot_fn=self.go2rtc.snapshot,
+            media_dir=merged.storage.media_dir,
+        )
+        self.recorder = RecorderSupervisor(
+            merged, self.db, self.go2rtc, media_dir=merged.storage.media_dir
+        )
+        self.pipeline = PipelineSupervisor(
+            merged, self.go2rtc, self._detect, self.engine.on_detections, self.emit
+        )
+
+    async def reload_cameras(self) -> list[str]:
+        """Re-merge managed cameras and hot-apply: gateway config, recorder, pipeline.
+
+        Capture restarts briefly for all cameras — documented in the UI next to the save
+        button. Returns merge warnings for the API to surface.
+        """
+        merged, warnings = await self._merged_config()
+        self._swap_config(merged)
+        if self._workers_started:
+            await self.pipeline.stop()
+            await self.recorder.stop()
+            await self.mqtt.stop()
+        self._rebuild_capture(merged)
+        self.mqtt = MqttPublisher(merged, self.bus, emit=self.emit)
+        await self.go2rtc.sync()
+        if self._workers_started:
+            await self.recorder.start()
+            await self.pipeline.start()
+            self.mqtt.start()
+        await self.emit(
+            "config.cameras_reloaded",
+            {"cameras": sorted(merged.cameras), "warnings": warnings},
+        )
+        return warnings
+
     # --- lifecycle -------------------------------------------------------------------------
 
     async def start(self, *, workers: bool = True) -> None:
@@ -195,6 +273,18 @@ class AppRuntime:
                 await self.bus.publish(topic, payload)
 
         self.db.system_event_hook = _mirror
+
+        # UI-managed cameras join the config before anything consumes it.
+        try:
+            merged, merge_warnings = await self._merged_config()
+            if merge_warnings:
+                self.config_warnings.extend(merge_warnings)
+            if merged.cameras != self.config.cameras:
+                self._swap_config(merged)
+                self._rebuild_capture(merged)
+                self.mqtt = MqttPublisher(merged, self.bus, emit=self.emit)
+        except Exception:
+            logger.exception("managed-camera merge failed — continuing with the file config")
 
         await self.go2rtc.sync()
 
@@ -218,6 +308,7 @@ class AppRuntime:
             )
 
         self.notifier.start()  # sync: spawns one consumer task per notification rule
+        self.mqtt.start()  # sync too; no-op unless integrations.mqtt.enabled
         if media_ok:
             await self.exporter.start()
             await self.recorder.start()  # handles missing ffmpeg with a loud system event
@@ -263,6 +354,10 @@ class AppRuntime:
                 except Exception:
                     logger.exception("stopping %s failed", name)
             self._workers_started = False
+        try:
+            await self.mqtt.stop()
+        except Exception:
+            logger.exception("stopping mqtt failed")
         try:
             await self.notifier.stop()
         except Exception:

@@ -3,8 +3,8 @@
 Design constraints (CLAUDE.md prime directives):
 - delivery can never crash or stall anything upstream: every failure is caught and becomes
   a rate-limited `notify.delivery_failed` event — the system snitches on itself;
-- honesty: configured `webpush` channels are skipped with a one-time
-  `notify.webpush_unavailable` event instead of silently pretending (web push lands in M2);
+- honesty: `webpush` channels are skipped with a one-time `notify.webpush_unavailable`
+  event when no webpush notifier is registered, instead of silently pretending;
 - ordering is per receiver: one asyncio.Lock per channel, while channels of one message are
   delivered concurrently.
 """
@@ -116,14 +116,15 @@ class NotificationDispatcher:
         channel = self._config.notifications.channels.get(channel_name)
         if channel is None or not channel.enabled:
             return
-        if channel.kind is ChannelKind.webpush:
+        if channel.kind is ChannelKind.webpush and channel.kind.value not in self._notifiers:
             if not self._webpush_warned:
                 self._webpush_warned = True
                 await self._safe_emit(
                     "notify.webpush_unavailable",
                     {
                         "channel": channel_name,
-                        "message": "web push lands later in M2 — this channel is skipped",
+                        "message": "no webpush notifier is registered — this channel is "
+                        "skipped (the runtime wires WebPushNotifier at boot)",
                     },
                 )
             return

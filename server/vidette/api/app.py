@@ -147,17 +147,25 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
 
     from vidette.api.routers.auth import router as auth_router
     from vidette.api.routers.cameras import router as cameras_router
+    from vidette.api.routers.config_cameras import router as config_cameras_router
     from vidette.api.routers.events import router as events_router
+    from vidette.api.routers.metrics import router as metrics_router
+    from vidette.api.routers.push import router as push_router
     from vidette.api.routers.recordings import router as recordings_router
     from vidette.api.routers.streams import router as streams_router
     from vidette.api.routers.system import router as system_router
+    from vidette.api.routers.ws import router as ws_router
 
     app.include_router(auth_router)
     app.include_router(cameras_router)
+    app.include_router(config_cameras_router)
     app.include_router(events_router)
+    app.include_router(metrics_router)
+    app.include_router(push_router)
     app.include_router(recordings_router)
     app.include_router(streams_router)
     app.include_router(system_router)
+    app.include_router(ws_router)
 
     def _register_designed(path: str, methods: tuple[str, ...], milestone: str) -> None:
         async def designed() -> JSONResponse:

@@ -31,15 +31,17 @@ created in settings, shown once, revocable, and audit-logged.
 |---|---|---|
 | System | `GET /healthz` (public) · `GET /api/v1/system` · `GET /api/v1/system/events` | ✅ |
 | Auth | `GET /api/v1/auth/status` (public) · `POST …/bootstrap` · `POST …/login` · `POST …/logout` · `GET …/me` · `POST/GET/DELETE …/tokens` | ✅ M1 |
-| Config | `POST /api/v1/config/validate` ✅ · `GET/PUT /api/v1/config` + `POST …/apply` 📐 | M0 / M2 |
+| Config | `POST /api/v1/config/validate` | ✅ |
+| Managed cameras | `GET/POST /api/v1/config/cameras` · `PUT/DELETE …/{id}` · `POST …/discover` (ONVIF) · `POST …/{id}/probe` — UI-created cameras live in the DB and hot-apply; the YAML file stays the IaC source of truth (id collisions: the file wins) | ✅ |
+| Web push | `GET /api/v1/push/vapid-key` · `POST/DELETE /api/v1/push/subscriptions` | ✅ |
 | Cameras | `GET /api/v1/cameras` · `GET /api/v1/cameras/{id}` (recorder state, probe, stream readiness) | ✅ M1 |
 | Streams | `GET /api/v1/streams/{camera}` · `POST …/whep` (SDP in/out, authenticated proxy to go2rtc) · `GET …/snapshot.jpeg` | ✅ M1 |
 | Recordings | `GET /api/v1/recordings?camera=&from_ts=&to_ts=` · `GET …/summary?camera=&day=` · `GET …/segments/{id}/file` | ✅ M1 |
 | Export | `POST /api/v1/export` → job · `GET /api/v1/export/{id}` · `GET …/download` | ✅ M1 |
 | Events | `GET /api/v1/events?since_ts=&camera=&limit=` · `GET /api/v1/events/{id}` · media: `…/snapshot.jpeg`, `…/clip.mp4` (lazy remux) · `POST …/feedback {verdict: up\|down}` — semantic `q=` search lands in M3 | ✅ |
 | Policies | `GET/PUT /api/v1/policies` · `POST /api/v1/policies/{id}/dry-run` | 📐 M4 |
-| Live events | `WS /api/v1/ws` — subscribes to topic patterns (`event.*`, `system.*`) | 📐 M2 |
-| Metrics | `GET /metrics` (Prometheus) | 📐 M2 |
+| Live events | `WS /api/v1/ws?topics=event.*,system.*` — JSON frames `{topic, payload}`; closes 4401 unauthenticated, 4400 on invalid topics | ✅ |
+| Metrics | `GET /metrics` (Prometheus text; scrape with `Authorization: Bearer vd_…`) | ✅ |
 
 ### Example: what works today
 

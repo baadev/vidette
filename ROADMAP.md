@@ -94,11 +94,13 @@ baseline on the reference clip set.
 | Zones configured in YAML | ✅ |
 | Zone editor UI (draw polygons on a snapshot) | 📐 |
 | Event engine: lifecycle, one-open-event-per-camera, snapshots, lazy clips, review UI + feedback | ✅ core |
-| Event favorites (pin + retention class) | 📐 |
+| Event favorites (pin + footage upgraded to the `favorite` retention class) | ✅ |
 | Notifications: signed webhooks (HMAC, retries) + Apprise channels | ✅ |
-| Web push (VAPID) | 📐 |
-| MQTT + Home Assistant discovery (camera, motion, person, event entities) | 📐 |
-| Prometheus `/metrics` | 📐 |
+| Web push (VAPID, self-hosted keys, PWA service worker) | ✅ |
+| MQTT + Home Assistant discovery (availability, person occupancy, event JSON) | ✅ |
+| Prometheus `/metrics` (bearer-token scrape) | ✅ |
+| WebSocket live event stream (`/api/v1/ws`) | ✅ |
+| Camera management UI: CRUD for DB-managed cameras + ONVIF discover; YAML stays the IaC source of truth | ✅ |
 | Reference clip set + accuracy harness (public, versioned) — gates the M2 "done" claim | 📐 |
 
 ## M3 — Understand
@@ -200,10 +202,11 @@ The complete list of key functionality and its implementation state.
 |---|---|---|
 | Signed webhooks (HMAC, retries, delivery contract) | ✅ | M2 |
 | Apprise channels (Telegram, Discord, …) | ✅ | M2 |
-| MQTT + Home Assistant discovery | 📐 | M2 |
-| REST API: auth, cameras, recordings, streams (WHEP/snapshot), export, system events | ✅ | M1 |
-| WebSocket event stream | 📐 | M2 |
-| Prometheus metrics | 📐 | M2 |
+| Web push (VAPID) | ✅ | M2 |
+| MQTT + Home Assistant discovery | ✅ | M2 |
+| REST API: auth, cameras, recordings, streams (WHEP/snapshot), export, system events, managed-camera CRUD, push subscriptions | ✅ | M1–M2 |
+| WebSocket event stream | ✅ | M2 |
+| Prometheus metrics | ✅ | M2 |
 
 ### Operations & security
 | Capability | Status | Milestone |

@@ -24,6 +24,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    PlainSerializer,
     ValidationError,
     model_validator,
 )
@@ -55,7 +56,23 @@ def parse_duration(value: object) -> timedelta | None:
     )
 
 
-Duration = Annotated[timedelta | None, BeforeValidator(parse_duration)]
+def format_duration(value: timedelta | None) -> str:
+    """Inverse of parse_duration — keeps model_dump(mode="json") round-trippable
+    (pydantic's default ISO-8601 'P3D' would be rejected on the way back in)."""
+    if value is None:
+        return "forever"
+    total = int(value.total_seconds())
+    for unit_seconds, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
+        if total >= unit_seconds and total % unit_seconds == 0:
+            return f"{total // unit_seconds}{suffix}"
+    return f"{total}s"
+
+
+Duration = Annotated[
+    timedelta | None,
+    BeforeValidator(parse_duration),
+    PlainSerializer(format_duration, when_used="json"),
+]
 
 
 # --- building blocks -------------------------------------------------------------------------
@@ -389,8 +406,6 @@ def designed_feature_warnings(config: VidetteConfig) -> list[str]:
             "policies: plain-language interpretation lands in M4 — today each policy "
             "applies its geometric skeleton (zones + sensitivity presets)"
         )
-    if config.integrations.mqtt.enabled:
-        warnings.append(f"integrations.mqtt: lands in M2 ({roadmap})")
     return warnings
 
 

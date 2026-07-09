@@ -111,6 +111,7 @@ class EventRow:
     feedback: str | None  # "up" | "down" | None
     snapshot_path: str | None
     clip_path: str | None
+    favorite: bool = False
 
 
 def _user(row: sqlite3.Row) -> UserRow:
@@ -181,8 +182,43 @@ def _event(row: sqlite3.Row) -> EventRow:
         intent=json.loads(row["intent"]) if row["intent"] is not None else None,
         policy=row["policy"],
         feedback=row["feedback"],
+        favorite=bool(row["favorite"]),
         snapshot_path=row["snapshot_path"],
         clip_path=row["clip_path"],
+    )
+
+
+@dataclass(frozen=True)
+class ManagedCameraRow:
+    id: str
+    config: dict[str, Any]  # validated CameraConfig as a plain dict
+    created_at: float
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class PushSubscriptionRow:
+    endpoint: str
+    subscription: dict[str, Any]  # the browser's PushSubscription JSON
+    user_id: int
+    created_at: float
+
+
+def _managed_camera(row: sqlite3.Row) -> ManagedCameraRow:
+    return ManagedCameraRow(
+        id=row["id"],
+        config=json.loads(row["config"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _push_subscription(row: sqlite3.Row) -> PushSubscriptionRow:
+    return PushSubscriptionRow(
+        endpoint=row["endpoint"],
+        subscription=json.loads(row["subscription"]),
+        user_id=row["user_id"],
+        created_at=row["created_at"],
     )
 
 
@@ -602,6 +638,7 @@ class Database:
         *,
         camera: str | None = None,
         since_ts: float | None = None,
+        favorite_only: bool = False,
         limit: int = 100,
     ) -> list[EventRow]:
         """Newest first. `since_ts` keeps only events that started strictly after it."""
@@ -613,6 +650,8 @@ class Database:
         if since_ts is not None:
             clauses.append("started_at > ?")
             params.append(since_ts)
+        if favorite_only:
+            clauses.append("favorite = 1")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
         async with self._db.execute(
@@ -621,3 +660,107 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [_event(row) for row in rows]
+
+    async def count_events_by_state(self) -> dict[str, int]:
+        """Event counts per lifecycle state (metrics endpoint)."""
+        async with self._db.execute(
+            "SELECT state, COUNT(*) AS n FROM events GROUP BY state"
+        ) as cur:
+            rows = await cur.fetchall()
+        return {str(row["state"]): int(row["n"]) for row in rows}
+
+    async def set_event_favorite(self, event_id: str, favorite: bool) -> bool:
+        async with self._write_lock:
+            cursor = await self._db.execute(
+                "UPDATE events SET favorite = ? WHERE id = ?", (int(favorite), event_id)
+            )
+            await self._db.commit()
+        return cursor.rowcount > 0
+
+    # --- segments: class upgrades -----------------------------------------------------------
+    async def upgrade_segments_class(
+        self,
+        camera: str,
+        start_ts: float,
+        end_ts: float,
+        new_klass: str,
+        *,
+        only_from: Sequence[str] = ("continuous", "motion"),
+    ) -> int:
+        """Promote overlapping segments to a higher retention class (never downgrades:
+        `only_from` guards event/favorite footage from being touched)."""
+        placeholders = ", ".join("?" for _ in only_from)
+        async with self._write_lock:
+            cursor = await self._db.execute(
+                f"UPDATE segments SET klass = ? WHERE camera = ? AND end_ts > ? AND"
+                f" start_ts < ? AND klass IN ({placeholders})",
+                (new_klass, camera, start_ts, end_ts, *only_from),
+            )
+            await self._db.commit()
+        return cursor.rowcount
+
+    # --- meta (key/value: schema version, VAPID keys, …) -------------------------------------
+    async def get_meta(self, key: str) -> str | None:
+        async with self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+        return str(row["value"]) if row is not None else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        async with self._write_lock:
+            await self._db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            await self._db.commit()
+
+    # --- managed cameras (UI-created; YAML stays the IaC source of truth) --------------------
+    async def list_managed_cameras(self) -> list[ManagedCameraRow]:
+        async with self._db.execute("SELECT * FROM managed_cameras ORDER BY id") as cur:
+            rows = await cur.fetchall()
+        return [_managed_camera(row) for row in rows]
+
+    async def upsert_managed_camera(self, camera_id: str, config: dict[str, Any]) -> None:
+        now = self._clock()
+        async with self._write_lock:
+            await self._db.execute(
+                "INSERT INTO managed_cameras (id, config, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET"
+                " config = excluded.config, updated_at = excluded.updated_at",
+                (camera_id, json.dumps(config), now, now),
+            )
+            await self._db.commit()
+
+    async def delete_managed_camera(self, camera_id: str) -> bool:
+        async with self._write_lock:
+            cursor = await self._db.execute(
+                "DELETE FROM managed_cameras WHERE id = ?", (camera_id,)
+            )
+            await self._db.commit()
+        return cursor.rowcount > 0
+
+    # --- web-push subscriptions ---------------------------------------------------------------
+    async def upsert_push_subscription(
+        self, endpoint: str, subscription: dict[str, Any], user_id: int
+    ) -> None:
+        async with self._write_lock:
+            await self._db.execute(
+                "INSERT INTO push_subscriptions (endpoint, subscription, user_id, created_at)"
+                " VALUES (?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET"
+                " subscription = excluded.subscription, user_id = excluded.user_id",
+                (endpoint, json.dumps(subscription), user_id, self._clock()),
+            )
+            await self._db.commit()
+
+    async def list_push_subscriptions(self) -> list[PushSubscriptionRow]:
+        async with self._db.execute("SELECT * FROM push_subscriptions") as cur:
+            rows = await cur.fetchall()
+        return [_push_subscription(row) for row in rows]
+
+    async def delete_push_subscription(self, endpoint: str) -> bool:
+        async with self._write_lock:
+            cursor = await self._db.execute(
+                "DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,)
+            )
+            await self._db.commit()
+        return cursor.rowcount > 0

@@ -1,0 +1,9 @@
+{
+  "name": "Vidette",
+  "short_name": "Vidette",
+  "start_url": "/#/live",
+  "display": "standalone",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

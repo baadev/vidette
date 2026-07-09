@@ -1,4 +1,4 @@
-"""Events REST surface tests: list/get/feedback/snapshot + the lazy clip path.
+"""Events REST surface tests: list/get/feedback/favorites/snapshot + the lazy clip path.
 
 Same pattern as tests/test_routers_m1.py: a bare FastAPI() with only the events router,
 `app.state.runtime` a SimpleNamespace of fakes conforming to the DB contract, auth
@@ -9,6 +9,7 @@ ffmpeg over two tiny generated segments (skipped when ffmpeg is absent).
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,22 +65,26 @@ class FakeDb:
     def __init__(self) -> None:
         self.rows: dict[str, EventRow] = {}
         self.segments: list[SegmentRow] = []
-        self.list_calls: list[tuple[str | None, float | None, int]] = []
+        self.list_calls: list[tuple[str | None, float | None, bool, int]] = []
         self.updates: list[dict[str, Any]] = []
+        self.favorite_calls: list[tuple[str, bool]] = []
+        self.upgrade_calls: list[tuple[str, float, float, str, tuple[str, ...]]] = []
 
     async def list_events(
         self,
         *,
         camera: str | None = None,
         since_ts: float | None = None,
+        favorite_only: bool = False,
         limit: int = 100,
     ) -> list[EventRow]:
-        self.list_calls.append((camera, since_ts, limit))
+        self.list_calls.append((camera, since_ts, favorite_only, limit))
         rows = [
             row
             for row in self.rows.values()
             if (camera is None or row.camera == camera)
             and (since_ts is None or row.started_at > since_ts)
+            and (not favorite_only or row.favorite)
         ]
         rows.sort(key=lambda row: (row.started_at, row.id), reverse=True)
         return rows[:limit]
@@ -93,6 +98,36 @@ class FakeDb:
             return False
         self.rows[event_id] = replace(row, feedback=verdict)
         return True
+
+    async def set_event_favorite(self, event_id: str, favorite: bool) -> bool:
+        self.favorite_calls.append((event_id, favorite))
+        row = self.rows.get(event_id)
+        if row is None:
+            return False
+        self.rows[event_id] = replace(row, favorite=favorite)
+        return True
+
+    async def upgrade_segments_class(
+        self,
+        camera: str,
+        start_ts: float,
+        end_ts: float,
+        new_klass: str,
+        *,
+        only_from: Sequence[str] = ("continuous", "motion"),
+    ) -> int:
+        self.upgrade_calls.append((camera, start_ts, end_ts, new_klass, tuple(only_from)))
+        upgraded = 0
+        for index, segment in enumerate(self.segments):
+            if (
+                segment.camera == camera
+                and segment.end_ts > start_ts
+                and segment.start_ts < end_ts
+                and segment.klass in only_from
+            ):
+                self.segments[index] = replace(segment, klass=new_klass)
+                upgraded += 1
+        return upgraded
 
     async def update_event(self, event_id: str, **fields: Any) -> None:
         self.updates.append({"id": event_id, **fields})
@@ -171,10 +206,11 @@ def test_list_events_newest_first_full_shape(harness: Harness) -> None:
         "summary": None,
         "policy": "default",
         "feedback": None,
+        "favorite": False,
         "snapshot": None,  # no snapshot on disk → no URL invented
         "clip": "/api/v1/events/ev-0001/clip.mp4",
     }
-    assert harness.db.list_calls == [(None, None, 50)]  # default limit is 50
+    assert harness.db.list_calls == [(None, None, False, 50)]  # default limit is 50
 
 
 def test_list_events_passes_filters(harness: Harness) -> None:
@@ -182,12 +218,23 @@ def test_list_events_passes_filters(harness: Harness) -> None:
         "/api/v1/events", params={"camera": "front-door", "since_ts": T0, "limit": 7}
     )
     assert response.status_code == 200
-    assert harness.db.list_calls == [("front-door", T0, 7)]
+    assert harness.db.list_calls == [("front-door", T0, False, 7)]
 
 
 def test_list_events_limit_bounds(harness: Harness) -> None:
     assert harness.client.get("/api/v1/events", params={"limit": 0}).status_code == 422
     assert harness.client.get("/api/v1/events", params={"limit": 1001}).status_code == 422
+
+
+def test_list_events_favorite_filter(harness: Harness) -> None:
+    harness.db.rows["ev-0001"] = make_event("ev-0001", started_at=T0)
+    harness.db.rows["ev-0002"] = make_event("ev-0002", started_at=T0 + 60, favorite=True)
+    response = harness.client.get("/api/v1/events", params={"favorite": "true"})
+    assert response.status_code == 200
+    body = response.json()
+    assert [event["id"] for event in body] == ["ev-0002"]
+    assert body[0]["favorite"] is True
+    assert harness.db.list_calls == [(None, None, True, 50)]
 
 
 def test_get_event_includes_snapshot_url_when_present(harness: Harness, media_dir: Path) -> None:
@@ -226,6 +273,85 @@ def test_feedback_bad_verdict_422(harness: Harness) -> None:
 def test_feedback_unknown_event_404(harness: Harness) -> None:
     response = harness.client.post("/api/v1/events/ghost/feedback", json={"verdict": "down"})
     assert response.status_code == 404
+
+
+# --- favorites ----------------------------------------------------------------------------------
+
+
+def test_favorite_star_pins_footage_to_favorite_class(harness: Harness, media_dir: Path) -> None:
+    harness.db.rows["ev-0001"] = make_event("ev-0001", started_at=T0, ended_at=T0 + 30.0)
+    fake_path = media_dir / "front-door" / "seg.mp4"  # never exists; the fake ignores it
+    harness.db.segments = [
+        seg_row(1, T0 - 20.0, fake_path, seconds=10.0),  # ends before the pre-roll: untouched
+        seg_row(2, T0, fake_path, seconds=10.0),  # continuous → favorite
+        seg_row(3, T0 + 10.0, fake_path, seconds=10.0, klass="motion"),  # motion → favorite
+        seg_row(4, T0 + 20.0, fake_path, seconds=10.0, klass="event"),  # event lifts too
+        seg_row(5, T0 + 40.0, fake_path, seconds=10.0),  # starts after the post-roll: untouched
+    ]
+
+    response = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": True})
+
+    assert response.status_code == 204
+    assert harness.db.favorite_calls == [("ev-0001", True)]
+    assert harness.db.rows["ev-0001"].favorite is True
+    assert harness.db.upgrade_calls == [
+        ("front-door", T0 - 5.0, T0 + 35.0, "favorite", ("continuous", "motion", "event"))
+    ]
+    assert [segment.klass for segment in harness.db.segments] == [
+        "continuous",
+        "favorite",
+        "favorite",
+        "favorite",
+        "continuous",
+    ]
+    assert harness.client.get("/api/v1/events/ev-0001").json()["favorite"] is True
+
+
+def test_unfavorite_returns_footage_to_event_class(harness: Harness, media_dir: Path) -> None:
+    """Unstar drops `favorite` back to `event` — retention resumes the event schedule."""
+    harness.db.rows["ev-0001"] = make_event(
+        "ev-0001", started_at=T0, ended_at=T0 + 30.0, favorite=True
+    )
+    fake_path = media_dir / "front-door" / "seg.mp4"
+    harness.db.segments = [
+        seg_row(1, T0, fake_path, seconds=10.0, klass="favorite"),
+        seg_row(2, T0 + 10.0, fake_path, seconds=10.0),  # never was favorite: untouched
+    ]
+
+    response = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": False})
+
+    assert response.status_code == 204
+    assert harness.db.favorite_calls == [("ev-0001", False)]
+    assert harness.db.rows["ev-0001"].favorite is False
+    assert harness.db.upgrade_calls == [("front-door", T0 - 5.0, T0 + 35.0, "event", ("favorite",))]
+    assert [segment.klass for segment in harness.db.segments] == ["event", "continuous"]
+    assert harness.client.get("/api/v1/events/ev-0001").json()["favorite"] is False
+
+
+def test_favorite_open_event_pads_range_to_max_clip_span(harness: Harness) -> None:
+    harness.db.rows["ev-0001"] = make_event("ev-0001", started_at=T0)  # still open
+    response = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": True})
+    assert response.status_code == 204
+    assert harness.db.upgrade_calls == [
+        ("front-door", T0 - 5.0, T0 + 305.0, "favorite", ("continuous", "motion", "event"))
+    ]
+
+
+def test_favorite_unknown_event_404(harness: Harness) -> None:
+    response = harness.client.post("/api/v1/events/ghost/favorite", json={"favorite": True})
+    assert response.status_code == 404
+    assert _problem(response.json())["title"] == "Event not found"
+    assert harness.db.favorite_calls == []
+    assert harness.db.upgrade_calls == []
+
+
+def test_favorite_bad_body_422(harness: Harness) -> None:
+    harness.db.rows["ev-0001"] = make_event("ev-0001")
+    assert harness.client.post("/api/v1/events/ev-0001/favorite", json={}).status_code == 422
+    response = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": "maybe"})
+    assert response.status_code == 422
+    assert harness.db.favorite_calls == []
+    assert harness.db.rows["ev-0001"].favorite is False
 
 
 # --- snapshot -----------------------------------------------------------------------------------
@@ -294,7 +420,9 @@ def make_segment_clip(path: Path, seconds: float = 2.0) -> None:
     )
 
 
-def seg_row(row_id: int, start_ts: float, path: Path, seconds: float = 2.0) -> SegmentRow:
+def seg_row(
+    row_id: int, start_ts: float, path: Path, seconds: float = 2.0, klass: str = "continuous"
+) -> SegmentRow:
     return SegmentRow(
         id=row_id,
         camera="front-door",
@@ -302,7 +430,7 @@ def seg_row(row_id: int, start_ts: float, path: Path, seconds: float = 2.0) -> S
         end_ts=start_ts + seconds,
         path=str(path),
         size_bytes=path.stat().st_size if path.exists() else 0,
-        klass="continuous",
+        klass=klass,
         codec="h264",
     )
 
@@ -382,3 +510,5 @@ def test_scope_guard_requires_read_events(harness: Harness) -> None:
     harness.app.dependency_overrides[auth_deps.current_principal] = lambda: streams_only
     assert harness.client.get("/api/v1/events").status_code == 403
     assert harness.client.get("/api/v1/events/ev-0001").status_code == 403
+    favorite = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": True})
+    assert favorite.status_code == 403

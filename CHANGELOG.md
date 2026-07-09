@@ -6,6 +6,30 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — M2 completion + camera management UI
+- **Camera management beyond YAML:** UI-created cameras live in the database and merge into
+  the effective config at boot and on change (hot-apply restarts capture briefly); the
+  hand-written YAML remains the IaC source of truth and is never rewritten — id collisions
+  resolve to the file with a warning. CRUD API under `/api/v1/config/cameras` (+ ONVIF
+  `discover`, per-camera `probe`), Cameras page in the web app, and an SVG zone editor
+  (file-defined cameras get a copy-paste YAML snippet instead of silent file edits).
+- Web push (VAPID): self-hosted keys (generated once, stored in the DB), subscription API,
+  PWA manifest + service worker, subscribe/unsubscribe from the System page; expired
+  subscriptions pruned on 404/410.
+- MQTT + Home Assistant discovery: availability (retained + LWT), per-camera person
+  occupancy, full event JSON, system events; reconnect with backoff; deliberately no
+  per-frame motion chatter.
+- Live WebSocket event stream (`/api/v1/ws`) with topic filters; the Events page updates
+  live and falls back to polling while disconnected.
+- Prometheus `/metrics` (hand-rolled exposition, bearer-token scrape): pipeline/recorder/
+  disk/notification/bus/event series.
+- Event favorites: star in the UI, `favorite=true` filter, and footage upgraded to the
+  `favorite` retention class (unstar returns it to the `event` class).
+- Event engine hardening: snapshot retry for open confirmed events (gateway-warmup race
+  observed live), and confirmed events now upgrade their footage to the `event` retention
+  class on close.
+- Duration values round-trip through `model_dump(mode="json")` ("3d", not ISO-8601 "P3D").
+
 ### Added — M2 "Detect" (core)
 - The understanding cascade, tiers 0–2: ffmpeg substream decoder → pure-numpy motion gate
   (EMA background, day/night damping) → YOLOX-tiny detector via ONNX Runtime (Apache-2.0

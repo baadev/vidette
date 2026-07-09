@@ -12,6 +12,8 @@ x 0.2..0.8 / y 0.3..0.7, door entry x 0.4..0.6 / y 0.1..0.3.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -20,8 +22,13 @@ import pytest
 
 from vidette.core.config import Sensitivity, VidetteConfig, ZoneKind
 from vidette.core.events import InProcessEventBus, Subscription
-from vidette.db import Database
-from vidette.events.engine import EventEngine, is_suppressed, promotion_reason
+from vidette.db import Database, SegmentRow
+from vidette.events.engine import (
+    SNAPSHOT_MAX_ATTEMPTS,
+    EventEngine,
+    is_suppressed,
+    promotion_reason,
+)
 from vidette.pipeline.base import BBox, CascadeSpec, Detection, TrackState
 
 T0 = 1_751_900_000.0  # arbitrary fixed epoch
@@ -66,6 +73,8 @@ class FakeEventDb:
 
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
+        self.segments: list[SegmentRow] = []
+        self.upgrade_calls: list[tuple[str, float, float, str, tuple[str, ...]]] = []
         self.insert_error: Exception | None = None
 
     async def insert_event(
@@ -122,6 +131,41 @@ class FakeEventDb:
         ):
             if value is not None:
                 row[column] = value
+
+    async def upgrade_segments_class(
+        self,
+        camera: str,
+        start_ts: float,
+        end_ts: float,
+        new_klass: str,
+        *,
+        only_from: Sequence[str] = ("continuous", "motion"),
+    ) -> int:
+        self.upgrade_calls.append((camera, start_ts, end_ts, new_klass, tuple(only_from)))
+        upgraded = 0
+        for index, segment in enumerate(self.segments):
+            if (
+                segment.camera == camera
+                and segment.end_ts > start_ts
+                and segment.start_ts < end_ts
+                and segment.klass in only_from
+            ):
+                self.segments[index] = replace(segment, klass=new_klass)
+                upgraded += 1
+        return upgraded
+
+
+def seg(seg_id: int, start_ts: float, end_ts: float, klass: str = "continuous") -> SegmentRow:
+    return SegmentRow(
+        id=seg_id,
+        camera="front-door",
+        start_ts=start_ts,
+        end_ts=end_ts,
+        path=f"/media/front-door/{seg_id}.mp4",
+        size_bytes=1,
+        klass=klass,
+        codec="h264",
+    )
 
 
 def person(ax: float, ay: float, *, conf: float = 0.9) -> Detection:
@@ -397,6 +441,137 @@ async def test_engine_contains_crashes(tmp_path: Path, media_dir: Path) -> None:
 
     # Unknown cameras are ignored, not fatal.
     await engine.on_detections("ghost-cam", T0, [person(0.5, 0.5)], [])
+
+
+# --- snapshot retry -------------------------------------------------------------------------
+
+
+class FlakySnapshot:
+    """Fails the first `fail_times` calls, then returns JPEG bytes; counts every call."""
+
+    def __init__(self, fail_times: int) -> None:
+        self.fail_times = fail_times
+        self.calls = 0
+
+    async def __call__(self, camera: str) -> bytes:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RuntimeError("gateway still warming up")
+        return b"\xff\xd8\xff\xe0-retried-" + camera.encode()
+
+
+async def test_snapshot_retry_recovers_while_event_is_open(tmp_path: Path, media_dir: Path) -> None:
+    """Promotion raced the gateway warmup → later passes retry and attach the snapshot."""
+    flaky = FlakySnapshot(fail_times=2)
+    engine, db, _bus, _subscription = make_engine(tmp_path, media_dir, snapshot_fn=flaky)
+    confirm_ts = await approach_the_door(engine)  # attempt 1 fails at confirmation time
+    (event_id,) = db.rows  # exactly one event was created
+    assert flaky.calls == 1
+    assert db.rows[event_id]["snapshot_path"] is None
+
+    # Too soon (< 5 s since the last attempt): this pass must not retry.
+    await engine.on_detections("front-door", confirm_ts + 2.0, [person(0.5, 0.25)], [])
+    assert flaky.calls == 1
+
+    # 5 s elapsed → a bare tick retries too (attempt 2, still failing)...
+    await engine.tick(confirm_ts + 5.0)
+    assert flaky.calls == 2
+    assert db.rows[event_id]["snapshot_path"] is None
+
+    # ...person still at the door keeps the event open; +7 is again too soon.
+    await engine.on_detections("front-door", confirm_ts + 7.0, [person(0.5, 0.25)], [])
+    assert flaky.calls == 2
+
+    # Attempt 3 succeeds: file on disk, DB updated, in-memory media state updated.
+    await engine.on_detections("front-door", confirm_ts + 10.0, [person(0.5, 0.25)], [])
+    assert flaky.calls == 3
+    snapshot = media_dir / "front-door" / "events" / event_id / "snapshot.jpeg"
+    assert snapshot.is_file()
+    assert snapshot.read_bytes() == b"\xff\xd8\xff\xe0-retried-front-door"
+    assert db.rows[event_id]["snapshot_path"] == str(snapshot)
+
+    # Once attached, later passes leave the gateway alone.
+    await engine.on_detections("front-door", confirm_ts + 16.0, [person(0.5, 0.25)], [])
+    assert flaky.calls == 3
+
+
+async def test_snapshot_retry_gives_up_after_attempt_cap(tmp_path: Path, media_dir: Path) -> None:
+    """A dead gateway gets SNAPSHOT_MAX_ATTEMPTS tries, then the engine stops asking."""
+    flaky = FlakySnapshot(fail_times=99)  # never succeeds
+    engine, db, _bus, _subscription = make_engine(tmp_path, media_dir, snapshot_fn=flaky)
+    confirm_ts = await approach_the_door(engine)  # attempt 1
+    for step in range(1, 8):  # 7 eligible passes at exactly 5 s spacing; only 4 may retry
+        await engine.on_detections("front-door", confirm_ts + 5.0 * step, [person(0.5, 0.25)], [])
+    assert flaky.calls == SNAPSHOT_MAX_ATTEMPTS
+    row = next(iter(db.rows.values()))
+    assert row["state"] == "confirmed"  # the event itself is fine, just snapshotless
+    assert row["snapshot_path"] is None
+    assert not (media_dir / "front-door" / "events").exists()
+
+
+# --- retention class upgrade on close -------------------------------------------------------
+
+
+async def test_close_of_confirmed_event_upgrades_footage_retention(
+    tmp_path: Path, media_dir: Path
+) -> None:
+    """event.ended pulls overlapping continuous/motion segments (±5 s) into `event`."""
+    engine, db, _bus, subscription = make_engine(tmp_path, media_dir)
+    confirm_ts = await approach_the_door(engine)
+    await asyncio.wait_for(subscription.get(), timeout=1.0)  # drain event.confirmed
+    end_ts = confirm_ts + 16.0
+    db.segments = [
+        seg(1, confirm_ts - 30.0, confirm_ts - 20.0),  # ends before the pre-roll: untouched
+        seg(2, confirm_ts - 10.0, confirm_ts - 4.0),  # overlaps the −5 s pre-roll
+        seg(3, confirm_ts, confirm_ts + 10.0, klass="motion"),  # motion upgrades too
+        seg(4, end_ts + 4.0, end_ts + 10.0),  # overlaps the +5 s post-roll
+        seg(5, end_ts + 10.0, end_ts + 20.0),  # starts after the post-roll: untouched
+        seg(6, confirm_ts, confirm_ts + 10.0, klass="favorite"),  # only_from guard holds
+    ]
+
+    await engine.on_detections("front-door", end_ts, [], [])
+
+    assert db.upgrade_calls == [
+        ("front-door", confirm_ts - 5.0, end_ts + 5.0, "event", ("continuous", "motion"))
+    ]
+    assert [segment.klass for segment in db.segments] == [
+        "continuous",
+        "event",
+        "event",
+        "event",
+        "continuous",
+        "favorite",
+    ]
+    topic, _payload = await asyncio.wait_for(subscription.get(), timeout=1.0)
+    assert topic == "event.ended"  # the upgrade rides the event.ended path
+
+
+async def test_close_of_dismissed_event_leaves_footage_on_continuous_schedule(
+    tmp_path: Path, media_dir: Path
+) -> None:
+    """Dismissed events stay searchable, but never spend the `event` retention budget."""
+    engine, db, _bus, subscription = make_engine(
+        tmp_path,
+        media_dir,
+        policies=[
+            {"name": "chill", "description": "only touch or entry dwell", "sensitivity": "relaxed"}
+        ],
+    )
+    last_ts = T0
+    for index in range(13):  # pacing inside the porch → loiter promotes, no policy wants it
+        x = 0.45 if index % 2 == 0 else 0.55
+        last_ts = T0 + index
+        await engine.on_detections("front-door", last_ts, [person(x, 0.5)], [])
+    row = next(iter(db.rows.values()))
+    assert row["state"] == "dismissed"
+    db.segments = [seg(1, T0, T0 + 30.0), seg(2, T0 + 5.0, T0 + 15.0, klass="motion")]
+
+    await engine.tick(last_ts + 16.0)
+
+    assert row["ended_at"] == pytest.approx(last_ts + 16.0)  # closed…
+    assert db.upgrade_calls == []  # …but no retention upgrade
+    assert [segment.klass for segment in db.segments] == ["continuous", "motion"]
+    assert subscription._queue.empty()  # and still silent
 
 
 # --- real Database round-trip (exercises the V2 migration + event methods) ----------------------

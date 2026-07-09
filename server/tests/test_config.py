@@ -65,6 +65,22 @@ def test_parse_duration_rejects_garbage() -> None:
         parse_duration("3 days")
 
 
+def test_duration_json_dump_round_trips() -> None:
+    """model_dump(mode='json') output must re-validate — the camera-management API returns
+    dumped configs that clients may PUT back verbatim."""
+    config = VidetteConfig.model_validate(
+        {"storage": {"retention": {"continuous": "36h", "motion": "90s", "favorites": "forever"}}}
+    )
+    dumped = config.model_dump(mode="json")
+    assert dumped["storage"]["retention"] == {
+        "continuous": "36h",
+        "motion": "90s",
+        "events": "90d",
+        "favorites": "forever",
+    }
+    assert VidetteConfig.model_validate(dumped).storage.retention == config.storage.retention
+
+
 def test_missing_env_vars_are_named() -> None:
     report = validate_config_text(
         "cameras:\n  cam:\n    source: {main: 'rtsp://u:${NOT_SET_A}@h/1?${NOT_SET_B}'}\n",

@@ -2,8 +2,10 @@
 
 Events are read straight from the SQLite event store; the snapshot is written at
 confirmation time, while the clip is **lazy** — materialized (concat remux via
-`events.clips`) on the first request and cached on the row. Guarded by the
-`read:events` scope.
+`events.clips`) on the first request and cached on the row. Starring an event pins its
+footage to the `favorite` retention class (kept forever by default —
+docs/architecture/storage.md); unstarring returns it to the `event` schedule. Guarded by
+the `read:events` scope.
 
 Path safety: snapshot/clip files are only served when their resolved path stays under
 `storage.media_dir` — rows come from our own DB, but defense in depth is house policy.
@@ -23,6 +25,7 @@ from vidette.api.errors import problem
 from vidette.auth.deps import require_scope
 from vidette.db import EventRow
 from vidette.events.clips import materialize_clip
+from vidette.events.engine import EVENT_FOOTAGE_PAD_S
 from vidette.runtime import AppRuntime
 
 router = APIRouter(
@@ -61,12 +64,17 @@ class EventOut(BaseModel):
     summary: str | None
     policy: str | None
     feedback: str | None
+    favorite: bool
     snapshot: str | None
     clip: str
 
 
 class FeedbackIn(BaseModel):
     verdict: Literal["up", "down"]
+
+
+class FavoriteIn(BaseModel):
+    favorite: bool
 
 
 def _runtime(request: Request) -> AppRuntime:
@@ -86,6 +94,7 @@ def _event_out(row: EventRow) -> EventOut:
         summary=row.summary,
         policy=row.policy,
         feedback=row.feedback,
+        favorite=row.favorite,
         snapshot=(
             f"/api/v1/events/{row.id}/snapshot.jpeg" if row.snapshot_path is not None else None
         ),
@@ -114,9 +123,12 @@ async def list_events(
     request: Request,
     camera: str | None = None,
     since_ts: float | None = None,
+    favorite: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 50,
 ) -> list[EventOut]:
-    rows = await _runtime(request).db.list_events(camera=camera, since_ts=since_ts, limit=limit)
+    rows = await _runtime(request).db.list_events(
+        camera=camera, since_ts=since_ts, favorite_only=favorite, limit=limit
+    )
     return [_event_out(row) for row in rows]
 
 
@@ -177,3 +189,29 @@ async def event_feedback(event_id: str, body: FeedbackIn, request: Request) -> N
     updated = await _runtime(request).db.set_event_feedback(event_id, body.verdict)
     if not updated:
         raise problem(404, "Event not found", _EVENT_GONE)
+
+
+@router.post("/events/{event_id}/favorite", status_code=204)
+async def event_favorite(event_id: str, body: FavoriteIn, request: Request) -> None:
+    """Star/unstar an event — and move its footage between retention classes.
+
+    Starring pins the event's segments (with the engine's pre/post-roll pad) to the
+    `favorite` class, lifting even already-`event` footage; unstarring drops the same
+    range from `favorite` back to `event`, so retention resumes the event schedule.
+    Requires only `read:events` like its neighbors: viewers may star what they can see.
+    """
+    runtime = _runtime(request)
+    row = await _get_event_or_404(request, event_id)
+    start_ts = row.started_at - EVENT_FOOTAGE_PAD_S
+    end_ts = (
+        row.ended_at if row.ended_at is not None else row.started_at + MAX_OPEN_CLIP_SPAN_S
+    ) + EVENT_FOOTAGE_PAD_S
+    await runtime.db.set_event_favorite(event_id, body.favorite)
+    if body.favorite:
+        await runtime.db.upgrade_segments_class(
+            row.camera, start_ts, end_ts, "favorite", only_from=("continuous", "motion", "event")
+        )
+    else:
+        await runtime.db.upgrade_segments_class(
+            row.camera, start_ts, end_ts, "event", only_from=("favorite",)
+        )

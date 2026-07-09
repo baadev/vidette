@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { UNAUTHORIZED_EVENT } from "../api";
+import { getPushState, subscribePush, unsubscribePush, type PushState } from "../push";
 
 type Health = { status: string; version: string };
 
@@ -30,6 +31,14 @@ const TIERS = [
   { name: "T4 · Your policy", detail: "plain language, compiled & inspectable", milestone: "M4" },
 ];
 
+/** Status-line copy per push state; "muted" dots get their color inline. */
+const PUSH_STATUS: Record<PushState, { dot: "ok" | "bad" | "muted"; label: string }> = {
+  subscribed: { dot: "ok", label: "subscribed on this browser" },
+  unsubscribed: { dot: "muted", label: "not subscribed" },
+  denied: { dot: "bad", label: "blocked in browser settings" },
+  unsupported: { dot: "muted", label: "not supported by this browser" },
+};
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -47,6 +56,9 @@ export function SystemPage() {
   const [health, setHealth] = useState<Health | null>(null);
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [push, setPush] = useState<PushState | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushError, setPushError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,12 +74,39 @@ export function SystemPage() {
         if (!cancelled) setSystem(data);
       })
       .catch(() => undefined);
+    getPushState()
+      .then((state) => {
+        if (!cancelled) setPush(state);
+      })
+      .catch(() => {
+        if (!cancelled) setPush("unsupported");
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
+  const togglePush = async () => {
+    setPushBusy(true);
+    setPushError(null);
+    try {
+      if (push === "subscribed") {
+        await unsubscribePush();
+      } else {
+        await subscribePush();
+      }
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : String(err));
+    } finally {
+      // Re-read the real state either way — a failed subscribe may still have
+      // flipped the permission (e.g. to "denied").
+      setPush(await getPushState().catch(() => "unsupported" as const));
+      setPushBusy(false);
+    }
+  };
+
   const gateway = system?.gateway;
+  const pushStatus = push === null ? null : PUSH_STATUS[push];
 
   return (
     <div className="page-narrow">
@@ -134,12 +173,65 @@ export function SystemPage() {
         </ol>
       </section>
 
+      <section className="card">
+        <h2>Notifications</h2>
+        {pushStatus === null && <p className="muted">Checking notification support…</p>}
+        {pushStatus !== null && (
+          <p>
+            <span
+              className={pushStatus.dot === "muted" ? "dot" : `dot ${pushStatus.dot}`}
+              style={pushStatus.dot === "muted" ? { background: "var(--muted)" } : undefined}
+            />{" "}
+            Web push <strong>{pushStatus.label}</strong>
+          </p>
+        )}
+        {push !== null && push !== "unsupported" && (
+          <p>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void togglePush()}
+              disabled={pushBusy || push === "denied"}
+            >
+              {pushBusy
+                ? push === "subscribed"
+                  ? "Unsubscribing…"
+                  : "Subscribing…"
+                : push === "subscribed"
+                  ? "Unsubscribe"
+                  : "Subscribe"}
+            </button>
+          </p>
+        )}
+        {pushError && <p className="error">{pushError}</p>}
+        {push === "denied" && (
+          <p className="muted">
+            The browser is blocking notifications for this site — re-allow them in the site
+            settings, then reload this page.
+          </p>
+        )}
+        <p className="muted">
+          iOS requires installing Vidette to the Home Screen (Share → Add to Home Screen) before
+          push works. Notifications arrive only for confirmed events, per your notification
+          rules.
+        </p>
+      </section>
+
       <footer>
         <a href="https://github.com/baadev/vidette">GitHub</a>
         <a href="https://github.com/baadev/vidette/blob/main/ROADMAP.md">Roadmap</a>
         <a href="/api/docs">API docs</a>
         <a href="mailto:alex@baadev.com">Contact</a>
       </footer>
+      <p className="muted" style={{ margin: 0, textAlign: "center" }}>
+        <a
+          href="/metrics"
+          style={{ color: "inherit", textDecoration: "none", borderBottom: "1px solid var(--line)" }}
+        >
+          Prometheus metrics
+        </a>{" "}
+        — scrape with a bearer token.
+      </p>
     </div>
   );
 }

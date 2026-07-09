@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { UNAUTHORIZED_EVENT, api, type Me } from "./api";
+import { CamerasPage } from "./pages/Cameras";
 import { EventsPage } from "./pages/Events";
 import { LivePage } from "./pages/Live";
 import { LoginPage } from "./pages/Login";
@@ -7,7 +8,7 @@ import { ReviewPage } from "./pages/Review";
 import { SetupPage } from "./pages/Setup";
 import { SystemPage } from "./pages/System";
 
-type Route = "live" | "events" | "review" | "system" | "setup";
+type Route = "live" | "events" | "review" | "cameras" | "system" | "setup";
 
 // "setup" is deliberately absent: it is a one-time first-run flow, reachable
 // right after bootstrap (and via #/setup), not a permanent nav destination.
@@ -15,12 +16,14 @@ const ROUTES: { route: Route; hash: string; label: string }[] = [
   { route: "live", hash: "#/live", label: "Live" },
   { route: "events", hash: "#/events", label: "Events" },
   { route: "review", hash: "#/review", label: "Review" },
+  { route: "cameras", hash: "#/cameras", label: "Cameras" },
   { route: "system", hash: "#/system", label: "System" },
 ];
 
 function parseRoute(hash: string): Route {
   if (hash.startsWith("#/events")) return "events";
   if (hash.startsWith("#/review")) return "review";
+  if (hash.startsWith("#/cameras")) return "cameras";
   if (hash.startsWith("#/system")) return "system";
   if (hash.startsWith("#/setup")) return "setup";
   return "live"; // default, including "" and unknown hashes
@@ -158,6 +161,7 @@ export function App() {
         {route === "live" && <LivePage />}
         {route === "events" && <EventsPage />}
         {route === "review" && <ReviewPage />}
+        {route === "cameras" && <CamerasPage />}
         {route === "system" && <SystemPage />}
         {route === "setup" && <SetupPage onDone={handleSetupDone} />}
       </main>
