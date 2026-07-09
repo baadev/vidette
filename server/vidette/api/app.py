@@ -2,8 +2,8 @@
 
 Honesty rule (docs/project/principles.md): designed-but-unimplemented routes are mounted and
 return `501 {"status": "designed", "milestone": ...}` — the API self-documents the roadmap
-instead of 404-ing or, worse, faking. As of M1, cameras/recordings/streams/export are real;
-events (M2) and policies (M4) remain honest 501s.
+instead of 404-ing or, worse, faking. As of M2, cameras/recordings/streams/export/events are
+real; policies (M4) remains an honest 501.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ _REQUIRE_READ_CONFIG = require_scope("read:config")
 
 # (path, methods, milestone) — remove entries as milestones ship; tests pin this behavior.
 DESIGNED_ROUTES: tuple[tuple[str, tuple[str, ...], str], ...] = (
-    ("/api/v1/events", ("GET",), "M2"),
     ("/api/v1/policies", ("GET", "PUT"), "M4"),
 )
 
@@ -91,7 +90,7 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
         return {
             "name": "vidette",
             "version": __version__,
-            "milestone": "M1",
+            "milestone": "M2",
             "python": platform.python_version(),
             "config_warnings": rt.config_warnings,
             "auth_mode": rt.config.server.auth.mode.value,
@@ -109,6 +108,18 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
                     "restarts": status.restarts,
                 }
                 for camera, status in rt.recorder.status().items()
+            },
+            "detector": rt.detector_state,
+            "pipelines": {
+                camera: {
+                    "state": status.state,
+                    "frames_total": status.frames_total,
+                    "motion_frames": status.motion_frames,
+                    "detect_calls": status.detect_calls,
+                    "last_frame_at": status.last_frame_at,
+                    "last_error": status.last_error,
+                }
+                for camera, status in rt.pipeline.status().items()
             },
             "designed_routes": [
                 {"path": path, "milestone": milestone}
@@ -136,12 +147,14 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
 
     from vidette.api.routers.auth import router as auth_router
     from vidette.api.routers.cameras import router as cameras_router
+    from vidette.api.routers.events import router as events_router
     from vidette.api.routers.recordings import router as recordings_router
     from vidette.api.routers.streams import router as streams_router
     from vidette.api.routers.system import router as system_router
 
     app.include_router(auth_router)
     app.include_router(cameras_router)
+    app.include_router(events_router)
     app.include_router(recordings_router)
     app.include_router(streams_router)
     app.include_router(system_router)

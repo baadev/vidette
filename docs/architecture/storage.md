@@ -26,7 +26,7 @@ days of history a disk holds, and whether footage survives the day something act
 /media/vidette/<camera>/YYYY/MM/DD/HH/<epoch>.mp4   # 10-second fMP4 segments, codec-copy
 /media/vidette/<camera>/events/<event-id>/clip.mp4  # remuxed pre/post-roll — no re-encode
 /media/vidette/<camera>/events/<event-id>/snapshot.webp
-/media/vidette/<camera>/previews/YYYY/MM/DD/HH.mp4  # scrub strip: ~1 fps, tiny, powers the timeline
+/media/vidette/<camera>/previews/<hour_epoch>.mp4   # scrub strip: ~1 fps, tiny, powers the timeline
 ```
 
 - **10 s segments** balance seek granularity, per-file overhead, and worst-case loss window.

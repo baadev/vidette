@@ -1,21 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
 import { UNAUTHORIZED_EVENT, api, type Me } from "./api";
+import { EventsPage } from "./pages/Events";
 import { LivePage } from "./pages/Live";
 import { LoginPage } from "./pages/Login";
 import { ReviewPage } from "./pages/Review";
+import { SetupPage } from "./pages/Setup";
 import { SystemPage } from "./pages/System";
 
-type Route = "live" | "review" | "system";
+type Route = "live" | "events" | "review" | "system" | "setup";
 
+// "setup" is deliberately absent: it is a one-time first-run flow, reachable
+// right after bootstrap (and via #/setup), not a permanent nav destination.
 const ROUTES: { route: Route; hash: string; label: string }[] = [
   { route: "live", hash: "#/live", label: "Live" },
+  { route: "events", hash: "#/events", label: "Events" },
   { route: "review", hash: "#/review", label: "Review" },
   { route: "system", hash: "#/system", label: "System" },
 ];
 
 function parseRoute(hash: string): Route {
+  if (hash.startsWith("#/events")) return "events";
   if (hash.startsWith("#/review")) return "review";
   if (hash.startsWith("#/system")) return "system";
+  if (hash.startsWith("#/setup")) return "setup";
   return "live"; // default, including "" and unknown hashes
 }
 
@@ -69,8 +76,17 @@ export function App() {
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, []);
 
-  const handleAuthed = useCallback((user: Me) => {
-    setBoot({ phase: "authed", user });
+  const handleAuthed = useCallback(
+    (user: Me) => {
+      // After the first-run bootstrap, walk through camera setup once.
+      if (boot.phase === "wizard") window.location.hash = "#/setup";
+      setBoot({ phase: "authed", user });
+    },
+    [boot.phase],
+  );
+
+  const handleSetupDone = useCallback(() => {
+    window.location.hash = "#/live";
   }, []);
 
   const handleLogout = useCallback(async () => {
@@ -140,8 +156,10 @@ export function App() {
       </header>
       <main className="app-main">
         {route === "live" && <LivePage />}
+        {route === "events" && <EventsPage />}
         {route === "review" && <ReviewPage />}
         {route === "system" && <SystemPage />}
+        {route === "setup" && <SetupPage onDone={handleSetupDone} />}
       </main>
     </div>
   );

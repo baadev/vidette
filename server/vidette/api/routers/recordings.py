@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from vidette.api.errors import problem
 from vidette.auth.deps import require_scope
 from vidette.recording.exporter import ExportError
+from vidette.recording.previews import preview_path
 from vidette.runtime import AppRuntime
 
 MAX_QUERY_RANGE_S = 7 * 24 * 3600  # listing window; export has its own (tighter) clamp
@@ -141,6 +142,22 @@ async def segment_file(segment_id: int, request: Request) -> FileResponse:
     path = Path(row.path).resolve()
     if not path.is_relative_to(media_root) or not path.is_file():
         raise problem(404, "Recording not available", _SEGMENT_GONE)
+    return FileResponse(path, media_type="video/mp4")
+
+
+@router.get("/recordings/preview")
+async def preview_file(request: Request, camera: str, hour_start_ts: float) -> FileResponse:
+    runtime = _runtime(request)
+    _ensure_camera(runtime, camera)
+    media_root = runtime.config.storage.media_dir.resolve()
+    path = preview_path(runtime.config.storage.media_dir, camera, hour_start_ts).resolve()
+    if not path.is_relative_to(media_root) or not path.is_file():
+        raise problem(
+            404,
+            "Preview not available",
+            "preview not generated yet — previews cover completed hours and appear "
+            "within ~5 minutes",
+        )
     return FileResponse(path, media_type="video/mp4")
 
 

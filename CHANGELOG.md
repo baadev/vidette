@@ -6,6 +6,30 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — M2 "Detect" (core)
+- The understanding cascade, tiers 0–2: ffmpeg substream decoder → pure-numpy motion gate
+  (EMA background, day/night damping) → YOLOX-tiny detector via ONNX Runtime (Apache-2.0
+  model, sha256-pinned download, CoreML/CPU providers, lazy load with loud motion-only
+  degrade) → two-stage IoU tracker with zone algebra (approach/dwell/touch/loiter/
+  repeat-pass; `public` zones suppress passers-by before any alert logic).
+- Event engine: one open event per camera, sensitivity-scaled promotion (policy geometric
+  skeleton), snapshots at promotion, lazy clip materialization (remux), `event.confirmed` /
+  `event.ended` on the internal bus; events API (list/get/snapshot/clip/feedback) replaces
+  the M2 `501` stub; Events page in the web app (feed, chips, clips, 👍/👎).
+- Notifications: dispatcher wired to the bus with `when:` rules; signed webhooks per the
+  published contract (HMAC, timestamp-refreshing retries, stable delivery id) and Apprise
+  channels (Telegram/Discord/100+); delivery failures become rate-limited system events and
+  can never notify about themselves (loop guard).
+- System events now mirror onto the bus under `system.*` so notification rules match the
+  documented patterns.
+
+### Added — M1 completion
+- ONVIF adapter (beta): WS-Discovery (`vidette discover`), SOAP profiles → main/sub stream
+  selection, WSSE PasswordDigest with HTTP-digest fallback, actionable probe diagnostics.
+- Timeline scrub-strip previews: per-hour 1 fps strips generated in the background, served
+  via `GET /api/v1/recordings/preview`, hover-scrub UI in Review.
+- First-run wizard step 2: camera checklist with live probe/snapshot verification (Setup page).
+
 ### Changed
 - **Eufy: NAS (RTSP) is the only integration path.** The planned bridge adapter over
   `eufy-security-ws` was removed before shipping — Anker's backend migration shut down the

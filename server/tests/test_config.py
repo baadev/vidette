@@ -31,7 +31,6 @@ def test_example_config_is_valid() -> None:
     report = validate_config_text(EXAMPLE.read_text(encoding="utf-8"), env=EXAMPLE_ENV)
     assert report.valid, report.errors
     # The example configures design-stage features on purpose; honesty warnings must fire.
-    assert any("M2" in w for w in report.warnings)  # notifications delivery
     assert any("M4" in w for w in report.warnings)  # plain-language policies
 
 

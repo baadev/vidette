@@ -46,23 +46,36 @@ if we lose frames, nothing else matters.
 
 **Done when (budgets):** 4×1080p cameras on an Intel N100: < 25 % CPU total, live view p50
 latency < 1 s (WebRTC), zero dropped segments over 7 days, cold start → first live frame < 3 s.
-*The budgets are not yet measured — M1 stays open until they are published.*
+
+*Measured 2026-07-09, Apple M-series dev machine, native stack, 4×1080p synthetic cameras
+(constant motion — adversarial worst case):* recording path (recorders + gateway + API, the
+M1 scope) ≈ **3 % of one core**; cold start → healthz **3.5 s** (includes Python import;
+first live frame arrives with the gateway, sub-second after); **continuous segment
+production** on all 4 cameras once the source chain warmed (~15 s of designed backoff — the
+gateway was deliberately started late); the M2 cascade at 100 % motion duty adds ~125 % of
+one core (real scenes are quiet most of the time — that is the point of Tier 0). The run
+doubled as an unplanned disk-pressure drill: the host volume was genuinely below the 10 %
+watermark, so the janitor fired `storage.low`/`storage.pressure` (delivered over signed
+webhooks) and pressure-deleted oldest-continuous first while the event clip survived —
+exactly the documented ordering. The N100
+reference run and the 7-day soak remain open as ops tasks pending that hardware; every
+software item below is shipped.
 
 | Item | Status |
 |---|---|
 | go2rtc lifecycle management (config generation, hot reload, health) | ✅ |
 | RTSP adapter (manual URLs, main+sub) | ✅ |
-| ONVIF adapter (discovery, profiles) | 📐 |
+| ONVIF adapter (WS-Discovery via `vidette discover`, profiles → main/sub, WSSE+digest auth) | ✅ beta |
 | Codec-copy recorder → fMP4 segments + SQLite index (watchdog, backoff, hour-rollover safe) | ✅ |
 | Retention classes (continuous/motion/events/favorites) + watermark cleanup runtime | ✅ |
 | Auth: first-run admin bootstrap, sessions, scoped API tokens | ✅ |
 | Live wall: WebRTC via authenticated WHEP proxy, snapshot fallback, keyboard-first | ✅ |
 | Timeline: hour strip + segment playback + gap rendering | ✅ |
-| Timeline scrub-strip previews (fast visual scrubbing) | 📐 |
+| Timeline scrub-strip previews (fast visual scrubbing) | ✅ |
 | Range export: remuxed MP4 (no re-encode) via UI + API | ✅ |
-| First-run wizard: add-camera + stream-verification steps (admin step ✅) | 🚧 |
+| First-run wizard: admin step + camera checklist with live probe/snapshot verification | ✅ (camera *editing* stays YAML-first; UI config editor is 🔭) |
 | Disk health: free-space watermarks, write probes, loud failure events | ✅ |
-| Reference-budget benchmark run + published numbers | 🚧 |
+| Benchmark run + published numbers | ✅ dev hardware (above) · N100 reference + 7-day soak 🔭 pending hardware |
 
 ## M2 — Detect
 
@@ -75,15 +88,18 @@ baseline on the reference clip set.
 
 | Item | Status |
 |---|---|
-| Tier 0 motion gate (substream, frame-diff) | 📐 |
-| Tier 1 detector (Apache-2.0 models via ONNX Runtime; CPU/OpenVINO/CUDA/CoreML) | 📐 |
-| Tier 2 ByteTrack + trajectory features (approach vector, dwell, loiter, repeat-pass) | 📐 |
-| Zone editor (entry/object/private/public) with per-kind semantics | 📐 |
-| Event engine: lifecycle, dedupe, review UI, favorites | 📐 |
-| Notifications: signed webhooks, web push (VAPID), Apprise channels | 📐 |
+| Tier 0 motion gate (substream decode, frame-diff, day/night damping) | ✅ |
+| Tier 1 detector (YOLOX-tiny Apache-2.0 via ONNX Runtime, sha256-pinned download; lazy load, motion-only degrade) | ✅ CPU/CoreML verified · CUDA/OpenVINO paths untested |
+| Tier 2 trajectory features (approach, dwell, touch, loiter, repeat-pass) + zone algebra incl. `public` suppression | ✅ (IoU tracker v1; ByteTrack-proper 📐) |
+| Zones configured in YAML | ✅ |
+| Zone editor UI (draw polygons on a snapshot) | 📐 |
+| Event engine: lifecycle, one-open-event-per-camera, snapshots, lazy clips, review UI + feedback | ✅ core |
+| Event favorites (pin + retention class) | 📐 |
+| Notifications: signed webhooks (HMAC, retries) + Apprise channels | ✅ |
+| Web push (VAPID) | 📐 |
 | MQTT + Home Assistant discovery (camera, motion, person, event entities) | 📐 |
 | Prometheus `/metrics` | 📐 |
-| Reference clip set + accuracy harness (public, versioned) | 📐 |
+| Reference clip set + accuracy harness (public, versioned) — gates the M2 "done" claim | 📐 |
 
 ## M3 — Understand
 
@@ -138,9 +154,10 @@ The complete list of key functionality and its implementation state.
 | Capability | Status | Milestone |
 |---|---|---|
 | Manual RTSP sources (main/sub streams) | ✅ | M1 |
-| ONVIF discovery, profiles, PTZ | 📐 | M1–M2 |
+| ONVIF: WS-Discovery, profiles → main/sub, WSSE/digest auth | ✅ beta | M1 |
+| ONVIF events + PTZ | 📐 | M2 |
 | Adapter SDK (typed protocol, entry points, sidecar bridges) | ✅ interfaces / 📐 3rd-party runtime | M0/M2 |
-| Eufy via built-in NAS (RTSP) on supported models — plain `rtsp` adapter, no bridge ([guide](docs/cameras/eufy.md)) | 🚧 | M1 |
+| Eufy via built-in NAS (RTSP) on supported models — plain `rtsp` adapter, no bridge ([guide](docs/cameras/eufy.md)) | ✅ | M1 |
 | Eufy cloud/P2P bridge | ❌ blocked — vendor shut the legacy API ([why](docs/cameras/eufy.md#why-there-is-no-bridge)); becomes 🔭 only if upstream revives | — |
 | Two-way audio | 🔭 | M5 |
 
@@ -157,10 +174,11 @@ The complete list of key functionality and its implementation state.
 ### Understanding
 | Capability | Status | Milestone |
 |---|---|---|
-| Motion gate (Tier 0) | 📐 | M2 |
-| Object detection (Tier 1, permissive-license models) | 📐 | M2 |
-| Tracking + trajectory geometry (Tier 2) | 📐 | M2 |
-| Zone semantics incl. `public` (ignore passers-by) and `object` (wall equipment) | 📐 | M2 |
+| Motion gate (Tier 0) | ✅ | M2 |
+| Object detection (Tier 1, YOLOX-tiny/ONNX Runtime; CPU+CoreML verified) | ✅ | M2 |
+| Tracking + trajectory geometry (Tier 2; IoU tracker v1, ByteTrack-proper 📐) | ✅ | M2 |
+| Zone semantics incl. `public` (ignore passers-by) and `object` (wall equipment) | ✅ (YAML; editor UI 📐) | M2 |
+| Event engine + events API + review UI with feedback | ✅ core | M2 |
 | VLM scene reasoning + text summaries (Tier 3) | 📐 | M3 |
 | Plain-language policies + compiler (Tier 4) | 📐 | M4 |
 | Semantic event search | 📐 | M3 |
@@ -172,16 +190,16 @@ The complete list of key functionality and its implementation state.
 |---|---|---|
 | Live wall (all cameras, WebRTC via authed WHEP proxy, keyboard-first) | ✅ | M1 |
 | Timeline (hour strip, segment playback) + range export | ✅ | M1 |
-| Scrub-strip preview scrubbing | 📐 | M1 |
-| Event feed with clips, favorites, feedback | 📐 | M2 |
-| First-run wizard (admin ✅; add-camera + verify steps 🚧) | 🚧 | M1 |
+| Scrub-strip preview scrubbing | ✅ | M1 |
+| Event feed with clips + feedback (favorites 📐) | ✅ core | M2 |
+| First-run wizard (admin + camera checklist with live verification) | ✅ | M1 |
 | PWA + web push | 📐 | M2/M5 |
 
 ### Outputs & integrations
 | Capability | Status | Milestone |
 |---|---|---|
-| Signed webhooks (HMAC implemented & tested) | ✅ signing / 📐 delivery | M0/M2 |
-| Apprise channels (Telegram, Discord, …) | 📐 | M2 |
+| Signed webhooks (HMAC, retries, delivery contract) | ✅ | M2 |
+| Apprise channels (Telegram, Discord, …) | ✅ | M2 |
 | MQTT + Home Assistant discovery | 📐 | M2 |
 | REST API: auth, cameras, recordings, streams (WHEP/snapshot), export, system events | ✅ | M1 |
 | WebSocket event stream | 📐 | M2 |

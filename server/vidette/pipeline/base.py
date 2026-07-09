@@ -78,21 +78,29 @@ class CascadeBudget:
 
 
 class MotionGate(Protocol):
-    """Tier 0: substream frames in, motion regions out. Must be ~free."""
+    """Tier 0: substream frames in, motion regions out. Must be ~free.
 
-    def process(self, at: datetime, image: object) -> list[MotionRegion]: ...
+    Timestamps are epoch-second floats end to end (matching the DB boundary rule).
+    """
+
+    def process(self, ts: float, image: object) -> list[MotionRegion]: ...
 
 
 class Detector(Protocol):
-    """Tier 1: batched inference over motion regions (ONNX Runtime, permissive models only)."""
+    """Tier 1: inference on one frame (ONNX Runtime, permissive models only).
 
-    async def infer(self, images: Sequence[object]) -> list[list[Detection]]: ...
+    Single-frame by measurement: at cascade rates (≤5 fps per camera, motion-gated) the
+    batching win is negligible while the latency and queueing complexity are not. Cross-
+    camera batching can return behind this same protocol if profiling ever justifies it.
+    """
+
+    async def infer(self, image: object) -> list[Detection]: ...
 
 
 class Tracker(Protocol):
     """Tier 2: detections in, tracks with geometry facts out (pure math + zone algebra)."""
 
-    def update(self, at: datetime, detections: Sequence[Detection]) -> list[TrackState]: ...
+    def update(self, ts: float, detections: Sequence[Detection]) -> list[TrackState]: ...
 
 
 class Understander(Protocol):

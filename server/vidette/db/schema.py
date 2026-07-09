@@ -65,8 +65,31 @@ CREATE TABLE system_events (
 CREATE INDEX idx_system_events_at ON system_events(at);
 """
 
+_V2_EVENTS: Final[str] = """
+CREATE TABLE events (
+    id            TEXT PRIMARY KEY,
+    camera        TEXT NOT NULL,
+    started_at    REAL NOT NULL,
+    ended_at      REAL,
+    state         TEXT NOT NULL,
+    kinds         TEXT NOT NULL,  -- JSON array, e.g. ["person"]
+    zones         TEXT NOT NULL,  -- JSON array of zone names
+    geometry      TEXT NOT NULL,  -- JSON object (GeometryFacts shape)
+    summary       TEXT,           -- Tier 3 text; NULL without/before a VLM (M3)
+    intent        TEXT,           -- JSON object (IntentVerdict shape); NULL until M3
+    policy        TEXT,
+    feedback      TEXT,           -- 'up' | 'down' | NULL
+    snapshot_path TEXT,
+    clip_path     TEXT
+);
+
+CREATE INDEX idx_events_camera_started_at ON events(camera, started_at);
+CREATE INDEX idx_events_started_at ON events(started_at);
+"""
+
 MIGRATIONS: Final[list[str]] = [
     _V1_INITIAL,
+    _V2_EVENTS,
 ]
 
 SCHEMA_VERSION: Final[int] = len(MIGRATIONS)

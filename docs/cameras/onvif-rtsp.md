@@ -1,6 +1,7 @@
 # Generic RTSP / ONVIF cameras
 
-> **Status:** manual RTSP ✅ (M1, works today) · ONVIF discovery 📐 → M2 (with events, PTZ).
+> **Status:** manual RTSP ✅ (M1, works today) · ONVIF streams + probe 🚧 (beta) ·
+> ONVIF events, PTZ 📐 → M2.
 > This is Vidette's native tongue: if your camera speaks RTSP, it needs no vendor, no cloud,
 > no bridge — and it will still work in ten years.
 
@@ -16,7 +17,7 @@ configure both; the substream is what the AI tiers decode). Common vendor patter
 | Reolink | `rtsp://u:p@IP:554/h264Preview_01_main` | `.../h264Preview_01_sub` |
 | TP-Link Tapo | `rtsp://u:p@IP:554/stream1` | `.../stream2` |
 | Ubiquiti (RTSP enabled) | from Protect UI per camera | idem |
-| Generic ONVIF | discovered automatically (M1) | idem |
+| Generic ONVIF | discovered automatically ([`adapter: onvif`](#onvif)) | idem |
 
 Verify before configuring (from the Vidette host):
 
@@ -37,9 +38,31 @@ cameras:
       sub:  rtsp://cam:${CAM_PASSWORD}@10.0.20.12:554/stream2
 ```
 
-ONVIF (M1) reduces this to `adapter: onvif` + host/credentials: streams, profiles, PTZ
-capabilities and event topics are discovered. Vidette's `probe` tells you *specifically* what
-failed (auth vs. network vs. disabled service) instead of a generic error.
+### ONVIF
+
+If the camera speaks ONVIF (Profile S), skip the URL hunt and let Vidette ask the camera
+itself:
+
+```yaml
+cameras:
+  driveway:
+    adapter: onvif
+    options:
+      host: 10.0.20.12
+      # port: 80          # ONVIF device service port, if not the default
+      username: cam
+      password: ${CAM_PASSWORD}
+```
+
+Profiles and RTSP URLs are discovered over SOAP: the highest-resolution profile becomes
+`main`, the lowest becomes `sub`. Credentials are embedded into the resolved RTSP URLs for
+the stream gateway — set `inject_credentials: false` if your camera already puts them there.
+`probe` tells you *specifically* what failed — host unreachable vs. credentials rejected vs.
+a typo in the options — instead of a generic error, and on success lists the discovered
+profiles with their resolutions.
+
+Network scanning (WS-Discovery) is implemented in the adapter; the `vidette discover` CLI
+wiring lands with integration. Events and PTZ are M2.
 
 ## Camera-side settings that matter
 

@@ -97,9 +97,10 @@ class CameraAdapter(Protocol):
 
 def builtin_adapters() -> dict[str, CameraAdapter]:
     # Imported lazily to avoid import cycles at module load.
+    from vidette.adapters.onvif import OnvifAdapter
     from vidette.adapters.rtsp import RtspAdapter
 
-    adapters: list[CameraAdapter] = [RtspAdapter()]
+    adapters: list[CameraAdapter] = [RtspAdapter(), OnvifAdapter()]
     return {adapter.info.id: adapter for adapter in adapters}
 
 

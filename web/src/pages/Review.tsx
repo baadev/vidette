@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   exportDownloadUrl,
+  previewUrl,
   segmentFileUrl,
   type Camera,
   type ExportJob,
@@ -77,6 +78,75 @@ function parseLocalInputValue(value: string): number | null {
 function describeError(err: unknown, doing: string): string {
   const detail = err instanceof Error ? err.message : String(err);
   return `Could not ${doing} (${detail}). Check that the Vidette server is running, then retry.`;
+}
+
+type HourPreviewProps = {
+  camera: string;
+  hourStart: number;
+  /** Called with an absolute epoch timestamp inside the hour the user picked. */
+  onPick: (ts: number) => void;
+};
+
+/**
+ * Compact scrub strip over the hour's preview MP4. The 0–3600 s slider maps
+ * wall-clock position onto the (much shorter) preview via
+ * `currentTime = value / 3600 * duration`; clicking the video (or pressing
+ * Enter on the slider) jumps playback to the segment covering that moment.
+ * A 404 just means the preview is not generated yet — the segment list below
+ * is never blocked by it.
+ */
+function HourPreview({ camera, hourStart, onPick }: HourPreviewProps) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [position, setPosition] = useState(0); // seconds into the hour, 0..3600
+
+  const scrub = (value: number): void => {
+    setPosition(value);
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.duration) && video.duration > 0) {
+      video.currentTime = (value / HOUR_SECONDS) * video.duration;
+    }
+  };
+
+  if (missing) {
+    return (
+      <p className="preview-missing">
+        preview not generated yet (appears within ~5 min of the hour completing)
+      </p>
+    );
+  }
+
+  return (
+    <div className="hour-preview">
+      <video
+        ref={videoRef}
+        className="preview-video"
+        muted
+        playsInline
+        preload="metadata"
+        src={previewUrl(camera, hourStart)}
+        title="Open the recording at this moment"
+        onError={() => setMissing(true)}
+        onClick={() => onPick(hourStart + position)}
+      />
+      <div className="preview-scrub-row">
+        <input
+          type="range"
+          className="preview-scrub"
+          min={0}
+          max={HOUR_SECONDS}
+          step={1}
+          value={position}
+          aria-label="Hour preview position"
+          onChange={(ev) => scrub(Number(ev.target.value))}
+          onKeyDown={(ev) => {
+            if (ev.key === "Enter") onPick(hourStart + position);
+          }}
+        />
+        <span className="preview-time">{formatLocalClock(hourStart + position)}</span>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -311,6 +381,17 @@ export function ReviewPage() {
               )}
               {segments !== null && segments.length === 0 && (
                 <p className="review-empty">No recordings in this hour.</p>
+              )}
+              {segments !== null && segments.length > 0 && (
+                <HourPreview
+                  key={`${camera}:${hourStart}`}
+                  camera={camera}
+                  hourStart={hourStart}
+                  onPick={(ts) => {
+                    const seg = segments.find((s) => s.start_ts <= ts && ts < s.end_ts);
+                    if (seg) setPlayingId(seg.id);
+                  }}
+                />
               )}
               {segments !== null && segments.length > 0 && (
                 <ul className="segment-list">

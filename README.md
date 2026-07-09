@@ -168,12 +168,13 @@ The full inventory lives in [ROADMAP.md](ROADMAP.md).
 | Retention classes + watermark cleanup + disk health events | ✅ | M1 |
 | Multi-camera live wall (WebRTC via authenticated WHEP proxy) | ✅ | M1 |
 | Range export (remux, no re-encode) via UI + API | ✅ | M1 |
-| Timeline review (hour strip + segment playback; scrub-strip previews pending) | 🚧 | M1 |
-| ONVIF discovery, PTZ | 📐 | M1–M2 |
-| Detection cascade tiers 0–2 (motion, objects, trajectories, zones) | 📐 | M2 |
-| Events, webhooks (signed), web push, Apprise channels | 📐 | M2 |
-| MQTT + Home Assistant discovery | 📐 | M2 |
-| Eufy via built-in NAS (RTSP), supported models — [guide + caveats](docs/cameras/eufy.md) | 🚧 | M1 |
+| Timeline review: hour strip, segment playback, scrub-strip previews | ✅ | M1 |
+| ONVIF: `vidette discover`, profiles → main/sub, WSSE/digest auth (events, PTZ → M2) | ✅ beta | M1 |
+| Detection cascade tiers 0–2: motion gate → YOLOX (ONNX) → trajectories + zone algebra (passers-by suppression) | ✅ core | M2 |
+| Events: engine, review UI with feedback, snapshots, lazy clips | ✅ core | M2 |
+| Notifications: signed webhooks (HMAC, retries) + Apprise (Telegram/Discord/100+) | ✅ | M2 |
+| Web push (VAPID), MQTT + Home Assistant discovery, zone editor UI, `/metrics` | 📐 | M2 |
+| Eufy via built-in NAS (RTSP), supported models — [guide + caveats](docs/cameras/eufy.md) | ✅ | M1 |
 | VLM scene descriptions + intent scoring (local via Ollama, opt-in cloud) | 📐 | M3 |
 | Semantic search over events ("someone touched the gate") | 📐 | M3 |
 | Off-site event backup (S3-compatible) | 📐 | M3 |

@@ -36,7 +36,7 @@ created in settings, shown once, revocable, and audit-logged.
 | Streams | `GET /api/v1/streams/{camera}` · `POST …/whep` (SDP in/out, authenticated proxy to go2rtc) · `GET …/snapshot.jpeg` | ✅ M1 |
 | Recordings | `GET /api/v1/recordings?camera=&from_ts=&to_ts=` · `GET …/summary?camera=&day=` · `GET …/segments/{id}/file` | ✅ M1 |
 | Export | `POST /api/v1/export` → job · `GET /api/v1/export/{id}` · `GET …/download` | ✅ M1 |
-| Events | `GET /api/v1/events?since=&camera=&kind=&q=` (`q` = semantic+FTS, M3) · `GET /api/v1/events/{id}` · media: `…/clip.mp4`, `…/snapshot.webp` · `POST …/feedback {verdict: up|down}` | 📐 M2 |
+| Events | `GET /api/v1/events?since_ts=&camera=&limit=` · `GET /api/v1/events/{id}` · media: `…/snapshot.jpeg`, `…/clip.mp4` (lazy remux) · `POST …/feedback {verdict: up\|down}` — semantic `q=` search lands in M3 | ✅ |
 | Policies | `GET/PUT /api/v1/policies` · `POST /api/v1/policies/{id}/dry-run` | 📐 M4 |
 | Live events | `WS /api/v1/ws` — subscribes to topic patterns (`event.*`, `system.*`) | 📐 M2 |
 | Metrics | `GET /metrics` (Prometheus) | 📐 M2 |

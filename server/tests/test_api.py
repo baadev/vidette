@@ -40,10 +40,11 @@ def test_healthz_is_public(client: TestClient) -> None:
 
 def test_system_reports_milestone_and_runtime_state(client: TestClient) -> None:
     body = client.get("/api/v1/system").json()
-    assert body["milestone"] == "M1"
+    assert body["milestone"] == "M2"
     assert "test-mode" in body["config_warnings"]
     assert body["gateway"]["reachable"] is False  # no gateway in tests — reported honestly
-    assert any(route["path"] == "/api/v1/events" for route in body["designed_routes"])
+    assert body["detector"] in ("loading", "ready", "disabled")
+    assert any(route["path"] == "/api/v1/policies" for route in body["designed_routes"])
 
 
 def test_config_validate_endpoint_accepts_yaml(client: TestClient) -> None:
@@ -61,12 +62,12 @@ def test_config_validate_endpoint_rejects_bad_config(client: TestClient) -> None
 
 
 def test_designed_routes_are_honest_501s(client: TestClient) -> None:
-    events = client.get("/api/v1/events")
-    assert events.status_code == 501
-    assert events.json()["milestone"] == "M2"
     policies = client.get("/api/v1/policies")
     assert policies.status_code == 501
     assert policies.json()["milestone"] == "M4"
+    # /api/v1/events shipped with M2 core — it must NOT be a 501 anymore.
+    events = client.get("/api/v1/events")
+    assert events.status_code == 200
 
 
 def test_root_serves_status_page_without_web_build(client: TestClient) -> None:

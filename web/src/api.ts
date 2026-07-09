@@ -38,6 +38,36 @@ export type ExportJob = {
   error: string | null;
 };
 
+/** Tier-2 trajectory geometry attached to an event (pure math, no model opinions). */
+export type EventGeometry = {
+  approach: number | null;
+  dwell_s: number | null;
+  touch: boolean;
+  loiter: boolean;
+  repeat_pass: number;
+};
+
+/**
+ * One understood event from the cascade (M2+). `snapshot` and `clip` are direct
+ * media URL paths — they can 404 until the underlying footage lands on disk.
+ */
+export type EventInfo = {
+  id: string;
+  camera: string;
+  started_at: number;
+  ended_at: number | null;
+  /** Lifecycle state, e.g. "confirmed" or "dismissed" (more states may appear). */
+  state: string;
+  kinds: string[];
+  zones: string[];
+  geometry: EventGeometry;
+  summary: string | null;
+  policy: string | null;
+  feedback: "up" | "down" | null;
+  snapshot: string | null;
+  clip: string;
+};
+
 export type AuthStatus = {
   bootstrapped: boolean;
   mode: string;
@@ -179,6 +209,24 @@ export const api = {
     return getJson<ExportJob>(`${BASE}/export/${encodeURIComponent(id)}`);
   },
 
+  events(opts?: { camera?: string; sinceTs?: number; limit?: number }): Promise<EventInfo[]> {
+    const query = new URLSearchParams();
+    if (opts?.camera) query.set("camera", opts.camera);
+    if (opts?.sinceTs !== undefined) query.set("since_ts", String(opts.sinceTs));
+    if (opts?.limit !== undefined) query.set("limit", String(opts.limit));
+    const qs = query.toString();
+    return getJson<EventInfo[]>(qs ? `${BASE}/events?${qs}` : `${BASE}/events`);
+  },
+
+  async eventFeedback(id: string, verdict: "up" | "down"): Promise<void> {
+    // 204, no body.
+    await send(`${BASE}/events/${encodeURIComponent(id)}/feedback`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ verdict }),
+    });
+  },
+
   async whep(camera: string, offerSdp: string): Promise<string> {
     const response = await send(`${BASE}/streams/${encodeURIComponent(camera)}/whep`, {
       method: "POST",
@@ -196,3 +244,7 @@ export const snapshotUrl = (camera: string): string =>
 
 export const exportDownloadUrl = (id: string): string =>
   `${BASE}/export/${encodeURIComponent(id)}/download`;
+
+/** Direct media URL of an hour's preview MP4 — 404 until it has been generated. */
+export const previewUrl = (camera: string, hourStartTs: number): string =>
+  `${BASE}/recordings/preview?camera=${encodeURIComponent(camera)}&hour_start_ts=${hourStartTs}`;

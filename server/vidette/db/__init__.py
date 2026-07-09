@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ from typing import Any
 import aiosqlite
 
 from vidette.db.schema import MIGRATIONS, SCHEMA_VERSION
+
+logger = logging.getLogger(__name__)
 
 # SQLite's default host-parameter limit is 999 on older builds; stay well under it when
 # expanding IN (...) lists.
@@ -87,6 +90,29 @@ class SystemEventRow:
     payload: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class EventRow:
+    """A row of `events` — the understood-event store (docs/events-and-automations.md).
+
+    JSON columns arrive decoded: `kinds`/`zones` as lists, `geometry`/`intent` as dicts.
+    """
+
+    id: str  # opaque, lexicographically time-sortable (core.events.new_event_id)
+    camera: str
+    started_at: float
+    ended_at: float | None
+    state: str  # EventState values: observed | analyzing | confirmed | dismissed
+    kinds: list[str]
+    zones: list[str]
+    geometry: dict[str, Any]
+    summary: str | None
+    intent: dict[str, Any] | None
+    policy: str | None
+    feedback: str | None  # "up" | "down" | None
+    snapshot_path: str | None
+    clip_path: str | None
+
+
 def _user(row: sqlite3.Row) -> UserRow:
     return UserRow(
         id=row["id"],
@@ -141,6 +167,25 @@ def _system_event(row: sqlite3.Row) -> SystemEventRow:
     )
 
 
+def _event(row: sqlite3.Row) -> EventRow:
+    return EventRow(
+        id=row["id"],
+        camera=row["camera"],
+        started_at=row["started_at"],
+        ended_at=row["ended_at"],
+        state=row["state"],
+        kinds=json.loads(row["kinds"]),
+        zones=json.loads(row["zones"]),
+        geometry=json.loads(row["geometry"]),
+        summary=row["summary"],
+        intent=json.loads(row["intent"]) if row["intent"] is not None else None,
+        policy=row["policy"],
+        feedback=row["feedback"],
+        snapshot_path=row["snapshot_path"],
+        clip_path=row["clip_path"],
+    )
+
+
 class Database:
     """All methods are safe to call from any task; writes serialize internally."""
 
@@ -149,6 +194,10 @@ class Database:
         self._clock = clock
         self._conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
+        # Optional mirror for system events (the runtime points this at the event bus so
+        # M1 subsystems that only know the Database still reach notification rules).
+        # Hook failures are logged, never propagated — persistence must not depend on it.
+        self.system_event_hook: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
 
     @property
     def _db(self) -> aiosqlite.Connection:
@@ -439,6 +488,11 @@ class Database:
                 row = await cur.fetchone()
             await self._db.commit()
         assert row is not None
+        if self.system_event_hook is not None:
+            try:
+                await self.system_event_hook(kind, payload)
+            except Exception:
+                logger.exception("system event hook failed for %s", kind)
         return int(row["id"])
 
     async def recent_system_events(
@@ -456,3 +510,114 @@ class Database:
         async with self._db.execute(sql, params) as cur:
             rows = await cur.fetchall()
         return [_system_event(row) for row in rows]
+
+    # --- events (understood events, M2) ---------------------------------------------------
+    async def insert_event(
+        self,
+        event_id: str,
+        camera: str,
+        started_at: float,
+        state: str,
+        kinds: list[str],
+        zones: list[str],
+        geometry: dict[str, Any],
+        *,
+        ended_at: float | None = None,
+        summary: str | None = None,
+        intent: dict[str, Any] | None = None,
+        policy: str | None = None,
+        snapshot_path: str | None = None,
+        clip_path: str | None = None,
+    ) -> None:
+        async with self._write_lock:
+            await self._db.execute(
+                "INSERT INTO events (id, camera, started_at, ended_at, state, kinds, zones,"
+                " geometry, summary, intent, policy, feedback, snapshot_path, clip_path)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                (
+                    event_id,
+                    camera,
+                    started_at,
+                    ended_at,
+                    state,
+                    json.dumps(kinds),
+                    json.dumps(zones),
+                    json.dumps(geometry),
+                    summary,
+                    json.dumps(intent) if intent is not None else None,
+                    policy,
+                    snapshot_path,
+                    clip_path,
+                ),
+            )
+            await self._db.commit()
+
+    async def update_event(
+        self,
+        event_id: str,
+        *,
+        state: str | None = None,
+        ended_at: float | None = None,
+        snapshot_path: str | None = None,
+        clip_path: str | None = None,
+    ) -> None:
+        """Partial update: only the provided (non-None) fields change; a no-op otherwise."""
+        assignments: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("state", state),
+            ("ended_at", ended_at),
+            ("snapshot_path", snapshot_path),
+            ("clip_path", clip_path),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                params.append(value)
+        if not assignments:
+            return
+        params.append(event_id)
+        async with self._write_lock:
+            await self._db.execute(
+                f"UPDATE events SET {', '.join(assignments)} WHERE id = ?", tuple(params)
+            )
+            await self._db.commit()
+
+    async def set_event_feedback(self, event_id: str, verdict: str) -> bool:
+        """Record 👍/👎 ('up'/'down') on an event; False when the id is unknown."""
+        async with self._write_lock:
+            async with self._db.execute(
+                "UPDATE events SET feedback = ? WHERE id = ?", (verdict, event_id)
+            ) as cur:
+                updated = cur.rowcount > 0
+            await self._db.commit()
+        return updated
+
+    async def get_event(self, event_id: str) -> EventRow | None:
+        async with self._db.execute("SELECT * FROM events WHERE id = ?", (event_id,)) as cur:
+            row = await cur.fetchone()
+        return _event(row) if row is not None else None
+
+    async def list_events(
+        self,
+        *,
+        camera: str | None = None,
+        since_ts: float | None = None,
+        limit: int = 100,
+    ) -> list[EventRow]:
+        """Newest first. `since_ts` keeps only events that started strictly after it."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if camera is not None:
+            clauses.append("camera = ?")
+            params.append(camera)
+        if since_ts is not None:
+            clauses.append("started_at > ?")
+            params.append(since_ts)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        async with self._db.execute(
+            f"SELECT * FROM events{where} ORDER BY started_at DESC, id DESC LIMIT ?",
+            tuple(params),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_event(row) for row in rows]

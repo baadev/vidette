@@ -172,14 +172,16 @@ kbd {
 
 /* --- review ------------------------------------------------------------------------------ */
 
-.review-controls {
+.review-controls,
+.feed-controls {
   display: flex;
   align-items: end;
   gap: 1rem;
   flex-wrap: wrap;
 }
 
-.review-controls label {
+.review-controls label,
+.feed-controls label {
   display: grid;
   gap: 0.3rem;
   font-size: 0.85rem;
@@ -187,7 +189,8 @@ kbd {
 }
 
 .review-controls select,
-.review-controls input {
+.review-controls input,
+.feed-controls select {
   font: inherit;
   color: var(--text);
   background: var(--panel);
@@ -334,8 +337,410 @@ kbd {
   color: var(--accent);
 }
 
+/* --- review: hour preview strip ----------------------------------------------------------- */
+
+.hour-preview {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.preview-video {
+  width: 100%;
+  max-height: 14rem;
+  background: #000;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.preview-scrub-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.preview-scrub {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  cursor: pointer;
+}
+
+.preview-scrub::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+}
+
+.preview-scrub::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+}
+
+.preview-time {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  min-width: 4.5rem;
+  text-align: right;
+}
+
+.preview-missing {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* --- chips (events + setup) ---------------------------------------------------------------- */
+
+.chip {
+  font-size: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 0.55em;
+  color: var(--text);
+  background: color-mix(in srgb, var(--line) 40%, transparent);
+  white-space: nowrap;
+}
+
+.chip-zone {
+  color: var(--muted);
+  background: transparent;
+}
+
+.chip-geo {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: transparent;
+}
+
+/* --- events feed ---------------------------------------------------------------------------- */
+
+.event-day {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.event-day-label {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.event-card {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.event-card-expanded {
+  border-color: var(--accent);
+}
+
+.event-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.9rem;
+  width: 100%;
+  padding: 0.75rem;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  text-align: left;
+}
+
+.event-card-main:hover {
+  background: color-mix(in srgb, var(--line) 25%, transparent);
+}
+
+.event-thumb,
+.setup-thumb {
+  flex: none;
+  width: 7.5rem;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+
+.event-thumb img,
+.setup-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.event-thumb-empty,
+.setup-thumb-empty {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.event-body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.35rem;
+  /* keep clear of the absolutely-positioned feedback buttons */
+  padding-right: 4.75rem;
+}
+
+.event-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.event-camera {
+  font-weight: 600;
+}
+
+.event-time {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.event-state {
+  font-size: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 0.55em;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.event-state-confirmed {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.event-state-dismissed {
+  color: var(--muted);
+  border-color: var(--line);
+  opacity: 0.75;
+}
+
+.event-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.event-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.event-feedback {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  display: flex;
+  gap: 0.3rem;
+}
+
+.feedback-button {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.feedback-button:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.feedback-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  opacity: 1;
+}
+
+.event-detail {
+  padding: 0 0.75rem 0.75rem;
+}
+
+.event-detail .muted {
+  margin: 0;
+}
+
+.event-clip {
+  width: 100%;
+  max-height: 24rem;
+  background: #000;
+  border-radius: 8px;
+}
+
+/* --- first-run setup (step 2) ---------------------------------------------------------------- */
+
+.setup-card {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.setup-card h2,
+.setup-card p {
+  margin: 0;
+}
+
+.setup-snippet {
+  position: relative;
+}
+
+.setup-yaml {
+  margin: 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.setup-yaml code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.setup-copy {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+}
+
+.setup-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.setup-check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.setup-check-head h2 {
+  margin: 0;
+}
+
+.setup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+
+.setup-thumb {
+  width: 6.5rem;
+}
+
+.setup-row-info {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.setup-row-name {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.setup-name {
+  font-weight: 600;
+}
+
+.setup-row-status {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.setup-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* --- narrow screens (~380px) ---------------------------------------------------------------- */
+
 @media (max-width: 40rem) {
   .hour-strip {
     grid-template-columns: repeat(12, 1fr);
+  }
+}
+
+@media (max-width: 30rem) {
+  .event-card-main {
+    flex-direction: column;
+  }
+
+  .event-thumb {
+    width: 100%;
+  }
+
+  .event-body {
+    padding-right: 0;
+  }
+
+  .setup-row {
+    flex-wrap: wrap;
+  }
+
+  .setup-thumb {
+    width: 100%;
+  }
+
+  .setup-footer button.primary,
+  .setup-actions button.primary {
+    width: 100%;
   }
 }

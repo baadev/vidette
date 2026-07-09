@@ -386,11 +386,9 @@ def designed_feature_warnings(config: VidetteConfig) -> list[str]:
         )
     if config.policies:
         warnings.append(
-            "policies: plain-language interpretation lands in M4; until then each policy "
-            "falls back to its geometric skeleton (zones + sensitivity presets, M2)"
+            "policies: plain-language interpretation lands in M4 — today each policy "
+            "applies its geometric skeleton (zones + sensitivity presets)"
         )
-    if config.notifications.channels:
-        warnings.append(f"notifications: delivery lands in M2 ({roadmap})")
     if config.integrations.mqtt.enabled:
         warnings.append(f"integrations.mqtt: lands in M2 ({roadmap})")
     return warnings
