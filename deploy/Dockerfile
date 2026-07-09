@@ -3,13 +3,18 @@
 # --- web build -------------------------------------------------------------------------------
 FROM node:22-alpine AS web
 WORKDIR /build
-COPY web/package.json web/package-lock.json* ./
-RUN npm install --no-audit --no-fund
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY web/ .
 RUN npm run build
 
 # --- runtime ---------------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
+
+LABEL org.opencontainers.image.title="Vidette" \
+      org.opencontainers.image.description="Self-hosted video security that understands intent — not just motion." \
+      org.opencontainers.image.source="https://github.com/baadev/vidette" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # ffmpeg: segment recording + range export (codec-copy only — no transcoding at runtime)
 RUN apt-get update \

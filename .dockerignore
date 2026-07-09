@@ -1,0 +1,26 @@
+# Keep the build context small and reproducible — only source the Dockerfile COPYs.
+.git
+.github
+**/node_modules
+web/dist
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.venv
+venv
+# Runtime data / local dev artifacts — never bake into an image
+config
+media
+media-dev
+internal
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+# Editor / OS noise
+.DS_Store
+.idea
+.vscode

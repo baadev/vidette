@@ -6,6 +6,11 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-07-09
+
+First tagged release: Watch (M1) + Detect (M2) complete, published as a multi-arch container
+image on `ghcr.io/baadev/vidette`. See the highlights below and the GitHub release notes.
+
 ### Added — M2 completion + camera management UI
 - **Camera management beyond YAML:** UI-created cameras live in the database and merge into
   the effective config at boot and on change (hot-apply restarts capture briefly); the

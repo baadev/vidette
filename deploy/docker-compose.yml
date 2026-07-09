@@ -1,23 +1,34 @@
 # Vidette stack: app + go2rtc stream gateway (+ optional local VLM via `--profile vlm`).
-# Quickstart: docker compose -f deploy/docker-compose.yml up -d --build  →  http://localhost:8642
+#
+# Quickstart (no build — pulls published images):
+#   docker compose -f deploy/docker-compose.yml up -d   →  http://localhost:8642
+# Build from source instead (repo checkout):
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Zero config to start: bring it up, create your admin account, then add cameras in the UI
+# (Cameras page). To manage cameras as code instead, see the `config` bind-mount note below.
 
 name: vidette
 
 services:
   vidette:
+    image: ghcr.io/baadev/vidette:${VIDETTE_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    # image: ghcr.io/baadev/vidette:latest   # published images arrive with M1
     restart: unless-stopped
     ports:
       - "8642:8642"
     volumes:
-      - ../config:/config
+      - vidette-config:/config          # DB + generated go2rtc.yaml (writable, uid 1000)
       - vidette-media:/media/vidette
+      # IaC option — manage cameras from a file instead of the UI. Put vidette.yaml in
+      # ./config next to this compose file, then on Linux: chown 1000:1000 ./config
+      # - ./config:/config
     environment:
       - TZ=${TZ:-UTC}
-      # Secrets referenced from config/vidette.yaml as ${VAR} live here or in an .env file:
+      # Secrets referenced from config as ${VAR} live here or in a .env file beside this
+      # compose file (see .env.example):
       # - CAM_PASSWORD=
       # - VIDETTE_WEBHOOK_SECRET=
     depends_on:
@@ -27,12 +38,13 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
 
   go2rtc:
-    image: alexxit/go2rtc:1.9
+    image: alexxit/go2rtc:1.9.14
     restart: unless-stopped
     volumes:
-      - ../config:/config    # vidette generates /config/go2rtc.yaml from your cameras:
+      - vidette-config:/config    # vidette generates /config/go2rtc.yaml from your cameras
     ports:
       - "8555:8555/tcp"      # WebRTC media (browsers connect here directly)
       - "8555:8555/udp"
@@ -56,5 +68,6 @@ services:
     #           capabilities: [gpu]
 
 volumes:
+  vidette-config:
   vidette-media:
   ollama:

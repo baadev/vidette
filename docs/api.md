@@ -1,7 +1,8 @@
 # API
 
-> **Status:** the M1 surface is ✅ live — auth, cameras, recordings, streams, export, system.
-> Events (M2) and policies (M4) remain honest `501 {"status": "designed", …}` stubs.
+> **Status:** the M1–M2 surface is ✅ live — auth, cameras (incl. managed-camera CRUD),
+> recordings, streams, export, events, notifications/push, WebSocket, metrics, system.
+> Policies (M4) remain an honest `501 {"status": "designed", …}` stub.
 > Interactive OpenAPI docs are served at `/api/docs`.
 
 ## Principles
@@ -60,8 +61,8 @@ curl -s -X POST localhost:8642/api/v1/config/validate \
 ### Example: designed route honesty
 
 ```bash
-curl -s localhost:8642/api/v1/events | jq
-# {"status": "designed", "milestone": "M2",
+curl -s localhost:8642/api/v1/policies | jq
+# {"status": "designed", "milestone": "M4",
 #  "docs": "https://github.com/baadev/vidette/blob/main/ROADMAP.md"}   ← HTTP 501
 ```
 

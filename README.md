@@ -7,9 +7,10 @@
 *A **vidette** was a mounted sentry posted ahead of the picket line — the first to see
 trouble coming, and the one trusted to tell a passing farmer from an approaching threat.*
 
-[![Status](https://img.shields.io/badge/status-design_preview_(M0)-8a2be2)](ROADMAP.md)
+[![Release](https://img.shields.io/github/v/release/baadev/vidette?color=8a2be2)](https://github.com/baadev/vidette/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![CI](https://github.com/baadev/vidette/actions/workflows/ci.yml/badge.svg)](https://github.com/baadev/vidette/actions/workflows/ci.yml)
+[![Image](https://img.shields.io/badge/ghcr.io-baadev%2Fvidette-2496ed)](https://github.com/baadev/vidette/pkgs/container/vidette)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 [Why](#why) · [How it works](#how-it-works) · [Quickstart](#quickstart) ·
@@ -17,11 +18,14 @@ trouble coming, and the one trusted to tell a passing farmer from an approaching
 
 </div>
 
-> **Status: M1 — streaming & recording, in progress.** What runs today from this repo:
-> RTSP ingest through a managed go2rtc gateway, codec-copy segment recording with an SQLite
-> index, retention + disk-health janitor, range export (remux), signed-session auth with a
-> first-run admin wizard, a WebRTC live wall and an hour-strip review UI with MP4 export.
-> M1 closes when the [reference budgets](ROADMAP.md#m1--watch) are measured and published.
+> **Status: v0.1.0 — Watch + Detect are live.** From a single `docker compose up` you get:
+> RTSP/ONVIF ingest through a managed go2rtc gateway, codec-copy recording with an SQLite
+> index, a WebRTC live wall, an hour-strip review UI with scrub previews and MP4 export, and
+> the understanding cascade tiers 0–2 (motion → object detection → trajectory + zone geometry
+> that suppresses passers-by) turning motion into *events* — delivered as signed webhooks,
+> Apprise messages (Telegram/Discord/…), web-push, or MQTT with Home Assistant discovery.
+> Add and manage cameras from the UI or as code. Still ahead: the VLM tier and plain-language
+> policies (M3–M4). Reference N100 budgets remain an open ops task ([roadmap](ROADMAP.md)).
 > Feedback: [issues](https://github.com/baadev/vidette/issues) · **alex@baadev.com**.
 
 ## Why
@@ -171,9 +175,10 @@ The full inventory lives in [ROADMAP.md](ROADMAP.md).
 | Timeline review: hour strip, segment playback, scrub-strip previews | ✅ | M1 |
 | ONVIF: `vidette discover`, profiles → main/sub, WSSE/digest auth (events, PTZ → M2) | ✅ beta | M1 |
 | Detection cascade tiers 0–2: motion gate → YOLOX (ONNX) → trajectories + zone algebra (passers-by suppression) | ✅ core | M2 |
-| Events: engine, review UI with feedback, snapshots, lazy clips | ✅ core | M2 |
-| Notifications: signed webhooks (HMAC, retries) + Apprise (Telegram/Discord/100+) | ✅ | M2 |
-| Web push (VAPID), MQTT + Home Assistant discovery, zone editor UI, `/metrics` | 📐 | M2 |
+| Events: engine, review UI with feedback + favorites, snapshots, lazy clips, live WebSocket feed | ✅ core | M2 |
+| Notifications: signed webhooks (HMAC, retries) + Apprise (Telegram/Discord/100+) + web push (VAPID) | ✅ | M2 |
+| MQTT + Home Assistant discovery, Prometheus `/metrics` | ✅ | M2 |
+| Camera management + zone editor in the UI (managed cameras in DB; YAML stays the IaC source of truth) | ✅ | M2 |
 | Eufy via built-in NAS (RTSP), supported models — [guide + caveats](docs/cameras/eufy.md) | ✅ | M1 |
 | VLM scene descriptions + intent scoring (local via Ollama, opt-in cloud) | 📐 | M3 |
 | Semantic search over events ("someone touched the gate") | 📐 | M3 |
@@ -186,10 +191,10 @@ The full inventory lives in [ROADMAP.md](ROADMAP.md).
 
 | Ecosystem | Path | Status |
 |---|---|---|
-| Any RTSP camera | native | 📐 M1 |
-| ONVIF (discovery, PTZ, events) | native | 📐 M1–M2 |
-| Eufy | built-in NAS (RTSP) — **supported models only**, [check yours](docs/cameras/eufy.md) | 🚧 M1 |
-| Reolink, Amcrest/Dahua, Hikvision, Tapo | native RTSP/ONVIF | 📐 M1 |
+| Any RTSP camera | native | ✅ |
+| ONVIF (discovery + streams) | native | ✅ beta (events/PTZ 📐) |
+| Reolink, Amcrest/Dahua, Hikvision, Tapo | native RTSP/ONVIF | ✅ |
+| Eufy | built-in NAS (RTSP) — **supported models only**, [check yours](docs/cameras/eufy.md) | ✅ |
 | UniFi Protect, Ring, Wyze, HomeKit | bridges | 🔭 |
 
 Your camera not here? [Request it](https://github.com/baadev/vidette/issues/new?template=camera_support.yml) —
@@ -197,15 +202,21 @@ requests double as the demand map that orders the adapter backlog. Details: [doc
 
 ## Quickstart
 
-> M1 honesty: this records, plays live and exports for RTSP cameras today (built from
-> source; published images come with the M1 release). Reference budgets are not yet
-> published — treat it as an enthusiastic alpha that never lies about itself.
+Pull the published images — no build, no accounts:
 
 ```bash
-git clone https://github.com/baadev/vidette.git && cd vidette
-docker compose -f deploy/docker-compose.yml up -d --build
-# UI + API → http://localhost:8642
+curl -fsSLO https://raw.githubusercontent.com/baadev/vidette/main/deploy/docker-compose.yml
+docker compose up -d
+# open http://localhost:8642 → create your admin account → add a camera in the UI
 ```
+
+Or build from a checkout (`docker compose -f deploy/docker-compose.yml up -d --build`).
+Images are published to `ghcr.io/baadev/vidette` for `linux/amd64` and `linux/arm64`.
+
+> Honest alpha (v0.1.0): Watch + Detect are solid and tested end-to-end; the VLM/intent tier
+> (M3) and plain-language policies (M4) aren't here yet, and the N100 reference budgets are
+> measured on dev hardware but not yet on the reference box. Nothing in the UI or API pretends
+> to do more than it does.
 
 Full guide, hardware sizing and first-camera walkthrough: [getting started](docs/getting-started.md).
 
@@ -228,9 +239,9 @@ The threat model and hardening guide live in [security-model.md](docs/architectu
 Vidette deliberately reuses the best of the ecosystem instead of rewriting it:
 [go2rtc](https://github.com/AlexxIT/go2rtc) (stream gateway),
 [FFmpeg](https://ffmpeg.org) (recording/remux),
-[ONNX Runtime](https://onnxruntime.ai) (inference everywhere),
+[ONNX Runtime](https://onnxruntime.ai) + [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) (detection),
 [Apprise](https://github.com/caronc/apprise) (100+ notification services),
-[SQLite](https://sqlite.org) (+ sqlite-vec for semantic search).
+[SQLite](https://sqlite.org) (metadata; sqlite-vec joins for semantic search in M3).
 [Frigate](https://github.com/blakeblackshear/frigate) deserves a special mention as prior art —
 see [the FAQ](docs/faq.md#how-is-this-different-from-frigate) for an honest comparison.
 
