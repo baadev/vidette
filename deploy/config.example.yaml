@@ -37,6 +37,9 @@ cameras:
     source:
       main: rtsp://cam:${CAM_PASSWORD}@10.0.20.11:554/stream1
       sub:  rtsp://cam:${CAM_PASSWORD}@10.0.20.11:554/stream2   # low-res twin — the AI decodes this one
+    power_profile: mains   # mains (default): stream held permanently open, instant live view,
+                           # fast retries. battery: opt-in for cameras that sleep between
+                           # events — no keep-warm, failures back off up to 5 min.
     record:
       mode: continuous     # continuous | motion | events | off
     detect:
@@ -49,11 +52,14 @@ cameras:
 
   # Eufy cameras: the ONLY integration path is the camera's built-in NAS (RTSP) feature,
   # available on supported models (Eufy app → camera → Settings → General → Storage →
-  # NAS (RTSP)). No bridge, no cloud — it's a plain RTSP source. Details, supported-model
+  # NAS (RTSP)). No bridge, no cloud — it's a plain RTSP source. Eufy serves exactly ONE
+  # RTSP client at a time — Vidette funnels everything through its single gateway
+  # connection, so don't point VLC/another NVR at the camera too. Details, supported-model
   # notes and battery caveats: docs/cameras/eufy.md.
   backyard:
     adapter: rtsp
     name: "Backyard (eufyCam via NAS/RTSP)"
+    power_profile: battery # battery Eufys sleep between events — let them
     source:
       main: rtsp://user:${EUFY_RTSP_PASSWORD}@10.0.20.30/live0
 

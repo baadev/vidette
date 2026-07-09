@@ -20,6 +20,10 @@ def test_build_record_command_shape() -> None:
         "warning",
         "-rtsp_transport",
         "tcp",
+        "-analyzeduration",
+        "10000000",
+        "-probesize",
+        "10000000",
         "-i",
         "rtsp://gw:8554/cam",
         "-c",
@@ -55,7 +59,19 @@ def test_build_record_command_custom_input_args() -> None:
         "/tmp/clip.mp4", Path("/m/c"), 2, input_args=("-re", "-stream_loop", "-1")
     )
     i = cmd.index("-i")
-    expected = ["-nostdin", "-hide_banner", "-loglevel", "warning", "-re", "-stream_loop", "-1"]
+    expected = [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-re",
+        "-stream_loop",
+        "-1",
+        "-analyzeduration",
+        "10000000",
+        "-probesize",
+        "10000000",
+    ]
     assert cmd[1:i] == expected
     assert "-rtsp_transport" not in cmd
 

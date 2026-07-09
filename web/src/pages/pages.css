@@ -155,11 +155,21 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 0.75rem;
   padding: 0.4rem 0.75rem;
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 0.8rem;
+}
+
+/* The server's verbatim recorder diagnosis — full text on hover (title attr). */
+.live-diagnosis {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .live-fallback button {

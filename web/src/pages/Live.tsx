@@ -6,6 +6,15 @@ import "./pages.css";
 /** Snapshot refresh cadence while a tile is in snapshot-fallback mode. */
 const SNAPSHOT_REFRESH_MS = 2000;
 
+/** How often a failed tile re-asks the server *why* capture is degraded. */
+const DIAGNOSIS_REFRESH_MS = 15000;
+
+/** Server diagnoses can be long (stderr tails) — keep the tile readable. */
+function shortDiagnosis(error: string): string {
+  const cut = error.length > 180 ? `${error.slice(0, 180)}…` : error;
+  return cut;
+}
+
 const DOCS_URL = "https://github.com/baadev/vidette/blob/main/docs/getting-started.md";
 
 type TileProps = {
@@ -69,6 +78,29 @@ function CameraTile({ camera, index, focused }: TileProps) {
     return () => window.clearInterval(timer);
   }, [state]);
 
+  // While failed, keep the server's diagnosis fresh so the tile says *why*.
+  const [diagnosis, setDiagnosis] = useState<string | null>(camera.last_error);
+  useEffect(() => {
+    if (state !== "failed") return;
+    let cancelled = false;
+    const pull = () => {
+      api
+        .cameras()
+        .then((cams) => {
+          if (cancelled) return;
+          const mine = cams.find((c) => c.id === camera.id);
+          setDiagnosis(mine?.last_error ?? null);
+        })
+        .catch(() => undefined); // the tile already shows the failure; stay quiet
+    };
+    pull();
+    const timer = window.setInterval(pull, DIAGNOSIS_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [state, camera.id]);
+
   const failed = state === "failed";
   return (
     <figure className={`live-tile${focused ? " live-tile-focused" : ""}`}>
@@ -97,6 +129,11 @@ function CameraTile({ camera, index, focused }: TileProps) {
           <button type="button" onClick={() => setAttempt((a) => a + 1)}>
             Retry
           </button>
+          {diagnosis && (
+            <p className="live-diagnosis" title={diagnosis}>
+              {shortDiagnosis(diagnosis)}
+            </p>
+          )}
         </div>
       )}
     </figure>

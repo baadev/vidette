@@ -109,6 +109,14 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
                 }
                 for camera, status in rt.recorder.status().items()
             },
+            "keepwarm": {
+                camera: {
+                    "state": status.state,
+                    "bytes_received": status.bytes_received,
+                    "last_data_at": status.last_data_at,
+                }
+                for camera, status in rt.keepwarm.status().items()
+            },
             "detector": rt.detector_state,
             "pipelines": {
                 camera: {

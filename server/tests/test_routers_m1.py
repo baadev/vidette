@@ -220,6 +220,7 @@ def test_list_cameras_joins_recorder_and_gateway_state(harness: Harness) -> None
             "record_mode": "continuous",
             "state": "recording",
             "last_segment_at": 1751900000.0,
+            "last_error": None,
             "stream_ready": True,
         }
     ]

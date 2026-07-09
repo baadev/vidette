@@ -463,6 +463,14 @@ class Database:
             rows = await cur.fetchall()
         return [_segment(row) for row in rows]
 
+    async def segment_paths(self, camera: str) -> set[str]:
+        """Every indexed segment path for a camera — the reconciler diffs disk against this."""
+        async with self._db.execute(
+            "SELECT path FROM segments WHERE camera = ?", (camera,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return {str(row["path"]) for row in rows}
+
     async def all_segments(self) -> list[SegmentRow]:
         async with self._db.execute(
             "SELECT * FROM segments ORDER BY camera, start_ts"

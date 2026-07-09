@@ -157,6 +157,23 @@ class RecordMode(StrEnum):
     off = "off"
 
 
+class PowerProfile(StrEnum):
+    """How aggressively Vidette may hold on to and retry the camera's stream.
+
+    `mains` (default): the stream is kept permanently open on the server (instant live
+    view, one persistent connection — important for single-RTSP-client cameras like Eufy)
+    and failures are retried quickly.
+
+    `battery`: opt-in for battery cameras that sleep between events. No keep-warm
+    connection, and repeated stalls back off up to 5 minutes so the camera can actually
+    sleep instead of being reconnect-hammered awake (field case: Eufy S3 Pro drained by
+    a 45 s reconnect loop).
+    """
+
+    mains = "mains"
+    battery = "battery"
+
+
 class RecordConfig(StrictModel):
     mode: RecordMode = RecordMode.continuous
     retention: Retention | None = None  # None → global storage.retention
@@ -178,6 +195,7 @@ class CameraConfig(StrictModel):
     name: str | None = None
     source: CameraSource | None = None
     options: dict[str, Any] = Field(default_factory=dict)  # adapter-specific, validated by adapter
+    power_profile: PowerProfile = PowerProfile.mains
     record: RecordConfig = RecordConfig()
     detect: DetectConfig = DetectConfig()
     understand: bool = True

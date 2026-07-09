@@ -124,7 +124,8 @@ Vidette deliberately ships **no cloud relay**. In order of preference:
 | `vidette validate` complains about `${VAR}` | The env var isn't set for the container — add it to compose `environment:` or a `.env` file |
 | Stream plays in VLC but not the browser | H.265 camera + browser without HEVC — use the H.264 substream, or let go2rtc transcode (CPU cost); see [onvif-rtsp.md](cameras/onvif-rtsp.md#h265) |
 | Live tile says `live · mse` instead of `webrtc` | Normal: WebRTC needs a reachable ICE candidate, which a containerized gateway doesn't have by default. MSE works everywhere; for sub-second WebRTC set `VIDETTE_WEBRTC_CANDIDATES=<host-LAN-IP>:8555` (or `server.webrtc_candidates` in YAML) |
-| Battery camera (e.g. Eufy) shows `backoff` with a "probably sleeping" note | Expected: the camera sleeps, Vidette retries with growing backoff (up to 5 min) instead of keeping it awake; recording resumes when it answers |
+| Battery camera (e.g. Eufy) shows `backoff` with a "probably sleeping" note | Expected with `power_profile: battery`: the camera sleeps, Vidette retries with growing backoff (up to 5 min) instead of keeping it awake; recording resumes when it answers |
+| Mains camera keeps dropping / `wrong response on DESCRIBE` in go2rtc logs | The camera serves one RTSP client at a time (typical Eufy) and something else is also connected — disconnect other clients; Vidette itself uses one held-open connection (`power_profile: mains`, the default). Details: [eufy.md](cameras/eufy.md#reality-checks) |
 | Port 8642 taken | Change the published port in the compose file — the internal one stays 8642 |
 | No events, only recordings | Detection needs `detect.enabled` (default on) **and** zones; a camera with no zones records but won't promote events |
 

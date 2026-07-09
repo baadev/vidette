@@ -251,6 +251,27 @@ class Go2rtcManager:
             )
         return response.content
 
+    async def restart_gateway(self) -> None:
+        """POST /api/restart: reload the gateway's config and drop every session.
+
+        The reliable kick for zombie camera sessions (field case: a Eufy hung up
+        mid-stream, go2rtc kept the CLOSE_WAIT producer listed forever, and the piled-up
+        waiting consumers pinned it — the camera's single RTSP slot stayed poisoned).
+        Scoped per-stream DELETE+PUT is not viable: go2rtc's PUT persists by patching its
+        YAML config file and chokes on our generated one ("did not find expected '-'
+        indicator"). A restart re-reads that file — which Vidette owns — so state is
+        rebuilt exactly from the source of truth.
+        """
+        try:
+            response = await self._client.post(f"{self.api_url}/api/restart")
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise GatewayError(
+                f"gateway restart failed: cannot reach go2rtc at {self.api_url} "
+                f"({str(exc) or exc.__class__.__name__}) — check the go2rtc sidecar is running "
+                "and VIDETTE_GO2RTC_URL is correct"
+            ) from exc
+
     async def close(self) -> None:
         await self._client.aclose()
 

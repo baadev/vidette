@@ -34,6 +34,7 @@ class CameraSummary(BaseModel):
     record_mode: str
     state: str
     last_segment_at: float | None
+    last_error: str | None  # recorder diagnosis, shown verbatim when live view degrades
     stream_ready: bool
 
 
@@ -64,6 +65,7 @@ def _summary(
         record_mode=camera.record.mode.value,
         state=recorder_status.state if recorder_status is not None else "idle",
         last_segment_at=recorder_status.last_segment_at if recorder_status is not None else None,
+        last_error=recorder_status.last_error if recorder_status is not None else None,
         stream_ready=camera_id in ready_streams,
     )
 

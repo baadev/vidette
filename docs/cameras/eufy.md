@@ -63,18 +63,31 @@ verified reports replace "commonly reported" rows.
 
 ## Reality checks
 
-- **Battery cameras.** RTSP is a continuous protocol; a battery camera either sleeps (the
-  stream drops) or streams and eats its battery. Vidette handles the sleep honestly: after
-  repeated silent connections it backs off up to 5 minutes (instead of keeping the camera
-  awake), the camera card says it is probably sleeping, and recording resumes automatically
-  when the camera answers — e.g. after its own motion wake. Mains-powered and solar-topped
-  models are the realistic candidates for true continuous recording.
+- **Battery cameras: set `power_profile: battery`.** RTSP is a continuous protocol; a
+  battery camera either sleeps (the stream drops) or streams and eats its battery. With
+  the battery profile Vidette handles the sleep honestly: after repeated silent
+  connections it backs off up to 5 minutes (instead of keeping the camera awake), the
+  camera card says it is probably sleeping, and recording resumes automatically when the
+  camera answers — e.g. after its own motion wake. On the default `mains` profile the
+  stream is instead held **permanently open** for instant live view — right for wired
+  and continuously-powered cameras, battery poison for the rest
+  ([configuration.md](../configuration.md#power_profile-mains-vs-battery)).
 - **Resolution caps.** Some models cap the RTSP stream below the sensor's native recording
   resolution. What `ffprobe` shows is what you get.
 - **No vendor events.** The RTSP path carries video only — doorbell presses and Eufy's
   own detections stay inside the Eufy app. Vidette's own cascade (M2) replaces them.
-- **One consumer.** Some firmwares handle exactly one RTSP client well — which is fine:
-  go2rtc connects once and fans out to everything ([ADR-0002](../architecture/adr/0002-stream-gateway-go2rtc.md)).
+- **One consumer — strictly.** Eufy firmwares serve exactly one RTSP client at a time.
+  A second client is answered with `404 Stream Not Found` on DESCRIBE, and after an
+  unclean disconnect the camera can hold the dead session for a while — every client is
+  rejected until it times out (observed in the field as minutes of
+  `wrong response on DESCRIBE` in gateway logs after connection churn). Vidette is built
+  for this: go2rtc connects once and fans out to everything
+  ([ADR-0002](../architecture/adr/0002-stream-gateway-go2rtc.md)), and on the `mains`
+  profile a keep-warm holder pins that single connection open so it never churns. Just
+  don't point VLC, Home Assistant or another NVR at the camera directly at the same
+  time — if you need a second consumer, feed it the gateway restream
+  (`rtsp://go2rtc:8554/<camera-id>` inside the compose network; publish port 8554 in
+  your compose file to use it from the LAN).
 
 ## <a id="why-there-is-no-bridge"></a>Why there is no bridge
 

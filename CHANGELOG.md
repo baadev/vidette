@@ -6,6 +6,39 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-07-09
+
+Round two of field fixes from the same Eufy S3 Pro deployment — this time on permanent
+power. Root cause of "camera doesn't load at all": Eufy serves exactly **one RTSP client**
+at a time and holds dead sessions after unclean hangups, so every gateway connection churn
+risked a minutes-long `404 Stream Not Found` lockout; meanwhile the recorder died on
+startup probing and the v0.1.1 sleep backoff (then unconditional) kept it down for
+5-minute stretches.
+
+### Fixed
+- **Recorder could not start against a degraded restream:** ffmpeg joined the gateway
+  stream while its camera producer was still (re)connecting, gave up probing before any
+  SPS/keyframe arrived and died with "dimensions not set / Could not write header" —
+  12 consecutive deaths observed. The record command now probes up to 10 s
+  (`-analyzeduration/-probesize`).
+- **5-minute stall backoff applied to mains cameras:** the sleepy-camera protection from
+  v0.1.1 is now opt-in via `power_profile: battery`; the default (`mains`) retries every
+  failure within 30 s and never claims the camera is "probably sleeping".
+- **Orphaned footage invisible after a crash:** segment files written but not yet indexed
+  when the process died are now adopted at boot (real duration probed); truncated tails
+  (no moov atom — unplayable) are removed instead of leaking disk forever.
+
+### Added
+- **`power_profile` per camera** (`mains` default | `battery`), in YAML and as a
+  "Battery-powered camera" toggle in the camera form.
+- **Keep-warm stream holders:** for mains cameras the server pins one lightweight
+  consumer to the gateway so the camera connection never churns (no more single-client
+  RTSP lockouts) and live view attaches instantly. Visible under `keepwarm` in
+  `GET /api/v1/system`.
+- **Live tiles explain themselves:** when a tile falls back to snapshots it now shows the
+  recorder's actual diagnosis (`last_error`, also new in `GET /api/v1/cameras`),
+  refreshed while degraded.
+
 ## [0.1.1] — 2026-07-09
 
 Field fixes from the first real battery-camera deployment (Eufy S3 Pro over NAS-RTSP).

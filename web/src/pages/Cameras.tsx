@@ -56,6 +56,7 @@ type CameraForm = {
   password: string;
   recordMode: RecordMode;
   detectEnabled: boolean;
+  batteryPowered: boolean;
 };
 
 const EMPTY_FORM: CameraForm = {
@@ -70,6 +71,7 @@ const EMPTY_FORM: CameraForm = {
   password: "",
   recordMode: "continuous",
   detectEnabled: false,
+  batteryPowered: false,
 };
 
 function optionString(value: unknown): string {
@@ -94,6 +96,7 @@ function configToForm(id: string, config: CameraConfigPayload): CameraForm {
     password: optionString(options["password"]),
     recordMode: mode ?? "continuous",
     detectEnabled: config.detect?.enabled ?? false,
+    batteryPowered: config.power_profile === "battery",
   };
 }
 
@@ -108,6 +111,7 @@ function buildConfig(form: CameraForm, base: CameraConfigPayload | null): Camera
     ...(base ?? {}),
     adapter: form.adapter,
     name: name ? name : undefined,
+    power_profile: form.batteryPowered ? "battery" : "mains",
     record: { mode: form.recordMode },
     detect: { ...(base?.detect ?? {}), enabled: form.detectEnabled },
   };
@@ -210,6 +214,9 @@ function CameraRow({ entry, onEdit, onZones, onDeleted }: CameraRowProps) {
           <span className="chip">{entry.config.adapter}</span>
           <span className="chip chip-zone">record: {recordMode}</span>
           <span className="chip chip-zone">detect {detectOn ? "on" : "off"}</span>
+          {entry.config.power_profile === "battery" && (
+            <span className="chip chip-zone">battery</span>
+          )}
           {zoneCount > 0 && (
             <span className="chip chip-zone">
               {zoneCount} zone{zoneCount === 1 ? "" : "s"}
@@ -686,6 +693,27 @@ export function CamerasPage() {
               />
               Enable detection
             </label>
+
+            <label className="cam-check">
+              <input
+                type="checkbox"
+                checked={form.batteryPowered}
+                onChange={(ev) => setForm({ ...form, batteryPowered: ev.target.checked })}
+              />
+              Battery-powered camera
+            </label>
+            {form.batteryPowered ? (
+              <p className="hint">
+                Vidette lets this camera sleep: no permanent stream, and after repeated
+                failures it retries only every few minutes. Live view may take a while to
+                start while the camera wakes.
+              </p>
+            ) : (
+              <p className="hint">
+                The stream stays permanently open on the server for instant live view. Turn
+                the battery option on only for cameras that must sleep between events.
+              </p>
+            )}
 
             {formError && <p className="page-error">{formError}</p>}
 

@@ -2,8 +2,10 @@
 
 Principle 2 applies literally here: recording is sacred. The recorder is crash-only — any
 exception in indexing/notification paths is contained and reported; the ffmpeg child is
-restarted with exponential backoff (1→2→4→…→60 s, ±20 % jitter); repeated failures surface
-as system events, never as silent death.
+restarted with exponential backoff (±20 % jitter) capped by the camera's power profile:
+mains (default) retries within 30 s, battery lets stall streaks back off to 5 min so a
+sleeping camera is not reconnect-hammered awake. Repeated failures surface as system
+events, never as silent death.
 
 Watchdog: if a running recorder produces no finalized segment for `stall_after_s` (default
 45 s ≈ 4 missed segments), a "recorder.stalled" system event is emitted and ffmpeg restarts.
@@ -30,8 +32,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from vidette.core.config import CameraConfig, RecordMode, VidetteConfig
+from vidette.core.config import CameraConfig, PowerProfile, RecordMode, VidetteConfig
 from vidette.db import Database
+from vidette.recording.reconcile import reconcile_camera_segments
 from vidette.recording.segments import (
     SegmentNotice,
     build_record_command,
@@ -48,16 +51,20 @@ RecorderState = Literal["idle", "starting", "recording", "backoff", "stopped"]
 SystemEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 _BACKOFF_MAX_S = 60.0
-# Stalls back off much further than crashes: a stall streak usually means a battery camera
-# is asleep (field case: Eufy S3 Pro over NAS-RTSP). Hammering it every ~45 s kept the
-# camera awake, drained its battery, and leaked one orphaned gateway session per attempt.
+# Mains-powered cameras (the default power_profile) recover fast: nothing needs protecting,
+# so every failure retries within half a minute.
+_MAINS_BACKOFF_MAX_S = 30.0
+# Battery profile only — stalls back off much further than crashes: a stall streak usually
+# means the camera is asleep (field case: Eufy S3 Pro over NAS-RTSP). Hammering it every
+# ~45 s kept the camera awake, drained its battery, and leaked one orphaned gateway session
+# per attempt.
 _STALL_BACKOFF_MAX_S = 300.0
 _READ_TICK_S = 5.0
 _STDERR_TAIL_LINES = 20
 _EXIT_EVENT_EVERY = 5  # emit recorder.exited/.stalled on the 1st failure, then every 5th
 _SLEEPY_HINT = (
-    "if this is a battery camera it is probably sleeping — retries continue with growing "
-    "backoff (up to 5 min); recording resumes automatically when the camera answers"
+    "the camera is probably sleeping (power_profile: battery) — retries continue with "
+    "growing backoff (up to 5 min); recording resumes automatically when the camera answers"
 )
 
 
@@ -285,6 +292,25 @@ class CameraRecorder:
                     )
 
             await self._terminate_proc()
+            # ffmpeg finalizes the in-flight segment on SIGTERM and prints its CSV line at
+            # exit — after we already left the read loop. Drain what's left of stdout so
+            # end-of-session segments are indexed now, not at the next boot's reconcile
+            # (field case: burst-streaming camera, every burst's last segment went missing).
+            for _ in range(64):
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=2)
+                except (TimeoutError, OSError):
+                    break
+                if not line:
+                    break
+                notice = parse_segment_list_line(
+                    line.decode("utf-8", errors="replace"), self._camera_dir
+                )
+                if notice is None:
+                    continue
+                self._last_segment_at = notice.end_ts
+                with contextlib.suppress(Exception):
+                    await self._on_segment(self.camera_id, notice)
             with contextlib.suppress(Exception):
                 await stderr_task
             returncode = proc.returncode
@@ -300,7 +326,8 @@ class CameraRecorder:
                 if stalled
                 else f"ffmpeg exited with code {returncode}"
             )
-            if stalled and consecutive_failures >= 2:
+            battery = self.camera.power_profile is PowerProfile.battery
+            if battery and stalled and consecutive_failures >= 2:
                 reason += f" — {_SLEEPY_HINT}"
             self._last_error = reason + (f" — {tail[-300:]}" if tail else "")
             if consecutive_failures == 1 or consecutive_failures % _EXIT_EVENT_EVERY == 0:
@@ -317,7 +344,10 @@ class CameraRecorder:
             self._state = "backoff"
             if await self._backoff_wait(backoff):
                 break
-            cap = _STALL_BACKOFF_MAX_S if stalled else _BACKOFF_MAX_S
+            if battery:
+                cap = _STALL_BACKOFF_MAX_S if stalled else _BACKOFF_MAX_S
+            else:
+                cap = _MAINS_BACKOFF_MAX_S
             backoff = min(cap, backoff * 2)
 
         self._state = "stopped"
@@ -384,6 +414,23 @@ class RecorderSupervisor:
             )
             return
         for camera_id, camera in wanted.items():
+            # Adopt footage a previous run wrote but never indexed (crash/recreate between
+            # finalization and indexing) — before the recorder starts, so no writer races.
+            try:
+                result = await reconcile_camera_segments(
+                    self._db, camera_id, camera_media_dir(self._media_dir, camera_id)
+                )
+                if result.indexed or result.removed:
+                    await self._record_event(
+                        "recorder.segments_reconciled",
+                        {
+                            "camera": camera_id,
+                            "indexed": result.indexed,
+                            "removed_unreadable": result.removed,
+                        },
+                    )
+            except Exception:
+                logger.exception("segment reconciliation failed for %s", camera_id)
             skip_reason = self._gateway.skipped.get(camera_id)
             if skip_reason is not None:
                 self._unavailable[camera_id] = f"no stream at the gateway: {skip_reason}"

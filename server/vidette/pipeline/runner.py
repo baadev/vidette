@@ -23,7 +23,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from vidette.core.config import CameraConfig, VidetteConfig
+from vidette.core.config import CameraConfig, PowerProfile, VidetteConfig
 from vidette.pipeline.base import Detection, MotionRegion
 from vidette.pipeline.decode import Frame, SubstreamDecoder
 from vidette.pipeline.motion import FrameDiffGate
@@ -41,7 +41,7 @@ TracksSink = Callable[[str, float, list[Detection], list[MotionRegion]], Awaitab
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 _BACKOFF_MAX_S = 60.0
-_REPEAT_BACKOFF_MAX_S = 300.0  # sleeping battery cameras: stop hammering after 3 failures
+_REPEAT_BACKOFF_MAX_S = 300.0  # battery profile: stop hammering a sleeping camera awake
 _STALL_EVENT_EVERY = 5  # emit pipeline.stalled on the 1st EOF, then every 5th
 _ERROR_EVENT_MIN_INTERVAL_S = 30.0  # rate limit for pipeline.error events
 
@@ -263,9 +263,15 @@ class CameraPipeline:
             self._state = "backoff"
             if await self._backoff_wait(backoff):
                 break
-            # A long failure streak usually means a sleeping battery camera — stretch the
-            # retry interval so we stop waking it (and stop leaking gateway sessions).
-            cap = _REPEAT_BACKOFF_MAX_S if consecutive_failures >= 3 else _BACKOFF_MAX_S
+            # Battery profile only: a long failure streak usually means the camera sleeps —
+            # stretch the retry interval so we stop waking it (and stop leaking gateway
+            # sessions). Mains cameras (default) always retry within _BACKOFF_MAX_S.
+            battery = self.camera.power_profile is PowerProfile.battery
+            cap = (
+                _REPEAT_BACKOFF_MAX_S
+                if battery and consecutive_failures >= 3
+                else _BACKOFF_MAX_S
+            )
             backoff = min(cap, backoff * 2)
         self._state = "stopped"
 

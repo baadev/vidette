@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from vidette.core.config import CameraConfig, CameraSource, VidetteConfig
+from vidette.core.config import CameraConfig, CameraSource, PowerProfile, VidetteConfig
 from vidette.recording.recorder import CameraRecorder, RecorderSupervisor
 from vidette.recording.segments import SegmentNotice
 
@@ -18,8 +19,10 @@ requires_ffmpeg: pytest.MarkDecorator = pytest.mark.skipif(
 )
 
 
-def _camera() -> CameraConfig:
-    return CameraConfig(source=CameraSource(main="rtsp://example/main"))
+def _camera(power_profile: PowerProfile = PowerProfile.mains) -> CameraConfig:
+    return CameraConfig(
+        source=CameraSource(main="rtsp://example/main"), power_profile=power_profile
+    )
 
 
 def _make_source_clip(path: Path) -> None:
@@ -95,6 +98,81 @@ async def test_recorder_produces_indexed_segments(tmp_path: Path, media_dir: Pat
         assert notice.end_ts > notice.start_ts
     assert recorder.status().state == "stopped"
     assert recorder.status().last_segment_at is not None
+
+
+async def test_recorder_drains_final_segment_notices_after_stall_kill(
+    media_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ffmpeg finalizes the in-flight segment on SIGTERM and prints its CSV line at exit —
+    after the recorder left its read loop. That last segment must be indexed immediately
+    (field case: a burst-streaming camera lost every burst's final segment)."""
+    from vidette.recording.segments import camera_media_dir, segment_hour_dir
+
+    epoch = int(time.time()) - 120
+    camera_dir = camera_media_dir(media_dir, "porch")
+    hour_dir = segment_hour_dir(camera_dir, epoch)
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    (hour_dir / f"{epoch}.mp4").write_bytes(b"\x00" * 256)
+
+    class StallThenFinalizeProc:
+        """Silent while running; on terminate, prints the finalized-segment CSV line."""
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+
+        def terminate(self) -> None:
+            if self.returncode is None:
+                self.returncode = 0
+                self.stdout.feed_data(f"{epoch}.mp4,0.00,7.50\n".encode())
+                self.stdout.feed_eof()
+
+        def kill(self) -> None:
+            self.terminate()
+
+        async def wait(self) -> int:
+            while self.returncode is None:
+                await asyncio.sleep(0.005)
+            return self.returncode
+
+    async def fake_exec(*args: object, **kwargs: object) -> StallThenFinalizeProc:
+        return StallThenFinalizeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    notices: list[SegmentNotice] = []
+
+    async def on_segment(camera: str, notice: SegmentNotice) -> None:
+        notices.append(notice)
+
+    async def on_event(kind: str, payload: dict[str, Any]) -> None:
+        return None
+
+    recorder = CameraRecorder(
+        "porch",
+        _camera(),
+        source_url="rtsp://gateway/porch",
+        media_dir=media_dir,
+        on_segment=on_segment,
+        on_event=on_event,
+        stall_after_s=0.05,
+        read_tick_s=0.02,
+        initial_backoff_s=30.0,  # park in backoff after the first stall kill
+    )
+    await recorder.start()
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if notices:
+            break
+    status = recorder.status()
+    await recorder.stop()
+
+    assert len(notices) == 1
+    assert notices[0].start_ts == float(epoch)
+    assert notices[0].end_ts == epoch + 7.5
+    assert status.last_segment_at == epoch + 7.5
 
 
 async def test_recorder_backs_off_and_reports_when_ffmpeg_dies(
@@ -266,35 +344,33 @@ async def test_supervisor_reports_missing_ffmpeg(
     assert all("ffmpeg" in (entry.last_error or "") for entry in status.values())
 
 
-async def test_sleeping_camera_stall_streak_backs_off_and_rate_limits(
-    tmp_path: Path, media_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A battery camera that answers the connection but never sends data (Eufy S3 Pro
-    asleep — field incident) must not be hammered forever: recorder.stalled is emitted
-    1st + every 5th, backoff grows past the crash cap toward the 5-minute stall cap, and
-    the status hints at a sleeping camera."""
+class SilentProc:
+    """Stays alive, never produces stdout — the shape of a sleeping/stalled camera."""
 
-    class SilentProc:
-        """Stays alive, never produces stdout — the shape of a sleeping camera."""
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_eof()
 
-        def __init__(self) -> None:
-            self.returncode: int | None = None
-            self.stdout = asyncio.StreamReader()
-            self.stderr = asyncio.StreamReader()
-            self.stderr.feed_eof()
+    def terminate(self) -> None:
+        if self.returncode is None:
+            self.returncode = -15
+            self.stdout.feed_eof()
 
-        def terminate(self) -> None:
-            if self.returncode is None:
-                self.returncode = -15
-                self.stdout.feed_eof()
+    def kill(self) -> None:
+        self.terminate()
 
-        def kill(self) -> None:
-            self.terminate()
+    async def wait(self) -> int:
+        while self.returncode is None:
+            await asyncio.sleep(0.005)
+        return self.returncode
 
-        async def wait(self) -> int:
-            while self.returncode is None:
-                await asyncio.sleep(0.005)
-            return self.returncode
+
+async def _run_silent_camera(
+    profile: PowerProfile, media_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[tuple[str, dict[str, Any]]], list[float], Any]:
+    """Drive a stall streak against a never-sending camera; returns (events, backoffs, status)."""
 
     async def fake_exec(*args: object, **kwargs: object) -> SilentProc:
         return SilentProc()
@@ -312,14 +388,14 @@ async def test_sleeping_camera_stall_streak_backs_off_and_rate_limits(
 
     recorder = CameraRecorder(
         "porch",
-        _camera(),
+        _camera(profile),
         source_url="rtsp://gateway/porch",
         media_dir=media_dir,
         on_segment=on_segment,
         on_event=on_event,
         stall_after_s=0.05,
         read_tick_s=0.02,
-        initial_backoff_s=1.0,  # doubling reaches the 300 s cap within ~10 cycles
+        initial_backoff_s=1.0,  # doubling reaches either cap within ~10 cycles
     )
     real_wait = recorder._backoff_wait
 
@@ -336,6 +412,19 @@ async def test_sleeping_camera_stall_streak_backs_off_and_rate_limits(
             break
     status = recorder.status()
     await recorder.stop()
+    return events, backoffs, status
+
+
+async def test_battery_camera_stall_streak_backs_off_and_rate_limits(
+    media_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """power_profile=battery: a camera that answers the connection but never sends data
+    (Eufy S3 Pro asleep — field incident) must not be hammered forever: recorder.stalled
+    is emitted 1st + every 5th, backoff grows past the crash cap toward the 5-minute
+    stall cap, and the status hints at a sleeping camera."""
+    events, backoffs, status = await _run_silent_camera(
+        PowerProfile.battery, media_dir, monkeypatch
+    )
 
     stalled_events = [p for k, p in events if k == "recorder.stalled"]
     # Rate-limited: streak failures 1, 5, 10 → not one event per cycle.
@@ -343,3 +432,20 @@ async def test_sleeping_camera_stall_streak_backs_off_and_rate_limits(
     # Backoff kept doubling past the 60 s crash cap and settled at the 300 s stall cap.
     assert max(backoffs) == 300.0
     assert status.last_error is not None and "sleeping" in status.last_error
+
+
+async def test_mains_camera_stall_streak_retries_fast(
+    media_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """power_profile=mains (the default): nothing needs protecting — the same stall
+    streak stays capped at 30 s and never claims the camera is sleeping (field
+    regression: a mains Eufy stuck in 5-minute backoffs looked completely dead)."""
+    events, backoffs, status = await _run_silent_camera(
+        PowerProfile.mains, media_dir, monkeypatch
+    )
+
+    assert max(backoffs) == 30.0
+    assert status.last_error is not None and "sleeping" not in status.last_error
+    # Event rate-limiting is profile-independent (log/webhook flood protection).
+    stalled_events = [p for k, p in events if k == "recorder.stalled"]
+    assert [p["consecutive_failures"] for p in stalled_events][:3] == [1, 5, 10]

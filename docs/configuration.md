@@ -73,6 +73,7 @@ cameras:
       main: rtsp://user:${CAM_PASSWORD}@10.0.20.11:554/stream1
       sub:  rtsp://user:${CAM_PASSWORD}@10.0.20.11:554/stream2
     options: {}                   # adapter-specific extras (reserved for bridge adapters)
+    power_profile: mains          # mains (default) | battery — see below
     record:
       mode: continuous            # continuous | motion | events | off
       retention: null             # override global storage.retention for this camera
@@ -90,6 +91,20 @@ Zone kinds and their semantics (`entry`, `object`, `private`, `public`) are defi
 [cascade doc](architecture/ai-pipeline.md#tier-2--trajectory-geometry). Draw them in the
 web app's zone editor: for UI-managed cameras it saves directly; for file-defined cameras it
 produces a YAML snippet to paste here — Vidette never rewrites your config file.
+
+### `power_profile`: mains vs battery
+
+`mains` (default) treats the camera as always available: Vidette holds one **keep-warm
+connection** open through the gateway so live view attaches instantly, single-RTSP-client
+cameras (Eufy) never see connection churn, and any failure is retried within 30 s.
+
+`battery` is the opt-in for cameras that sleep between events. No keep-warm connection —
+holding the stream open would keep the camera awake and drain it — and repeated failures
+back off up to 5 minutes (a sleeping camera that is reconnect-hammered every 45 s never
+sleeps; that loop drained a real S3 Pro and leaked gateway sessions). The camera card says
+"probably sleeping" instead of pretending the camera is broken; recording resumes
+automatically when it answers. Expect live view to take a few seconds while the camera
+wakes — that part is physics, not configuration.
 
 ### Cameras from the UI (managed cameras)
 

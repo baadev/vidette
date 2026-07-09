@@ -57,6 +57,7 @@ from vidette.recording.janitor import Janitor
 from vidette.recording.previews import PreviewWorker
 from vidette.recording.recorder import RecorderSupervisor
 from vidette.streams.go2rtc import DEFAULT_API_URL, DEFAULT_RTSP_BASE, Go2rtcManager
+from vidette.streams.keepwarm import StreamKeepWarm
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ class AppRuntime:
         self.recorder = RecorderSupervisor(
             config, self.db, self.go2rtc, media_dir=config.storage.media_dir
         )
+        self.keepwarm = StreamKeepWarm(config, self.go2rtc, on_event=self.emit)
         self.exporter = ExportManager(config, self.db, media_dir=config.storage.media_dir)
         self.janitor = Janitor(config, self.db, self.exporter)
         self.previews = PreviewWorker(config, self.db, media_dir=config.storage.media_dir)
@@ -238,6 +240,7 @@ class AppRuntime:
         self.recorder = RecorderSupervisor(
             merged, self.db, self.go2rtc, media_dir=merged.storage.media_dir
         )
+        self.keepwarm = StreamKeepWarm(merged, self.go2rtc, on_event=self.emit)
         self.pipeline = PipelineSupervisor(
             merged, self.go2rtc, self._detect, self.engine.on_detections, self.emit
         )
@@ -252,6 +255,7 @@ class AppRuntime:
         self._swap_config(merged)
         if self._workers_started:
             await self.pipeline.stop()
+            await self.keepwarm.stop()
             await self.recorder.stop()
             await self.mqtt.stop()
         self._rebuild_capture(merged)
@@ -259,6 +263,7 @@ class AppRuntime:
         await self.go2rtc.sync()
         if self._workers_started:
             await self.recorder.start()
+            await self.keepwarm.start()
             await self.pipeline.start()
             self.mqtt.start()
         await self.emit(
@@ -316,6 +321,9 @@ class AppRuntime:
 
         self.notifier.start()  # sync: spawns one consumer task per notification rule
         self.mqtt.start()  # sync too; no-op unless integrations.mqtt.enabled
+        # Keep-warm holders are independent of the media dir: live view must stay instant
+        # even when recording is degraded.
+        await self.keepwarm.start()
         if media_ok:
             await self.exporter.start()
             await self.recorder.start()  # handles missing ffmpeg with a loud system event
@@ -361,6 +369,11 @@ class AppRuntime:
                 except Exception:
                     logger.exception("stopping %s failed", name)
             self._workers_started = False
+        # Started outside the media_ok gate, so stopped outside the _workers_started one.
+        try:
+            await self.keepwarm.stop()
+        except Exception:
+            logger.exception("stopping keepwarm failed")
         try:
             await self.mqtt.stop()
         except Exception:

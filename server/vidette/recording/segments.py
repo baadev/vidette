@@ -9,7 +9,8 @@ from the CSV (end_rel - start_rel).
 
 Command shape (implementation must match; tests pin it):
   ffmpeg -nostdin -hide_banner -loglevel warning
-         -rtsp_transport tcp -i <source_url>
+         -rtsp_transport tcp
+         -analyzeduration 10000000 -probesize 10000000 -i <source_url>
          -c copy -map 0
          -f segment -segment_time <seconds> -segment_atclocktime 1 -reset_timestamps 1
          -strftime 1 -strftime_mkdir 1
@@ -25,6 +26,11 @@ Field notes (verified against ffmpeg 8.1):
   always agree, so the hour directory of a segment is derivable from its epoch stem.
 - CSV list entries carry the segment *basename* (e.g. `1783430183.mp4`), not the full
   path — `parse_segment_list_line` reconstructs the absolute path from the epoch.
+- `-analyzeduration/-probesize 10M` (µs / bytes) matter: joining the gateway restream
+  while its camera producer is still (re)connecting means no SPS/keyframe arrives for
+  seconds; with ffmpeg's default probe window the input closes as "h264, unspecified
+  size" and the segment muxer dies with "dimensions not set / Could not write header"
+  (field case: Eufy S3 Pro, 12 consecutive recorder deaths).
 """
 
 from __future__ import annotations
@@ -89,6 +95,10 @@ def build_record_command(
         "-loglevel",
         "warning",
         *input_args,
+        "-analyzeduration",
+        "10000000",
+        "-probesize",
+        "10000000",
         "-i",
         source_url,
         "-c",

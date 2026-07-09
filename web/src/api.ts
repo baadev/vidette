@@ -16,6 +16,8 @@ export type Camera = {
   record_mode: string;
   state: string;
   last_segment_at: number | null;
+  /** Recorder diagnosis (verbatim from the server) — why capture is degraded, if it is. */
+  last_error: string | null;
   stream_ready: boolean;
 };
 
@@ -92,6 +94,12 @@ export type CameraConfigPayload = {
   name?: string | null;
   source?: { main: string; sub?: string | null } | null;
   options?: Record<string, unknown>;
+  /**
+   * `mains` (default): the server keeps the stream permanently open (instant live view)
+   * and retries failures fast. `battery`: opt-in for cameras that sleep between events —
+   * no keep-warm connection, long backoff so the camera is not reconnect-hammered awake.
+   */
+  power_profile?: "mains" | "battery";
   record?: { mode: "continuous" | "motion" | "events" | "off" };
   detect?: { enabled: boolean; fps?: number; resolution?: number };
   understand?: boolean;
