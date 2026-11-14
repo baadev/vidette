@@ -2,8 +2,9 @@
 
 Honesty rule (docs/project/principles.md): designed-but-unimplemented routes are mounted and
 return `501 {"status": "designed", "milestone": ...}` — the API self-documents the roadmap
-instead of 404-ing or, worse, faking. As of M2, cameras/recordings/streams/export/events are
-real; policies (M4) remains an honest 501.
+instead of 404-ing or, worse, faking. On the v0.2 line (ADR-0009) auth, events, push,
+system, metrics and settings are real; the policies API remains an honest 501 (policies
+live in the config file for now).
 """
 
 from __future__ import annotations
@@ -34,8 +35,11 @@ _REQUIRE_READ_CONFIG = require_scope("read:config")
 
 # (path, methods, milestone) — remove entries as milestones ship; tests pin this behavior.
 DESIGNED_ROUTES: tuple[tuple[str, tuple[str, ...], str], ...] = (
-    ("/api/v1/policies", ("GET", "PUT"), "M4"),
+    ("/api/v1/policies", ("GET", "PUT"), "v0.2"),
 )
+
+# Where the v0.2 line stands; shown by /api/v1/system and the System page.
+STAGE = "v0.2-dev: intent layer over Frigate and clip folders (ADR-0009, ADR-0010)"
 
 _FALLBACK_PAGE = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Vidette</title>
@@ -53,6 +57,41 @@ _FALLBACK_PAGE = f"""<!doctype html>
 live at <a href="/api/docs">/api/docs</a> (v{__version__}).</p>
 <p><a href="https://github.com/baadev/vidette">github.com/baadev/vidette</a></p>
 </main></body></html>"""
+
+
+def _frigate_status(rt: AppRuntime) -> dict[str, object] | None:
+    """The incident source at a glance; None when no `frigate:` section is configured."""
+    if rt.frigate_source is None or rt.config.frigate is None:
+        return None
+    status = rt.frigate_source.status()
+    return {
+        "url": rt.config.frigate.url,
+        "broker": f"{rt.config.frigate.mqtt.host}:{rt.config.frigate.mqtt.port}",
+        "topics": rt.frigate_source.topics,
+        "connected": status.connected,
+        "available": status.frigate_available,
+        "messages_total": status.messages_total,
+        "invalid_total": status.invalid_total,
+        "incidents_total": status.incidents_total,
+        "last_message_at": status.last_message_at,
+    }
+
+
+def _clip_folder_status(rt: AppRuntime) -> list[dict[str, object]]:
+    if rt.clip_folders is None:
+        return []
+    return [
+        {
+            "path": status.path,
+            "camera": status.camera,
+            "exists": status.exists,
+            "clips_total": status.clips_total,
+            "errors_total": status.errors_total,
+            "last_clip_at": status.last_clip_at,
+            "last_scan_at": status.last_scan_at,
+        }
+        for status in rt.clip_folders.status()
+    ]
 
 
 def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> FastAPI:
@@ -86,49 +125,15 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
         request: Request, principal: Annotated[Principal, Depends(current_principal)]
     ) -> dict[str, object]:
         rt: AppRuntime = request.app.state.runtime
-        gateway = await rt.go2rtc.health()
         return {
             "name": "vidette",
             "version": __version__,
-            "milestone": "M2",
+            "milestone": STAGE,
             "python": platform.python_version(),
             "config_warnings": rt.config_warnings,
             "auth_mode": rt.config.server.auth.mode.value,
-            "gateway": {
-                "reachable": gateway.reachable,
-                "version": gateway.version,
-                "streams": sorted(gateway.streams),
-                "detail": gateway.detail,
-            },
-            "recorders": {
-                camera: {
-                    "state": status.state,
-                    "last_segment_at": status.last_segment_at,
-                    "last_error": status.last_error,
-                    "restarts": status.restarts,
-                }
-                for camera, status in rt.recorder.status().items()
-            },
-            "keepwarm": {
-                camera: {
-                    "state": status.state,
-                    "bytes_received": status.bytes_received,
-                    "last_data_at": status.last_data_at,
-                }
-                for camera, status in rt.keepwarm.status().items()
-            },
-            "detector": rt.detector_state,
-            "pipelines": {
-                camera: {
-                    "state": status.state,
-                    "frames_total": status.frames_total,
-                    "motion_frames": status.motion_frames,
-                    "detect_calls": status.detect_calls,
-                    "last_frame_at": status.last_frame_at,
-                    "last_error": status.last_error,
-                }
-                for camera, status in rt.pipeline.status().items()
-            },
+            "frigate": _frigate_status(rt),
+            "clip_folders": _clip_folder_status(rt),
             "designed_routes": [
                 {"path": path, "milestone": milestone}
                 for path, _methods, milestone in DESIGNED_ROUTES
@@ -154,26 +159,20 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
         )
 
     from vidette.api.routers.auth import router as auth_router
-    from vidette.api.routers.cameras import router as cameras_router
-    from vidette.api.routers.config_cameras import router as config_cameras_router
     from vidette.api.routers.events import router as events_router
     from vidette.api.routers.metrics import router as metrics_router
+    from vidette.api.routers.people import router as people_router
     from vidette.api.routers.push import router as push_router
-    from vidette.api.routers.recordings import router as recordings_router
-    from vidette.api.routers.streams import router as streams_router
-    from vidette.api.routers.streams import ws_router as streams_ws_router
+    from vidette.api.routers.settings import router as settings_router
     from vidette.api.routers.system import router as system_router
     from vidette.api.routers.ws import router as ws_router
 
     app.include_router(auth_router)
-    app.include_router(cameras_router)
-    app.include_router(config_cameras_router)
     app.include_router(events_router)
     app.include_router(metrics_router)
+    app.include_router(people_router)
     app.include_router(push_router)
-    app.include_router(recordings_router)
-    app.include_router(streams_router)
-    app.include_router(streams_ws_router)
+    app.include_router(settings_router)
     app.include_router(system_router)
     app.include_router(ws_router)
 

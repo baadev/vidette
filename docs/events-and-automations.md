@@ -1,8 +1,13 @@
 # Events & automations
 
-> **Status: 📐 designed — lands in M2** (webhook HMAC signing is implemented and tested
-> today). This page is the contract automation authors build against; breaking it after M2
-> will require a deprecation cycle.
+> **Status (v0.2):** delivery works (signed webhooks, Apprise, web push, MQTT + HA
+> discovery, WebSocket). Since v0.2 events come from Frigate review items and start in state
+> `observed`, which **never notifies**; `confirmed` and `dismissed` need the verdict worker
+> (week 2), so today no `event.confirmed` is ever published. The lifecycle diagram below is
+> the v0.1 design; the v0.2 lifecycle is: Frigate review item → `observed` (topic
+> `event.observed`, live UIs only) → verdict → `confirmed` (notifies) or `dismissed` (kept,
+> silent). The canonical payload adds `state`, `source` and `upstream` (Frigate's severity
+> and its own GenAI summary).
 
 ## The event lifecycle
 

@@ -19,8 +19,9 @@ With `server.auth.mode: none` no header is needed, like the rest of the API.
 
 Conventions: counters are process-lifetime (they reset on restart, which Prometheus
 handles); `vidette_events_total` is a gauge on purpose — events migrate between lifecycle
-states, so per-state counts can shrink. A gauge whose source is not known yet (janitor
-before its first run) keeps its HELP/TYPE headers but emits no sample line — never NaN.
+states, so per-state counts can shrink. A gauge whose source is not known yet keeps its
+HELP/TYPE headers but emits no sample line, never NaN. The v0.1 recorder, pipeline and
+janitor families went with the NVR core (ADR-0009, tag `nvr-core`).
 """
 
 from __future__ import annotations
@@ -70,9 +71,6 @@ async def metrics(request: Request) -> PlainTextResponse:
     """Prometheus scrape endpoint. Requires `read:events`; see the module docstring for
     the `Authorization: Bearer vd_…` scrape configuration."""
     runtime = cast(AppRuntime, request.app.state.runtime)
-    pipelines = sorted(runtime.pipeline.status().items())
-    recorders = sorted(runtime.recorder.status().items())
-    janitor = runtime.janitor.status()
     notifier = runtime.notifier.status()
     event_counts = {state.value: 0 for state in EventState}
     event_counts.update(await runtime.db.count_events_by_state())
@@ -84,83 +82,30 @@ async def metrics(request: Request) -> PlainTextResponse:
         "Build information; the value is always 1.",
         [({"version": __version__}, 1)],
     )
+    source = runtime.frigate_source.status() if runtime.frigate_source is not None else None
     lines += _family(
-        "vidette_detector_ready",
+        "vidette_frigate_connected",
         "gauge",
-        "1 when the Tier-1 detector is loaded and ready, else 0.",
-        [({}, int(runtime.detector_state == "ready"))],
+        "1 while connected to Frigate's MQTT broker (no sample without a frigate: section).",
+        _known(None if source is None else int(source.connected)),
     )
     lines += _family(
-        "vidette_pipeline_up",
-        "gauge",
-        "1 when the camera's analysis pipeline is running.",
-        [({"camera": camera}, int(s.state == "running")) for camera, s in pipelines],
-    )
-    lines += _family(
-        "vidette_pipeline_frames_total",
+        "vidette_frigate_messages_total",
         "counter",
-        "Substream frames pulled by the camera's pipeline.",
-        [({"camera": camera}, s.frames_total) for camera, s in pipelines],
+        "MQTT messages received from Frigate.",
+        _known(None if source is None else source.messages_total),
     )
     lines += _family(
-        "vidette_pipeline_motion_frames_total",
+        "vidette_frigate_invalid_total",
         "counter",
-        "Frames the Tier-0 motion gate let through.",
-        [({"camera": camera}, s.motion_frames) for camera, s in pipelines],
+        "Frigate messages that did not match the expected payload.",
+        _known(None if source is None else source.invalid_total),
     )
     lines += _family(
-        "vidette_pipeline_detect_calls_total",
+        "vidette_frigate_incidents_total",
         "counter",
-        "Tier-1 detector invocations.",
-        [({"camera": camera}, s.detect_calls) for camera, s in pipelines],
-    )
-    lines += _family(
-        "vidette_recorder_up",
-        "gauge",
-        "1 when the camera's recorder is writing segments.",
-        [({"camera": camera}, int(s.state == "recording")) for camera, s in recorders],
-    )
-    lines += _family(
-        "vidette_recorder_restarts_total",
-        "counter",
-        "Recorder ffmpeg restarts.",
-        [({"camera": camera}, s.restarts) for camera, s in recorders],
-    )
-    lines += _family(
-        "vidette_disk_total_bytes",
-        "gauge",
-        "Capacity of the filesystem holding media_dir.",
-        _known(janitor.disk_total_bytes),
-    )
-    lines += _family(
-        "vidette_disk_free_bytes",
-        "gauge",
-        "Free space on the filesystem holding media_dir.",
-        _known(janitor.disk_free_bytes),
-    )
-    lines += _family(
-        "vidette_media_bytes",
-        "gauge",
-        "Recorded media tracked in the database.",
-        _known(janitor.media_bytes),
-    )
-    lines += _family(
-        "vidette_janitor_expired_deleted_total",
-        "counter",
-        "Segments deleted because their retention window expired.",
-        [({}, janitor.expired_deleted_total)],
-    )
-    lines += _family(
-        "vidette_janitor_pressure_deleted_total",
-        "counter",
-        "Segments deleted early to relieve disk pressure.",
-        [({}, janitor.pressure_deleted_total)],
-    )
-    lines += _family(
-        "vidette_storage_probe_ok",
-        "gauge",
-        "1 when the janitor's last media_dir write probe succeeded, else 0.",
-        _known(None if janitor.last_probe_ok is None else int(janitor.last_probe_ok)),
+        "Incidents opened from Frigate review items.",
+        _known(None if source is None else source.incidents_total),
     )
     lines += _family(
         "vidette_notifications_delivered_total",

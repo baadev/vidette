@@ -12,15 +12,12 @@ RUN npm run build
 FROM python:3.12-slim AS runtime
 
 LABEL org.opencontainers.image.title="Vidette" \
-      org.opencontainers.image.description="Self-hosted video security that understands intent — not just motion." \
+      org.opencontainers.image.description="Plain-language alert policies and VLM verdicts on top of Frigate." \
       org.opencontainers.image.source="https://github.com/baadev/vidette" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-# ffmpeg: segment recording + range export (codec-copy only — no transcoding at runtime)
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 1000 --create-home vidette \
+# No ffmpeg since v0.2: Vidette records nothing; media comes from Frigate's API (ADR-0009).
+RUN useradd --system --uid 1000 --create-home vidette \
     && mkdir -p /config /media/vidette \
     && chown -R vidette:vidette /config /media/vidette
 

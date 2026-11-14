@@ -1,0 +1,55 @@
+[
+  {
+    "id": "1763107200.802000-m2p7xd",
+    "camera": "front_door",
+    "start_time": 1763107200.802,
+    "end_time": 1763107233.5,
+    "severity": "alert",
+    "thumb_path": "/media/frigate/clips/review/thumb-front_door-1763107200.802000-m2p7xd.webp",
+    "data": {
+      "detections": [
+        "1763107200.412000-k3v9qa"
+      ],
+      "objects": [
+        "person"
+      ],
+      "sub_labels": [],
+      "zones": [
+        "path",
+        "porch"
+      ],
+      "audio": [],
+      "metadata": {
+        "title": "Person tries the front door",
+        "scene": "A person walks up the path to the porch, stands at the door for about ten seconds and pulls the handle twice before walking back to the street.",
+        "shortSummary": "A person walked up to the front door and tried the handle twice. Nobody answered and they left.",
+        "confidence": 0.8,
+        "other_concerns": [],
+        "potential_threat_level": 1
+      }
+    },
+    "has_been_reviewed": false
+  },
+  {
+    "id": "1763107800.350000-q4t6hn",
+    "camera": "street",
+    "start_time": 1763107800.35,
+    "end_time": 1763107808.0,
+    "severity": "detection",
+    "thumb_path": "/media/frigate/clips/review/thumb-street-1763107800.350000-q4t6hn.webp",
+    "data": {
+      "detections": [
+        "1763107800.115000-z8w1rc"
+      ],
+      "objects": [
+        "person"
+      ],
+      "sub_labels": [],
+      "zones": [
+        "sidewalk"
+      ],
+      "audio": []
+    },
+    "has_been_reviewed": true
+  }
+]

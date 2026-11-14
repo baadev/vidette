@@ -3,6 +3,14 @@
 Vidette guards video of your home; its own security posture must exceed what it protects.
 This page is the threat model and the hardening guide. Reporting: [SECURITY.md](../../SECURITY.md).
 
+> **v0.2 note.** Vidette no longer connects to cameras or runs go2rtc; rows below about the
+> recorder, go2rtc ports and camera VLANs now apply to Frigate
+> ([ADR-0009](adr/0009-intent-layer-over-frigate.md)). New on v0.2: Vidette reads Frigate's
+> **unauthenticated** internal API (port 5000) and its MQTT broker. Keep port 5000 on the
+> compose network only, and treat MQTT payloads as untrusted input (they are parsed
+> leniently but validated, camera names are sanitised before they become paths, and
+> Vidette never writes to Frigate).
+
 ## Assets
 
 1. **Footage & events** — the most privacy-sensitive data in a household.

@@ -3,9 +3,10 @@ import {
   UNAUTHORIZED_EVENT,
   api,
   wsUrl,
-  type Camera,
   type EventGeometry,
   type EventInfo,
+  type EventPeople,
+  type SeenPerson,
 } from "../api";
 import "./pages.css";
 
@@ -65,9 +66,98 @@ function geometryBadges(geometry: EventGeometry): string[] {
   return badges;
 }
 
+type Enrolled = { id: string; name: string };
+
+function answerLabel(answer: string, enrolled: Enrolled[]): string {
+  if (answer === "stranger") return "a stranger";
+  if (answer === "unsure") return "not sure";
+  return enrolled.find((person) => person.id === answer)?.name ?? answer;
+}
+
+type FaceRowProps = {
+  eventId: string;
+  seen: SeenPerson;
+  enrolled: Enrolled[];
+  onChanged: (people: EventPeople) => void;
+};
+
+/**
+ * One face seen in an event: its crop, who it matched, and the answers that teach the
+ * matcher. "This is Sam" adds the crop to Sam's references; "Stranger" after a wrong
+ * match makes that person's match stricter; "Not sure" only records the answer.
+ */
+function FaceRow({ eventId, seen, enrolled, onChanged }: FaceRowProps) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const answer = async (value: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.confirmEventFace(eventId, seen.n, value);
+      setMessage(result.message);
+      onChanged(result.people);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const label =
+    seen.status === "known" ? `${seen.name ?? seen.person} ${seen.score.toFixed(2)}` : "Unknown face";
+  return (
+    <li className="face-row">
+      {seen.crop ? (
+        <img className="face-crop" src={seen.crop} alt="" loading="lazy" />
+      ) : (
+        <span className="face-crop face-crop-empty" aria-hidden="true" />
+      )}
+      <div className="face-info">
+        <span className={`face-label${seen.status === "known" ? " face-known" : ""}`}>
+          {label}
+        </span>
+        <span className="muted face-meta">
+          {seen.faces} frame{seen.faces === 1 ? "" : "s"} · {seen.face_px}px
+        </span>
+        {seen.confirmed ? (
+          <span className="face-confirmed">✓ {answerLabel(seen.confirmed, enrolled)}</span>
+        ) : (
+          enrolled.length > 0 && (
+            <div className="face-answers" role="group" aria-label="Who is this?">
+              {enrolled.map((person) => (
+                <button
+                  key={person.id}
+                  type="button"
+                  className={`ghost${seen.person === person.id ? " face-suggested" : ""}`}
+                  disabled={busy}
+                  onClick={() => void answer(person.id)}
+                >
+                  This is {person.name}
+                </button>
+              ))}
+              <button type="button" className="ghost" disabled={busy} onClick={() => void answer("stranger")}>
+                Stranger
+              </button>
+              <button type="button" className="ghost" disabled={busy} onClick={() => void answer("unsure")}>
+                Not sure
+              </button>
+            </div>
+          )
+        )}
+        {message && <span className="muted face-meta">{message}</span>}
+        {error && <span className="error face-meta">{error}</span>}
+      </div>
+    </li>
+  );
+}
+
 type EventCardProps = {
   event: EventInfo;
-  cameraName: string;
+  /** People enrolled for face confirmation; empty when known people are off. */
+  enrolled: Enrolled[];
+  onPeopleChanged: (people: EventPeople) => void;
   expanded: boolean;
   onToggle: () => void;
   /** Effective verdict: optimistic local vote or the server-recorded one. */
@@ -86,7 +176,8 @@ type EventCardProps = {
  */
 function EventCard({
   event,
-  cameraName,
+  enrolled,
+  onPeopleChanged,
   expanded,
   onToggle,
   feedback,
@@ -127,12 +218,20 @@ function EventCard({
           {/* The stylesheet reserves room for two feedback buttons; the star
               makes three, so the top row carries a little extra clearance. */}
           <div className="event-head" style={{ paddingRight: "2.25rem" }}>
-            <span className="event-camera">{cameraName}</span>
+            <span className="event-camera">{event.camera}</span>
             <span className="event-time">{timeRange}</span>
             <span className={`event-state event-state-${event.state}`}>{event.state}</span>
           </div>
-          {(event.kinds.length > 0 || event.zones.length > 0 || badges.length > 0) && (
+          {(event.kinds.length > 0 ||
+            event.zones.length > 0 ||
+            badges.length > 0 ||
+            Boolean(event.upstream?.severity)) && (
             <div className="event-chips">
+              {event.upstream?.severity && (
+                <span className="chip" title="Frigate's own triage">
+                  frigate {event.upstream.severity}
+                </span>
+              )}
               {event.kinds.map((kind) => (
                 <span key={`kind-${kind}`} className="chip">
                   {kind}
@@ -150,7 +249,18 @@ function EventCard({
               ))}
             </div>
           )}
+          {event.people && event.people.seen.length === 0 && event.people.frames_checked > 0 && (
+            <p className="event-summary muted">
+              Faces: none clear enough to tell
+              {event.people.unclear_frames > 0
+                ? ` (${event.people.unclear_frames} frame${event.people.unclear_frames === 1 ? "" : "s"} with a small or unclear face)`
+                : ""}
+            </p>
+          )}
           {event.summary && <p className="event-summary">{event.summary}</p>}
+          {!event.summary && event.upstream?.summary?.text && (
+            <p className="event-summary muted">Frigate: {event.upstream.summary.text}</p>
+          )}
         </div>
       </button>
       <div className="event-feedback">
@@ -186,10 +296,25 @@ function EventCard({
           👎
         </button>
       </div>
+      {event.people && event.people.seen.length > 0 && (
+        <ul className="event-faces" aria-label="Faces seen">
+          {event.people.seen.map((seen) => (
+            <FaceRow
+              key={seen.n}
+              eventId={event.id}
+              seen={seen}
+              enrolled={enrolled}
+              onChanged={onPeopleChanged}
+            />
+          ))}
+        </ul>
+      )}
       {expanded && (
         <div className="event-detail">
-          {clipFailed ? (
-            <p className="muted">clip not ready yet — footage may still be on disk only</p>
+          {event.clip === null ? (
+            <p className="muted">no clip for this event</p>
+          ) : clipFailed ? (
+            <p className="muted">clip not available right now; the upstream NVR may be unreachable</p>
           ) : (
             <video
               className="event-clip"
@@ -206,14 +331,15 @@ function EventCard({
 }
 
 /**
- * Events feed (M2): what the cascade understood, newest first, grouped by local
+ * Events feed: incidents from Frigate (and, from week 2, their verdicts), newest first, grouped by local
  * day. Live over the server's WebSocket — confirmed/ended events nudge a
  * coalesced refetch — with the 10 s poll kept as a fallback that stands down
  * while the socket is open (and pauses while the tab is hidden). Refreshes keep
  * stable card keys so the layout never jumps under the cursor.
  */
 export function EventsPage() {
-  const [cameras, setCameras] = useState<Camera[] | null>(null);
+  // Cameras seen in any loaded feed: they come from Frigate, so the feed is the source.
+  const [cameras, setCameras] = useState<string[]>([]);
   const [cameraFilter, setCameraFilter] = useState("");
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [events, setEvents] = useState<EventInfo[] | null>(null);
@@ -223,27 +349,39 @@ export function EventsPage() {
   const [voteError, setVoteError] = useState<string | null>(null);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [wsLive, setWsLive] = useState(false);
+  // Enrolled people, for the face answers; stays empty when known people are off or the
+  // session may not see them (viewers).
+  const [enrolled, setEnrolled] = useState<Enrolled[]>([]);
+  useEffect(() => {
+    api
+      .people()
+      .then((state) =>
+        setEnrolled(state.enabled ? state.people.map((p) => ({ id: p.id, name: p.name })) : []),
+      )
+      .catch(() => setEnrolled([]));
+  }, []);
+  const setEventPeople = useCallback((id: string, people: EventPeople) => {
+    setEvents((current) =>
+      current === null
+        ? current
+        : current.map((event) => (event.id === id ? { ...event, people } : event)),
+    );
+  }, []);
   // Mirrors `wsLive` for the poll tick, which must not re-arm the interval.
   const wsLiveRef = useRef(false);
   // Latest feed refresh, so the (mount-once) socket always refetches with the
   // current filters. Reset to a no-op on cleanup.
   const refreshRef = useRef<() => void>(() => {});
 
-  // Load cameras once — for the filter select and to show names instead of ids.
+  // Remember every camera the feed has shown, so filtering never empties the select.
   useEffect(() => {
-    let cancelled = false;
-    api
-      .cameras()
-      .then((cams) => {
-        if (!cancelled) setCameras(cams);
-      })
-      .catch(() => {
-        // The feed still works with raw camera ids; the filter just stays empty.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (events === null) return;
+    setCameras((known) => {
+      const merged = new Set(known);
+      for (const event of events) merged.add(event.camera);
+      return merged.size === known.length ? known : [...merged].sort();
+    });
+  }, [events]);
 
   // Load the feed, then keep it fresh. The 10 s poll is the fallback: it only
   // fetches while the socket is down, and only while the tab is visible.
@@ -366,7 +504,9 @@ export function EventsPage() {
         } catch {
           return; // not our JSON — ignore rather than guess
         }
-        if (topic === "event.confirmed" || topic === "event.ended") scheduleRefetch();
+        if (topic === "event.observed" || topic === "event.confirmed" || topic === "event.ended") {
+          scheduleRefetch();
+        }
       };
       ws.onerror = () => {
         ws.close(); // the close handler owns reconnection
@@ -422,11 +562,6 @@ export function EventsPage() {
     });
   }, []);
 
-  const cameraNames = useMemo(
-    () => new Map((cameras ?? []).map((cam) => [cam.id, cam.name])),
-    [cameras],
-  );
-
   // Group the (newest-first) feed into runs of the same local day.
   const groups = useMemo(() => {
     const out: { key: string; label: string; events: EventInfo[] }[] = [];
@@ -463,9 +598,9 @@ export function EventsPage() {
           Camera{" "}
           <select value={cameraFilter} onChange={(ev) => setCameraFilter(ev.target.value)}>
             <option value="">All cameras</option>
-            {(cameras ?? []).map((cam) => (
-              <option key={cam.id} value={cam.id}>
-                {cam.name}
+            {cameras.map((cam) => (
+              <option key={cam} value={cam}>
+                {cam}
               </option>
             ))}
           </select>
@@ -498,8 +633,8 @@ export function EventsPage() {
             <>
               <p>Quiet. That&rsquo;s the product working.</p>
               <p>
-                Events appear once detection is on — enable <code>detect.enabled</code> and draw
-                zones for your cameras
+                Events appear when Frigate reports review items. Check the <code>frigate:</code>
+                section of your config and the System page
                 {cameraFilter ? ", or clear the camera filter above" : ""}.
               </p>
             </>
@@ -515,7 +650,8 @@ export function EventsPage() {
               <EventCard
                 key={event.id}
                 event={event}
-                cameraName={cameraNames.get(event.camera) ?? event.camera}
+                enrolled={enrolled}
+                onPeopleChanged={(people) => setEventPeople(event.id, people)}
                 expanded={expandedId === event.id}
                 onToggle={() =>
                   setExpandedId((current) => (current === event.id ? null : event.id))

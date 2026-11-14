@@ -1,0 +1,12 @@
+# gitleaks (https://github.com/gitleaks/gitleaks), run in CI and by the pre-commit hook.
+# The default rules plus the few fake secrets that tests use on purpose.
+title = "vidette"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "fake credentials used by the test suite"
+regexes = [
+  '''sk-test-0123456789abcdef''',
+]

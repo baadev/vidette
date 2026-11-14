@@ -24,6 +24,7 @@ internal/
 config/
 media/
 media-dev/
+.vidette/
 *.db
 *.db-wal
 *.db-shm
@@ -38,3 +39,32 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Private data — never commit. Datasets of real footage, enrolled faces (biometric data),
+# face crops, model weights and camera credentials live outside the repository
+# (docs/collect.md, docs/people.md); .github/scripts/privacy_check.py checks the same in CI.
+/vidette-data/
+datasets/*
+!datasets/README.md
+!datasets/synthetic-sample/
+**/faces/**/*.jpg
+**/faces/**/*.jpeg
+**/faces/**/*.png
+**/faces/**/*.webp
+**/people/**/*.jpg
+**/people/**/*.jpeg
+**/people/**/*.png
+**/people/**/*.webp
+**/people/**/*.heic
+**/clips/*.mp4
+**/clips/*.mkv
+**/clips/*.mov
+**/ring/
+*.onnx
+*.onnx.part
+*.npy
+*.npz
+rtsp-url*
+*.rtsp
+label-*.yaml
+vidette.yaml

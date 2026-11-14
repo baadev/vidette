@@ -114,12 +114,10 @@ def as_text(call: PublishCall) -> str:
 def mqtt_config(*, enabled: bool = True, discovery: bool = True) -> VidetteConfig:
     return VidetteConfig.model_validate(
         {
-            "cameras": {
-                "front-door": {
-                    "name": "Front door",
-                    "source": {"main": "rtsp://user:pw@203.0.113.10:554/stream1"},
-                },
-                "backyard": {"source": {"main": "rtsp://user:pw@203.0.113.11:554/stream1"}},
+            "frigate": {
+                "url": "http://frigate:5000",
+                "mqtt": {"host": "broker.local"},
+                "cameras": ["front-door", "backyard"],
             },
             "integrations": {
                 "mqtt": {
@@ -190,7 +188,7 @@ async def test_connect_announces_online_and_retained_discovery_configs() -> None
         )
         assert config_call.retain is True
         assert json.loads(as_text(config_call)) == {
-            "name": "Front door person",
+            "name": "front-door person",
             "unique_id": "vidette_front-door_person",
             "state_topic": "vidette/front-door/person",
             "device_class": "occupancy",
@@ -199,16 +197,40 @@ async def test_connect_announces_online_and_retained_discovery_configs() -> None
             "availability_topic": "vidette/status",
             "device": {
                 "identifiers": ["vidette_front-door"],
-                "name": "Front door",
+                "name": "front-door",
                 "manufacturer": "Vidette",
             },
         }
 
-        # A camera without a display name falls back to its id.
         [backyard] = client.topics("homeassistant/binary_sensor/vidette_backyard_person/config")
         decoded = json.loads(as_text(backyard))
         assert decoded["name"] == "backyard person"
         assert decoded["device"]["name"] == "backyard"
+    finally:
+        await publisher.stop()
+
+
+async def test_cameras_all_announces_each_camera_on_its_first_event() -> None:
+    """With frigate.cameras: all there is no list to announce up front; the first event
+    for a camera announces it (once), then the event itself is published."""
+    config = VidetteConfig.model_validate(
+        {
+            "frigate": {"url": "http://frigate:5000", "mqtt": {"host": "broker.local"}},
+            "integrations": {"mqtt": {"enabled": True, "host": "broker.local"}},
+        }
+    )
+    publisher, bus, factory, _emit = await connected_publisher(config)
+    try:
+        client = factory.current
+        discovery_topic = "homeassistant/binary_sensor/vidette_porch_person/config"
+        assert client.topics(discovery_topic) == []
+        porch = {**CONFIRMED, "camera": "porch"}
+        await bus.publish("event.confirmed", porch)
+        await bus.publish("event.confirmed", porch)
+        await wait_for(lambda: len(client.topics("vidette/porch/event")) == 2)
+        assert len(client.topics(discovery_topic)) == 1
+        topics = [call.topic for call in client.publishes]
+        assert topics.index(discovery_topic) < topics.index("vidette/porch/event")
     finally:
         await publisher.stop()
 

@@ -1,5 +1,10 @@
 # Hardware guide
 
+> **Frozen (v0.1 NVR core).** This page describes code that lives at tag `nvr-core`
+> and is not part of the `v0.2` line, where Frigate does this job
+> ([ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md)). It stays as a record, linked from the
+> ADRs and useful as field notes for Frigate users; it is not maintained.
+
 > All numbers are **design targets** until the M2 benchmark harness ships; each tier below
 > then gets published measurements per release. Vidette's compute budget is a feature: the
 > reference platform is a ~$150 mini-PC, not a GPU rack.

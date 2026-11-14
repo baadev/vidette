@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for `vidette collect --continuous` on a Mac (docs/collect.md#continuous-mode):
+  a second camera next to dev.vidette.collect, with its own dataset, URL file and log.
+
+  This example is a camera behind a base station that answers 404 while the camera sleeps
+  (base-station mode). Add `--rotate 90|180|270` for a camera mounted sideways. Fill in the three
+  placeholders, then load it:
+
+    sed -e "s|__VIDETTE__|$HOME/development/vidette/server/.venv/bin/vidette|" \
+        -e "s|__DATASET__|$HOME/vidette-data/camera2|" \
+        -e "s|__HOME__|$HOME|" \
+        deploy/macos/dev.vidette.collect.camera2.plist \
+        > ~/Library/LaunchAgents/dev.vidette.collect.camera2.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.vidette.collect.camera2.plist
+
+  Stop:   launchctl bootout gui/$(id -u)/dev.vidette.collect.camera2
+  Logs:   tail -f ~/Library/Logs/vidette-collect-camera2.log
+
+  The camera URL is NOT in this file: it is read from ~/.config/vidette/rtsp-url-camera2
+  (chmod 600). Disk: the ring is capped at 1 GB (about 50 minutes of a 2.6 Mbit/s stream;
+  it also gives way to clips when free space runs short), the clips at 5 GB, and nothing is
+  recorded below 10 GB free. Both collectors share that floor.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.vidette.collect.camera2</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VIDETTE__</string>
+    <string>collect</string>
+    <string>__DATASET__</string>
+    <string>--camera</string>
+    <string>camera2</string>
+    <string>--url-file</string>
+    <string>__HOME__/.config/vidette/rtsp-url-camera2</string>
+    <string>--continuous</string>
+    <string>--base-station</string>
+    <string>--ring-size</string>
+    <string>1GB</string>
+    <string>--max-size</string>
+    <string>5GB</string>
+    <string>--min-free</string>
+    <string>10GB</string>
+    <string>--keep-awake</string>
+  </array>
+
+  <!-- launchd's PATH does not include Homebrew; ffmpeg and ffprobe live there. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart after a crash, not after a clean stop (SIGTERM from bootout exits 0). -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- A clean stop finishes the segment in progress and cuts the clips still waiting. -->
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/vidette-collect-camera2.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/vidette-collect-camera2.log</string>
+</dict>
+</plist>

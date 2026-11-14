@@ -1,9 +1,11 @@
 # CLAUDE.md — guide for AI agents working on Vidette
 
-Vidette is a self-hosted video security platform: universal NVR core + a cascaded AI pipeline
-that turns camera streams into *understood events* ("someone is trying the door handle"), with
-plain-language alert policies as the north star. Current stage: **M0 design preview** — docs
-and an executable shell; see [ROADMAP.md](ROADMAP.md) for what exists vs. what is designed.
+Vidette is an **intent layer on top of Frigate**: it reads Frigate's review items, judges
+them against alert policies written in plain language (VLM verdicts, week 2 of the v0.2
+plan), and measures how good those judgments are with `vidette eval`. Current stage: the
+`v0.2` development line ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)).
+The v0.1 NVR (recording, live view, detection cascade, ONVIF) is frozen at tag `nvr-core`;
+do not resurrect it on this line. See [ROADMAP.md](ROADMAP.md) for what exists.
 
 ## Prime directives
 
@@ -11,9 +13,10 @@ and an executable shell; see [ROADMAP.md](ROADMAP.md) for what exists vs. what i
    latency impact. If a change regresses a budget, say so explicitly in the PR/summary — do not
    hide it. Budgets per milestone live in [ROADMAP.md](ROADMAP.md);
    philosophy in [docs/project/principles.md](docs/project/principles.md).
-2. **Recording is sacred.** Never introduce a code path where analysis, notifications or UI
-   work can stall or crash the recorder. Load shedding order: Tier 3 → Tier 1–2 → previews →
-   never the recorder.
+2. **Measure before claiming.** No accuracy or false-alarm statement anywhere without a
+   `vidette eval` result on a named dataset, with its size. Workers never crash or stall each
+   other: every failure becomes a rate-limited system event. An incident without a verdict
+   never notifies.
 3. **Honesty is a feature.** This repo uses a status legend (✅ 🚧 📐 🔭 ❌ — defined in
    ROADMAP.md). Never present designed functionality as working: not in docs, not in the UI,
    not in API responses (unimplemented endpoints return `501` with `{"status": "designed",
@@ -32,28 +35,28 @@ and an executable shell; see [ROADMAP.md](ROADMAP.md) for what exists vs. what i
 
 | Path | What lives here |
 |---|---|
-| `server/vidette/core/` | Config schema (pydantic, the executable spec) and event bus/models |
+| `server/vidette/core/` | Config schema (pydantic, the executable spec), event bus, incident model |
+| `server/vidette/frigate/` | Frigate source (MQTT), HTTP client, payload models, `vidette frigate` CLI |
+| `server/vidette/events/` | Event intake (incident → observed event), canonical payload |
+| `server/vidette/verdicts/` | `Judge` interface and model-free baselines (the VLM judge lands here) |
+| `server/vidette/people/` | Known people (ADR-0012): face store, YuNet/SFace engine (opt-in extra), face check, `vidette people` |
+| `server/vidette/eval/` | `vidette eval`: dataset format, metrics, runner, reports |
 | `server/vidette/db/` | SQLite store (WAL, append-only migrations, single-writer discipline) |
 | `server/vidette/auth/` | scrypt hashing, sessions, scoped tokens, FastAPI deps |
-| `server/vidette/streams/` | go2rtc manager: config generation, health, WHEP/snapshot proxy client |
-| `server/vidette/adapters/` | Camera adapter SDK + adapters (rtsp ✅; Eufy has **no** adapter — it rides `rtsp` via NAS (RTSP), see docs/cameras/eufy.md) |
-| `server/vidette/pipeline/` | Cascade tier protocols and (future M2) orchestrator |
-| `server/vidette/recording/` | Recorder (ffmpeg supervision), segments, exporter, janitor, retention planner |
-| `server/vidette/notify/` | Notifier protocol, webhook HMAC signing |
-| `server/vidette/api/` | FastAPI app + routers (auth/cameras/recordings/streams/system); 501 stubs for M2+ |
+| `server/vidette/notify/` | Webhooks (HMAC), Apprise, web push, MQTT + HA discovery, dispatcher |
+| `server/vidette/api/` | FastAPI app + routers (auth/events/metrics/push/system/ws); 501 stubs |
 | `server/vidette/runtime.py` | AppRuntime: boots/stops every subsystem in order (lifespan) |
-| `server/tests/` | Pytest suite — includes the test that keeps `config.example.yaml` valid |
-| `web/` | React + Vite + TS shell (dark theme, status page) |
-| `deploy/` | Dockerfile, compose stack, annotated `config.example.yaml`, go2rtc example |
-| `docs/architecture/` | Overview, AI pipeline, storage, security model, plugins + ADRs |
-| `docs/cameras/` | Per-vendor adapter docs (eufy.md is the flagship) |
-| `docs/project/` | Engineering principles (the public constitution) |
+| `server/tests/` | Pytest suite; `fixtures/frigate/` holds recorded-format Frigate sessions |
+| `datasets/` | Shareable `vidette eval` sets (synthetic only so far) |
+| `web/` | React + Vite + TS: Login, Events, System |
+| `deploy/` | Dockerfile, compose (one service), annotated `config.example.yaml` |
+| `docs/` | Frigate setup, eval, configuration, API, ADRs; NVR-era pages carry a "frozen" banner |
 | `internal/` | Maintainer-local docs — gitignored, never commit or quote in public |
 
 ## Commands
 
 ```bash
-make setup          # uv sync (server) + npm install (web)
+make setup          # uv sync --locked (server) + npm ci (web)
 make test           # pytest
 make lint           # ruff check + mypy strict + web typecheck
 make fmt            # ruff format
@@ -89,14 +92,14 @@ code, a daemon, or > ~5 MB) need an ADR or explicit maintainer sign-off.
 
 ## Golden paths
 
-- **New camera adapter:** implement the protocol in `server/vidette/adapters/base.py`,
-  register the entry point in `server/pyproject.toml`, add `docs/cameras/<vendor>.md` from
-  `docs/cameras/template.md`, add a row to the support matrix, add probe/config tests.
-  Non-Python ecosystems use the sidecar-bridge pattern
-  ([docs/architecture/plugins.md](docs/architecture/plugins.md)).
-- **New pipeline tier/model:** respect the `CascadeBudget`; models must have permissive
-  licenses (Apache-2.0/MIT — **no AGPL model code**, see ADR-0003); update
-  `docs/architecture/ai-pipeline.md` candidates table.
+- **New judge (e.g. the VLM worker):** implement `vidette.verdicts.base.Judge`; never read
+  a dataset's `alert_on` (ground truth); report `vlm_calls` / `images_sent` honestly; run it
+  with `vidette eval` against the baselines before wiring it live.
+- **New Frigate field or message type:** add it to `vidette/frigate/models.py` leniently
+  (optional, defaulted), extend a fixture in `server/tests/fixtures/frigate/`, and say in the
+  fixture README where the payload came from.
+- **New incident source:** produce `vidette.core.incidents.Incident` on `incident.*`; the
+  intake, eval and judges stay unchanged.
 - **New notifier:** prefer an Apprise URL scheme over a custom integration; custom ones
   implement the `Notifier` protocol and must support payload templating and redaction.
 - **New API surface:** design it in `docs/api.md` first; unimplemented routes ship as `501

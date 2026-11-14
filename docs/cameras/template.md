@@ -1,5 +1,10 @@
 # <Vendor> — adapter documentation template
 
+> **Frozen (v0.1 NVR core).** This page describes code that lives at tag `nvr-core`
+> and is not part of the `v0.2` line, where Frigate does this job
+> ([ADR-0009](../architecture/adr/0009-intent-layer-over-frigate.md)). It stays as a record, linked from the
+> ADRs and useful as field notes for Frigate users; it is not maintained.
+
 > Copy this file to `docs/cameras/<vendor>.md`. Keep the section order — users compare
 > vendor pages side by side. Delete instructional comments. State maturity honestly using the
 > repo-wide legend (✅ 🚧 📐 🔭).

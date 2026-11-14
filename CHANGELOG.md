@@ -6,6 +6,122 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
+Development line `v0.2`: Vidette becomes an intent layer on top of Frigate
+([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). Not released; no
+images published from it.
+
+### Added
+- **Known people** ([docs/people.md](docs/people.md),
+  [ADR-0012](docs/architecture/adr/0012-known-people.md)): opt-in local face recognition
+  for enrolled people (`pip install 'vidette[people]'`; YuNet MIT + SFace Apache-2.0 from
+  the OpenCV model zoo, pinned commit, sha256-checked, downloaded only by the CLI). A face
+  check over each clip's frames gives the judge one line of facts (names for a local model
+  only), counts unreadable faces as "no clear face", never as strangers, and is stored with
+  the clip or event. `known_people: quiet` on a policy; `vidette people models | add |
+  list | match | scan | confirm | sheet | remove`; `vidette label draft --people` and
+  contact-sheet replies `5 Sam` / `5.2 stranger`; `vidette eval --people
+  --known-people`; a People page and confirm buttons on event cards. The people folder is
+  refused inside a git work tree and kept 0700/0600.
+- **Repository privacy checks**: `.github/scripts/privacy_check.py` (credentials in camera
+  URLs, private addresses outside documentation ranges, images or video outside the
+  folders allowed to hold them and never under `faces/` or `people/`, personal e-mail
+  addresses) and gitleaks with a pinned, checksum-verified binary, in CI; the same as a
+  local hook (`make hooks` or `.pre-commit-config.yaml`). `.gitignore` covers datasets,
+  face crops, model weights and camera URL files.
+- **Frigate source**: review items, tracked objects and availability over MQTT, parsed
+  leniently into source-agnostic incidents; camera and severity filters; reconnect backoff;
+  malformed payloads counted and reported. Read-only HTTP client for review items,
+  snapshots, recording frames and clips. Built against the payloads documented for Frigate
+  0.18; reviews need 0.14 or newer.
+- **Events from Frigate**: one `observed` event per review item with a cached snapshot, a
+  clip fetched on request, and Frigate's own severity and GenAI summary. `observed` never
+  notifies.
+- **`vidette eval`**: labelled dataset format, judge interface, four model-free baselines,
+  precision and recall with 95 % Wilson intervals, false alarms per day, VLM cost
+  projection, `--scaffold` for folders of exported clips, text and JSON reports. A
+  five-entry synthetic sample in `datasets/`.
+- **`vidette frigate check | tail --record | replay`.**
+- **`vidette collect`** ([docs/collect.md](docs/collect.md)): waits for a battery camera's
+  RTSP stream (Eufy NAS RTSP) and keeps each wake period as a dataset clip with 4 to 8 key
+  frames and a JSON sidecar. TCP port check while the camera sleeps, one client, clean
+  TEARDOWN on every stop, backoff on 404 and silent sessions; hard cap on the folder
+  (default 5 GB) and a free-space floor (default 10 GB); credentials only from the
+  environment or `~/.config/vidette/rtsp-url`, scrubbed from every line it prints;
+  launchd template for macOS.
+- **VLM judge** ([docs/vlm.md](docs/vlm.md)): one OpenAI-compatible client, two
+  backends the user chooses between: `local` (Ollama by default) and `cloud` (presets for
+  OpenAI, Gemini's OpenAI-compatible endpoint, OpenRouter, or any custom URL). Frames
+  spread over the clip and shrunk to 768 px, JSON-schema answers (with fallbacks for
+  servers that lack them), `unsure` as an abstention, a hard daily call budget, a
+  per-minute pace, timeouts, and latency, tokens and cost (from prices you configure, never
+  defaulted) on every verdict.
+- **`vidette eval --judge vlm-local --judge vlm-cloud`** compares judges side by side with
+  a measured cost and latency table and abstentions by reason; VLM judges run only when
+  named. Machine-drafted labels (`status: draft`) are excluded from scores until reviewed
+  (`--include-drafts` scores them, loudly).
+- **`vidette label`** ([docs/label.md](docs/label.md)): `draft` gives every new clip a
+  numbered entry with the model's proposal (scenario from the set's vocabulary,
+  alert/silent under the first policy, one line, confidence) and draws PNG contact sheets
+  (8 to 12 clips, large numbers, four key frames each, pure Python, no imaging library);
+  `apply` takes a reply such as `3 courier, 7 alert, rest ok` (Russian too), refuses
+  anything ambiguous as a whole, and rewrites only the blocks it numbered; hand-written
+  parts of `labels.yaml` stay byte for byte. `observed_hours` follows the collector's
+  watched time.
+- **Verdict worker**: each closed incident on a camera with a policy is judged by the
+  selected VLM backend; an alert verdict (above the policy's sensitivity floor) moves the
+  event to `confirmed` and notifies, a silent one to `dismissed`; abstentions leave it
+  `observed` with the reason. Only incidents that ended in the last 15 minutes are judged,
+  never the same event twice.
+- **System page: Verdicts card** with an Off / Local / Cloud switch (stored in the
+  database, wins over the config), the model, endpoint and where frames go for each, the
+  day's calls against the budget, and a confirmation before switching to Cloud.
+  `GET/PUT /api/v1/settings/vlm`. Clip folders show on the System page.
+- **Clip folders as an incident source** ([ADR-0010](docs/architecture/adr/0010-clip-folders.md),
+  [docs/clip-folders.md](docs/clip-folders.md)): `clip_folders:` turns each new clip in a
+  folder into an incident and an event with a snapshot and in-place clip playback, so the
+  pipeline runs without Frigate.
+- **`vidette collect --continuous`** ([docs/collect.md](docs/collect.md#continuous-mode),
+  [ADR-0011](docs/architecture/adr/0011-continuous-collect.md)): for a camera that streams
+  all the time (or for every wake period of one that does not). One ffmpeg and one RTSP
+  session feed a ring of 60 s stream-copied segments (default 3 GB, 24 h) and a motion
+  gate (4 fps, 256×144 grey frame differences counted in pure Python, VideoToolbox decode
+  on a Mac: about 5 % of a core for 1080p at 15 fps). Each motion event becomes a clip
+  with 3 s of pre-roll and post-roll, cut from the ring by stream copy and finalized like a
+  wake-period clip (MP4, key frames, sidecar with the gate's numbers), so `vidette label`
+  and clip folders read it unchanged. The date/time overlay is masked by default;
+  `--mask` adds regions. Disk priority: free-space floor, then clips, then the ring, which
+  yields first.
+- **`vidette collect --rotate 90|180|270`**: key frames turned upright for a camera on its
+  side, the MP4 tagged with display rotation, pixels untouched.
+- **`vidette collect --base-station`**: behind a base station such as a Eufy HomeBase a 404
+  means the camera is asleep (the base station answers quickly and does not wake the camera), so it
+  is checked every 5 s instead of backing off to 5 minutes. Opt-in; the default is
+  unchanged.
+- **launchd template for a second camera**:
+  [deploy/macos/dev.vidette.collect.camera2.plist](deploy/macos/dev.vidette.collect.camera2.plist).
+- `server/uv.lock`; CI installs from it (`--locked`).
+
+### Changed
+- Examples use documentation address ranges.
+- Config: `understanding.vlm` is now `backend: none | local | cloud` with `local:` and
+  `cloud:` sections (the v0.1 `provider`/`send` keys are rejected with a pointer).
+- Config: new `frigate:` section; `cameras:`, retention, compaction, off-site, detector,
+  tracker, faces and embeddings sections removed (a v0.1 config fails with a pointer to
+  ADR-0009). Home Assistant discovery announces Frigate's cameras.
+- Web app: Events (default) and System pages only; the header fits a phone screen.
+- CI actions moved to node24 releases; the image no longer installs ffmpeg; compose builds
+  from the checkout and drops the go2rtc sidecar.
+- Release workflow: the `latest` image tag moves only to the newest stable tag
+  (`v0.2.0-rc.1` publishes just `0.2.0-rc.1` and a GitHub pre-release; `v0.2.0` moves
+  `latest`; a `v0.1.x` hotfix after it does not take `latest` back). Docker and release
+  actions moved to their node24 majors.
+
+### Removed (frozen at tag `nvr-core`)
+- Recording, retention janitor, export, previews; go2rtc management and keep-warm holders;
+  motion gate, YOLOX detector, IoU tracker and the Tier-2 event engine; RTSP and ONVIF
+  adapters; camera, stream, recording and export API routes; Live, Review, Cameras and
+  Setup pages. Dependencies `numpy` and `onnxruntime`.
+
 ## [0.1.3] — 2026-07-09
 
 Two live-tile fixes chasing the burst-publishing camera from v0.1.2 (its RTSP stream
@@ -21,7 +137,7 @@ appears and disappears with the camera's own recording sessions).
 
 ## [0.1.2] — 2026-07-09
 
-Round two of field fixes from the same Eufy S3 Pro deployment — this time on permanent
+Round two of field fixes for battery cameras, this time on permanent
 power. Root cause of "camera doesn't load at all": Eufy serves exactly **one RTSP client**
 at a time and holds dead sessions after unclean hangups, so every gateway connection churn
 risked a minutes-long `404 Stream Not Found` lockout; meanwhile the recorder died on
@@ -54,7 +170,7 @@ startup probing and the v0.1.1 sleep backoff (then unconditional) kept it down f
 
 ## [0.1.1] — 2026-07-09
 
-Field fixes from the first real battery-camera deployment (Eufy S3 Pro over NAS-RTSP).
+Field fixes for battery cameras served over NAS-RTSP.
 
 ### Fixed
 - **Data loss on hard VM kill:** SQLite now runs `synchronous=FULL` in WAL mode (every

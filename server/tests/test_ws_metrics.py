@@ -1,4 +1,4 @@
-"""Live WebSocket stream (`/api/v1/ws`) + Prometheus `/metrics` tests (M2).
+"""Live WebSocket stream (`/api/v1/ws`) + Prometheus `/metrics` tests.
 
 Harness notes (same family as tests/test_events_api.py):
 - A bare FastAPI() with only the ws + metrics routers; `app.state.runtime` is a
@@ -28,10 +28,8 @@ from vidette.api.routers.ws import router as ws_router
 from vidette.core.config import VidetteConfig
 from vidette.core.events import InProcessEventBus
 from vidette.db import Database
+from vidette.frigate.source import FrigateSourceStatus
 from vidette.notify.dispatcher import DispatcherStatus
-from vidette.pipeline.runner import PipelineStatus
-from vidette.recording.janitor import JanitorStatus
-from vidette.recording.recorder import CameraRecorderStatus
 
 T0 = 1_751_900_000.0
 
@@ -71,66 +69,16 @@ def make_runtime(
     *,
     db: Database | None = None,
     auth: FakeAuth | None = None,
-    janitor_status: JanitorStatus | None = None,
+    frigate: FrigateSourceStatus | None = None,
 ) -> SimpleNamespace:
-    pipelines = {
-        "front-door": PipelineStatus(
-            camera="front-door",
-            state="running",
-            frames_total=1234,
-            motion_frames=56,
-            detect_calls=7,
-            last_frame_at=T0,
-            last_error=None,
-            restarts=0,
-        ),
-        "yard": PipelineStatus(
-            camera="yard",
-            state="backoff",
-            frames_total=10,
-            motion_frames=2,
-            detect_calls=0,
-            last_frame_at=None,
-            last_error="decode failed",
-            restarts=3,
-        ),
-    }
-    recorders = {
-        "front-door": CameraRecorderStatus(
-            camera="front-door",
-            state="recording",
-            last_segment_at=T0,
-            last_error=None,
-            restarts=1,
-        ),
-        "yard": CameraRecorderStatus(
-            camera="yard",
-            state="backoff",
-            last_segment_at=None,
-            last_error="ffmpeg exited",
-            restarts=9,
-        ),
-    }
-    janitor = janitor_status or JanitorStatus(
-        last_run_at=T0,
-        disk_total_bytes=500_000_000_000,
-        disk_free_bytes=123_456_789,
-        media_bytes=42_000_000,
-        last_probe_ok=True,
-        expired_deleted_total=3,
-        pressure_deleted_total=1,
-    )
     notifier = DispatcherStatus(delivered_total=11, failed_total=2, per_channel={})
     return SimpleNamespace(
         config=config,
         db=db,
         auth=auth,
         bus=InProcessEventBus(),
-        detector_state="ready",
-        pipeline=SimpleNamespace(status=lambda: pipelines),
-        recorder=SimpleNamespace(status=lambda: recorders),
-        janitor=SimpleNamespace(status=lambda: janitor),
         notifier=SimpleNamespace(status=lambda: notifier),
+        frigate_source=None if frigate is None else SimpleNamespace(status=lambda: frigate),
     )
 
 
@@ -287,23 +235,9 @@ def test_metrics_exposition(tmp_path: Path) -> None:
     lines = body.splitlines()
 
     assert f'vidette_info{{version="{__version__}"}} 1' in lines
-    assert "vidette_detector_ready 1" in lines
-
-    assert 'vidette_pipeline_up{camera="front-door"} 1' in lines
-    assert 'vidette_pipeline_up{camera="yard"} 0' in lines
-    assert 'vidette_pipeline_frames_total{camera="front-door"} 1234' in lines
-    assert 'vidette_pipeline_motion_frames_total{camera="front-door"} 56' in lines
-    assert 'vidette_pipeline_detect_calls_total{camera="front-door"} 7' in lines
-    assert 'vidette_recorder_up{camera="front-door"} 1' in lines
-    assert 'vidette_recorder_up{camera="yard"} 0' in lines
-    assert 'vidette_recorder_restarts_total{camera="yard"} 9' in lines
-
-    assert "vidette_disk_total_bytes 500000000000" in lines
-    assert "vidette_disk_free_bytes 123456789" in lines
-    assert "vidette_media_bytes 42000000" in lines
-    assert "vidette_janitor_expired_deleted_total 3" in lines
-    assert "vidette_janitor_pressure_deleted_total 1" in lines
-    assert "vidette_storage_probe_ok 1" in lines
+    # No frigate: section → headers only, no invented zeros.
+    assert "# TYPE vidette_frigate_connected gauge" in lines
+    assert not any(line.startswith("vidette_frigate_") for line in lines)
 
     assert "vidette_notifications_delivered_total 11" in lines
     assert "vidette_notifications_failed_total 2" in lines
@@ -316,44 +250,12 @@ def test_metrics_exposition(tmp_path: Path) -> None:
     assert 'vidette_events_total{state="analyzing"} 0' in lines
 
     # Exposition hygiene: HELP/TYPE headers present for key families.
-    assert "# TYPE vidette_pipeline_up gauge" in lines
-    assert "# TYPE vidette_pipeline_frames_total counter" in lines
+    assert "# TYPE vidette_events_total gauge" in lines
+    assert "# TYPE vidette_notifications_delivered_total counter" in lines
     assert "# HELP vidette_bus_dropped_total " in body
-
-
-def test_metrics_unknown_janitor_values_emit_no_samples(tmp_path: Path) -> None:
-    before_first_run = JanitorStatus(
-        last_run_at=None,
-        disk_total_bytes=None,
-        disk_free_bytes=None,
-        media_bytes=None,
-        last_probe_ok=None,
-        expired_deleted_total=0,
-        pressure_deleted_total=0,
-    )
-    db = Database(tmp_path / "vidette.db")
-    runtime = make_runtime(make_config(tmp_path), db=db, janitor_status=before_first_run)
-    app = make_app(runtime)
-    with TestClient(app) as client:
-        run_on_app_loop(client, db.connect)
-        try:
-            response = client.get("/metrics")
-        finally:
-            run_on_app_loop(client, db.close)
-
-    body = response.text
-    assert response.status_code == 200
-    assert "NaN" not in body
-    unknown = (
-        "vidette_disk_total_bytes",
-        "vidette_disk_free_bytes",
-        "vidette_media_bytes",
-        "vidette_storage_probe_ok",
-    )
-    for name in unknown:
-        samples = [line for line in body.splitlines() if line.startswith(f"{name} ")]
-        assert samples == []  # headers only — no sample line for an unknown value
-        assert f"# TYPE {name} gauge" in body
+    # The v0.1 NVR families left with the NVR core (ADR-0009).
+    for gone in ("vidette_pipeline_", "vidette_recorder_", "vidette_janitor_", "vidette_disk_"):
+        assert gone not in body
 
 
 def test_metrics_requires_auth_under_builtin(tmp_path: Path) -> None:
@@ -361,3 +263,26 @@ def test_metrics_requires_auth_under_builtin(tmp_path: Path) -> None:
     app = make_app(runtime)
     with TestClient(app) as client:
         assert client.get("/metrics").status_code == 401
+
+
+def test_metrics_frigate_source_samples(tmp_path: Path) -> None:
+    db = Database(tmp_path / "vidette.db")
+    status = FrigateSourceStatus(
+        connected=True,
+        frigate_available=True,
+        messages_total=120,
+        invalid_total=1,
+        incidents_total=7,
+        last_message_at=T0,
+    )
+    runtime = make_runtime(make_config(tmp_path), db=db, frigate=status)
+    with TestClient(make_app(runtime)) as client:
+        run_on_app_loop(client, db.connect)
+        try:
+            lines = client.get("/metrics").text.splitlines()
+        finally:
+            run_on_app_loop(client, db.close)
+    assert "vidette_frigate_connected 1" in lines
+    assert "vidette_frigate_messages_total 120" in lines
+    assert "vidette_frigate_invalid_total 1" in lines
+    assert "vidette_frigate_incidents_total 7" in lines

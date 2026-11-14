@@ -1355,3 +1355,235 @@ kbd {
     flex: 1;
   }
 }
+
+/* --- known people (docs/people.md) ----------------------------------------------------- */
+
+.event-faces {
+  list-style: none;
+  margin: 0;
+  padding: 0 0.75rem 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.face-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.face-crop {
+  flex: none;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #000;
+}
+
+.face-crop-empty {
+  display: block;
+  border: 1px dashed var(--line);
+}
+
+.face-info {
+  min-width: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.face-label {
+  font-weight: 600;
+}
+
+.face-known {
+  color: var(--accent);
+}
+
+.face-meta {
+  font-size: 0.8rem;
+}
+
+.face-confirmed {
+  font-size: 0.85rem;
+  color: var(--ok);
+}
+
+.face-answers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.face-answers button.ghost {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.face-answers button.face-suggested {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.people-page .person-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.person-card {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.person-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+}
+
+.person-head .person-name {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.person-stats {
+  font-size: 0.85rem;
+}
+
+.person-empty,
+.person-note {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.face-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(3.5rem, 1fr));
+  gap: 0.4rem;
+}
+
+.face-tile {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--line);
+}
+
+.face-tile.face-kind-confirmed {
+  border-color: var(--ok);
+}
+
+.face-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.face-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1;
+  opacity: 0;
+}
+
+.face-tile:hover .face-remove,
+.face-remove:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .face-remove {
+    opacity: 0.85;
+  }
+}
+
+.person-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ghost-label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ghost-label:hover {
+  border-color: var(--muted);
+}
+
+.ghost-label.disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ghost-label input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+button.ghost.danger {
+  color: var(--danger);
+}
+
+.person-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.person-add-label {
+  width: 100%;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.person-add input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  padding: 0.5rem 0.7rem;
+}
+
+.people-footnote {
+  margin: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}

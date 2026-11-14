@@ -9,37 +9,6 @@
 //   on `window`, so the app shell can fall back to the login screen when a session
 //   expires mid-use. `me()` maps 401 to `null` and never throws for it.
 
-export type Camera = {
-  id: string;
-  name: string;
-  adapter: string;
-  record_mode: string;
-  state: string;
-  last_segment_at: number | null;
-  /** Recorder diagnosis (verbatim from the server) — why capture is degraded, if it is. */
-  last_error: string | null;
-  stream_ready: boolean;
-};
-
-export type SegmentInfo = {
-  id: number;
-  start_ts: number;
-  end_ts: number;
-  size_bytes: number;
-};
-
-export type HourBucket = {
-  hour_start_ts: number;
-  recorded_seconds: number;
-  bytes: number;
-};
-
-export type ExportJob = {
-  id: string;
-  state: "queued" | "running" | "done" | "error";
-  error: string | null;
-};
-
 /** Tier-2 trajectory geometry attached to an event (pure math, no model opinions). */
 export type EventGeometry = {
   approach: number | null;
@@ -50,8 +19,8 @@ export type EventGeometry = {
 };
 
 /**
- * One understood event from the cascade (M2+). `snapshot` and `clip` are direct
- * media URL paths — they can 404 until the underlying footage lands on disk.
+ * One event (since v0.2: an incident from Frigate). `snapshot` and `clip` are
+ * direct media URL paths, or null when there is none.
  */
 export type EventInfo = {
   id: string;
@@ -69,7 +38,88 @@ export type EventInfo = {
   /** Starred by the user (see `api.setEventFavorite`). */
   favorite: boolean;
   snapshot: string | null;
-  clip: string;
+  clip: string | null;
+  /** Where the event came from: "frigate" since v0.2; null for v0.1 rows. */
+  source?: string | null;
+  /** What the upstream NVR said: its triage and, with Frigate 0.17+, its own summary. */
+  upstream?: UpstreamFacts | null;
+  /** The local face check (known people), when it is on; null when not checked. */
+  people?: EventPeople | null;
+};
+
+/** One person seen in an event: faces grouped across frames. */
+export type SeenPerson = {
+  n: number;
+  status: "known" | "unknown";
+  person: string | null;
+  name: string | null;
+  score: number;
+  faces: number;
+  face_px: number;
+  /** URL of the best face crop, or null. */
+  crop: string | null;
+  /** A person id, "stranger" or "unsure" once someone answered. */
+  confirmed: string | null;
+};
+
+export type EventPeople = {
+  summary: string;
+  frames_checked: number;
+  unclear_frames: number;
+  seen: SeenPerson[];
+  error: string | null;
+};
+
+export type PersonFace = { id: string; kind: "enrolled" | "confirmed"; url: string };
+
+export type Person = {
+  id: string;
+  name: string;
+  created_at: string;
+  enrolled: number;
+  confirmed: number;
+  photos: number;
+  threshold: number;
+  rejected: number;
+  faces: PersonFace[];
+};
+
+export type PeopleState = {
+  enabled: boolean;
+  /** Faces can be found here: OpenCV and the models are loaded. */
+  available: boolean;
+  /** Why not, and what to do. */
+  reason: string | null;
+  dir: string | null;
+  threshold: number;
+  people: Person[];
+  not_enrolled: string[];
+  warnings: string[];
+};
+
+export type UploadResult = {
+  faces_found: number;
+  readable: number;
+  added: number;
+  duplicates: number;
+  unclear: number;
+  skipped: string[];
+  person: Person;
+};
+
+export type ConfirmResult = { message: string; people: EventPeople };
+
+export type UpstreamFacts = {
+  severity: string | null;
+  detections: string[];
+  sub_labels: string[];
+  summary: {
+    title: string | null;
+    text: string | null;
+    threat_level: number | null;
+    confidence: number | null;
+    concerns: string[];
+  } | null;
 };
 
 export type AuthStatus = {
@@ -82,45 +132,40 @@ export type Me = {
   role: string;
 };
 
-/** One polygon zone; points are normalized [x, y] pairs in 0–1 image coordinates. */
-export type CameraZone = {
-  kind: "entry" | "object" | "private" | "public";
-  points: [number, number][];
+/** Which VLM judges incidents (docs/vlm.md). */
+export type VlmBackend = "none" | "local" | "cloud";
+
+export type VlmOption = {
+  id: VlmBackend;
+  label: string;
+  available: boolean;
+  /** Why it cannot be chosen (e.g. no cloud section in the config). */
+  reason: string | null;
+  model: string | null;
+  endpoint: string | null;
+  /** One honest line: where the frames go. */
+  privacy: string;
+  cloud: boolean;
+  usage_today: { calls: number; limit: number; usd: number } | null;
 };
 
-/** Camera config as accepted and returned by the `/config/cameras` endpoints. */
-export type CameraConfigPayload = {
-  adapter: string;
-  name?: string | null;
-  source?: { main: string; sub?: string | null } | null;
-  options?: Record<string, unknown>;
-  /**
-   * `mains` (default): the server keeps the stream permanently open (instant live view)
-   * and retries failures fast. `battery`: opt-in for cameras that sleep between events —
-   * no keep-warm connection, long backoff so the camera is not reconnect-hammered awake.
-   */
-  power_profile?: "mains" | "battery";
-  record?: { mode: "continuous" | "motion" | "events" | "off" };
-  detect?: { enabled: boolean; fps?: number; resolution?: number };
-  understand?: boolean;
-  zones?: Record<string, CameraZone>;
+export type VlmSettings = {
+  backend: VlmBackend;
+  /** "ui": chosen on this page and stored; "config": understanding.vlm.backend. */
+  source: "ui" | "config";
+  config_backend: VlmBackend;
+  frames_per_call: number;
+  options: VlmOption[];
+  worker: {
+    running: boolean;
+    policies: number;
+    judged: number;
+    confirmed: number;
+    dismissed: number;
+    undecided: number;
+    note: string;
+  };
 };
-
-/**
- * A configured camera. `source` says where it is defined: `file` entries come
- * from `/config/vidette.yaml` and are read-only via the API; `managed` entries
- * were created through the API and can be edited/deleted here.
- */
-export type CameraEntry = {
-  id: string;
-  source: "file" | "managed";
-  editable: boolean;
-  config: CameraConfigPayload;
-  warnings?: string[];
-};
-
-/** One device found by ONVIF discovery. */
-export type DiscoveredDevice = { address: string; xaddr: string; scopes: string[] };
 
 export class ApiError extends Error {
   status: number;
@@ -198,16 +243,12 @@ async function postJson<T>(path: string, body: unknown, on401: On401 = "signal")
   return (await response.json()) as T;
 }
 
-async function putJson<T>(path: string, body: unknown, on401: On401 = "signal"): Promise<T> {
-  const response = await send(
-    path,
-    {
-      method: "PUT",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify(body),
-    },
-    on401,
-  );
+async function putJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await send(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
   return (await response.json()) as T;
 }
 
@@ -240,32 +281,6 @@ export const api = {
     return (await response.json()) as Me;
   },
 
-  cameras(): Promise<Camera[]> {
-    return getJson<Camera[]>(`${BASE}/cameras`);
-  },
-
-  recordings(camera: string, fromTs: number, toTs: number): Promise<SegmentInfo[]> {
-    const query = new URLSearchParams({
-      camera,
-      from: String(fromTs),
-      to: String(toTs),
-    });
-    return getJson<SegmentInfo[]>(`${BASE}/recordings?${query}`);
-  },
-
-  summary(camera: string, day: string): Promise<HourBucket[]> {
-    const query = new URLSearchParams({ camera, day });
-    return getJson<HourBucket[]>(`${BASE}/recordings/summary?${query}`);
-  },
-
-  createExport(camera: string, fromTs: number, toTs: number): Promise<ExportJob> {
-    return postJson<ExportJob>(`${BASE}/export`, { camera, from: fromTs, to: toTs });
-  },
-
-  exportStatus(id: string): Promise<ExportJob> {
-    return getJson<ExportJob>(`${BASE}/export/${encodeURIComponent(id)}`);
-  },
-
   events(opts?: {
     camera?: string;
     sinceTs?: number;
@@ -288,48 +303,6 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ verdict }),
     });
-  },
-
-  async whep(camera: string, offerSdp: string): Promise<string> {
-    const response = await send(`${BASE}/streams/${encodeURIComponent(camera)}/whep`, {
-      method: "POST",
-      headers: { "content-type": "application/sdp" },
-      body: offerSdp,
-    });
-    return await response.text();
-  },
-
-  /** All configured cameras (file-defined and API-managed), with their configs. */
-  configCameras(): Promise<CameraEntry[]> {
-    return getJson<CameraEntry[]>(`${BASE}/config/cameras`);
-  },
-
-  /** Create a managed camera. 409 if the id exists; 422 with a problem detail on bad config. */
-  createCamera(id: string, config: CameraConfigPayload): Promise<CameraEntry> {
-    return postJson<CameraEntry>(`${BASE}/config/cameras`, { id, config });
-  },
-
-  /** Replace a managed camera's config. 409 for file-defined cameras, 404 for unknown ids. */
-  updateCamera(id: string, config: CameraConfigPayload): Promise<CameraEntry> {
-    return putJson<CameraEntry>(`${BASE}/config/cameras/${encodeURIComponent(id)}`, { config });
-  },
-
-  async deleteCamera(id: string): Promise<void> {
-    // 204, no body; 409 for file-defined cameras, 404 for unknown ids.
-    await send(`${BASE}/config/cameras/${encodeURIComponent(id)}`, { method: "DELETE" });
-  },
-
-  /** Scan the local network for ONVIF devices. */
-  discoverCameras(): Promise<{ devices: DiscoveredDevice[] }> {
-    return postJson<{ devices: DiscoveredDevice[] }>(`${BASE}/config/cameras/discover`, {});
-  },
-
-  /** Ask the server to check a configured camera right now. */
-  probeCamera(id: string): Promise<{ status: string; detail: string }> {
-    return postJson<{ status: string; detail: string }>(
-      `${BASE}/config/cameras/${encodeURIComponent(id)}/probe`,
-      {},
-    );
   },
 
   /** Public VAPID key for Web Push subscriptions. */
@@ -355,6 +328,53 @@ export const api = {
     });
   },
 
+  vlmSettings(): Promise<VlmSettings> {
+    return getJson<VlmSettings>(`${BASE}/settings/vlm`);
+  },
+
+  /** Store the choice server-side; it wins over the config until changed again. */
+  setVlmBackend(backend: VlmBackend): Promise<VlmSettings> {
+    return putJson<VlmSettings>(`${BASE}/settings/vlm`, { backend });
+  },
+
+  /** Known people (docs/people.md): read:config to look, write:config to change. */
+  people(): Promise<PeopleState> {
+    return getJson<PeopleState>(`${BASE}/people`);
+  },
+
+  createPerson(name: string): Promise<Person> {
+    return postJson<Person>(`${BASE}/people`, { name });
+  },
+
+  async deletePerson(id: string): Promise<void> {
+    await send(`${BASE}/people/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
+  /** One photo as the raw request body; every readable face in it is enrolled. */
+  async uploadPhoto(id: string, file: File): Promise<UploadResult> {
+    const response = await send(`${BASE}/people/${encodeURIComponent(id)}/photos`, {
+      method: "POST",
+      headers: { "content-type": file.type || "image/jpeg", accept: "application/json" },
+      body: file,
+    });
+    return (await response.json()) as UploadResult;
+  },
+
+  async deleteFace(personId: string, faceId: string): Promise<void> {
+    await send(
+      `${BASE}/people/${encodeURIComponent(personId)}/faces/${encodeURIComponent(faceId)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  /** "This is Sam" / "a stranger" / "not sure" for face `n` of an event. */
+  confirmEventFace(eventId: string, n: number, answer: string): Promise<ConfirmResult> {
+    return postJson<ConfirmResult>(
+      `${BASE}/events/${encodeURIComponent(eventId)}/people/${n}`,
+      { answer },
+    );
+  },
+
   async setEventFavorite(id: string, favorite: boolean): Promise<void> {
     // 204, no body.
     await send(`${BASE}/events/${encodeURIComponent(id)}/favorite`, {
@@ -364,18 +384,6 @@ export const api = {
     });
   },
 };
-
-export const segmentFileUrl = (id: number): string => `${BASE}/recordings/segments/${id}/file`;
-
-export const snapshotUrl = (camera: string): string =>
-  `${BASE}/streams/${encodeURIComponent(camera)}/snapshot.jpeg`;
-
-export const exportDownloadUrl = (id: string): string =>
-  `${BASE}/export/${encodeURIComponent(id)}/download`;
-
-/** Direct media URL of an hour's preview MP4 — 404 until it has been generated. */
-export const previewUrl = (camera: string, hourStartTs: number): string =>
-  `${BASE}/recordings/preview?camera=${encodeURIComponent(camera)}&hour_start_ts=${hourStartTs}`;
 
 /** WebSocket endpoint for live server events (same-origin, ws/wss follows the page). */
 export const wsUrl = (): string =>

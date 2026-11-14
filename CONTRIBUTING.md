@@ -1,19 +1,20 @@
 # Contributing to Vidette
 
-Thank you for considering it. At the M0 stage, **design review is the most valuable
-contribution**: read [docs/architecture](docs/architecture/overview.md) and tell us where the
-design is wrong — in an issue, an ADR comment, or by email (alex@baadev.com).
+Thank you for considering it. On the v0.2 line (an intent layer over Frigate,
+[ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)) the most valuable
+contributions are evidence: labelled clips and Frigate recordings. Design critique is
+welcome too, in an issue, an ADR comment, or by email (alex@baadev.com).
 
 ## Ways to contribute (ordered by current impact)
 
-1. **Critique the architecture.** Especially the [AI pipeline](docs/architecture/ai-pipeline.md),
-   [storage](docs/architecture/storage.md) and [plugin](docs/architecture/plugins.md) designs.
-2. **Map camera demand.** File a
-   [camera support request](https://github.com/baadev/vidette/issues/new?template=camera_support.yml) —
-   these order the adapter backlog. If you can capture RTSP URLs, ONVIF traces or vendor API
-   notes for your camera, that's gold.
-3. **Docs fixes.** Unclear sentence = bug. PRs welcome without prior discussion.
-4. **Code.** Check issues labeled `good first issue` / `help wanted`. For anything larger than
+1. **A labelled clip set you may share** (synthetic, staged or public domain; never footage
+   of people who did not agree), in the [`vidette eval` format](docs/eval.md).
+2. **A Frigate session Vidette misreads**: `vidette frigate tail --record session.jsonl`
+   and an issue with the file ([frigate.md](docs/frigate.md)).
+3. **Critique the architecture**: [overview](docs/architecture/overview.md) and the
+   [ADRs](docs/architecture/adr/).
+4. **Docs fixes.** Unclear sentence = bug. PRs welcome without prior discussion.
+5. **Code.** Check issues labeled `good first issue` / `help wanted`. For anything larger than
    a small fix, open an issue first so nobody wastes an evening.
 
 ## Development setup
@@ -23,9 +24,10 @@ Prerequisites: Python ≥ 3.12 with [uv](https://docs.astral.sh/uv/), Node ≥ 2
 
 ```bash
 git clone https://github.com/baadev/vidette.git && cd vidette
-make setup     # server deps (uv) + web deps (npm)
+make setup     # server deps from uv.lock + web deps from package-lock.json
 make test      # pytest
 make lint      # ruff + mypy strict + web typecheck
+make hooks     # once: a pre-commit hook with the privacy check and gitleaks (or `pre-commit install`)
 make dev       # API on http://localhost:8642
 make web       # web shell on http://localhost:5173 (proxies /api)
 ```
@@ -54,6 +56,9 @@ follow — humans follow the same ones.
 
 ## Non-negotiables (will not be merged)
 
+- Real footage, faces, camera credentials or LAN addresses of a real home. CI's privacy job
+  (`.github/scripts/privacy_check.py` + gitleaks) refuses them; examples use 192.0.2.x or
+  10.0.20.x and `${VAR}` passwords.
 - Telemetry, phone-home, or cloud calls outside explicitly configured destinations.
 - Weakened security defaults (default creds, unauthenticated surfaces, unsigned webhooks).
 - Stranger identification, third-party identity databases, or cloud biometrics — identity is

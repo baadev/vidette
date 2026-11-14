@@ -1,0 +1,80 @@
+# A tiny synthetic dataset that shows the labels.yaml format and lets `vidette eval` run
+# out of the box. Format reference: docs/eval.md.
+#
+# Everything here is made up: the frames are flat boxes drawn with ffmpeg, and the
+# `upstream` fields were typed in by hand to exercise every code path. Numbers computed
+# on this set say nothing about Frigate, Vidette or any real camera.
+
+version: 1
+name: synthetic-sample
+description: Five synthetic entries (one per scenario type); a format demo, not a benchmark.
+license: Apache-2.0 (synthetic frames generated with ffmpeg, no real footage)
+observed_hours: 24   # pretend these five incidents are everything one camera saw in a day
+
+scenarios:
+  passer_by: someone walks past on the street or sidewalk and never approaches
+  courier_at_door: a delivery; walks up, leaves a parcel, leaves
+  door_handle_attempt: someone tries the door handle, a door or a window
+  lingering_at_door: someone stays at the door or a window with no visible errand, peers in
+  cat: a cat or another small animal
+  car_lights: headlights sweep the scene; no person
+
+policies:
+  entry-interest:
+    description: >
+      Alert me when someone shows interest in getting in: tries the door handle, lingers
+      at the door or windows, peers inside. Ignore people passing by on the street,
+      couriers dropping off a parcel, cats and car headlights.
+    alert_on: [door_handle_attempt, lingering_at_door]
+
+entries:
+  - id: passerby-day
+    scenario: passer_by
+    camera: front_door
+    at: 2026-11-14T10:12:00+02:00
+    duration_s: 8
+    media: [frames/passerby-day/1.jpg, frames/passerby-day/2.jpg, frames/passerby-day/3.jpg]
+    upstream: {severity: detection, objects: [person], zones: [sidewalk]}
+
+  - id: courier-day
+    scenario: courier_at_door
+    camera: front_door
+    at: 2026-11-14T13:40:00+02:00
+    duration_s: 41
+    media: [frames/courier-day/1.jpg, frames/courier-day/2.jpg, frames/courier-day/3.jpg]
+    upstream:
+      severity: alert
+      objects: [person, package]
+      zones: [path, porch]
+      threat_level: 0
+      summary: A courier walks up to the porch, leaves a parcel by the door and walks away.
+
+  - id: door-handle-night
+    scenario: door_handle_attempt
+    camera: front_door
+    at: 2026-11-14T02:17:00+02:00
+    duration_s: 33
+    media: [frames/door-handle-night/1.jpg, frames/door-handle-night/2.jpg, frames/door-handle-night/3.jpg]
+    upstream:
+      severity: alert
+      objects: [person]
+      zones: [path, porch]
+      threat_level: 1
+      summary: A person walks up to the front door at night and pulls the handle twice.
+
+  - id: cat-night
+    scenario: cat
+    camera: front_door
+    at: 2026-11-14T03:05:00+02:00
+    duration_s: 12
+    media: [frames/cat-night/1.jpg, frames/cat-night/2.jpg, frames/cat-night/3.jpg]
+    upstream: {severity: detection, objects: [cat], zones: [porch]}
+
+  - id: car-lights-night
+    scenario: car_lights
+    camera: front_door
+    at: 2026-11-14T23:48:00+02:00
+    duration_s: 4
+    media: [frames/car-lights-night/1.jpg, frames/car-lights-night/2.jpg, frames/car-lights-night/3.jpg]
+    upstream: {severity: detection, objects: [car], zones: [street]}
+    notes: no car is visible in frame; the detector labelled the light itself

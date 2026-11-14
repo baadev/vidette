@@ -1,35 +1,56 @@
 import { useEffect, useState } from "react";
 import { UNAUTHORIZED_EVENT } from "../api";
 import { getPushState, subscribePush, unsubscribePush, type PushState } from "../push";
+import { VerdictsCard } from "./VerdictsCard";
 
 type Health = { status: string; version: string };
 
-type GatewayInfo = {
-  reachable: boolean;
-  version: string | null;
-  streams: string[];
-  detail: string;
+type FrigateInfo = {
+  url: string;
+  broker: string;
+  connected: boolean;
+  available: boolean | null;
+  messages_total: number;
+  invalid_total: number;
+  incidents_total: number;
+  last_message_at: number | null;
+};
+
+type ClipFolderInfo = {
+  path: string;
+  camera: string;
+  exists: boolean;
+  clips_total: number;
+  errors_total: number;
+  last_clip_at: number | null;
 };
 
 type SystemInfo = {
   milestone: string;
   config_warnings: string[];
   auth_mode: string;
-  gateway: GatewayInfo;
+  frigate: FrigateInfo | null;
+  clip_folders: ClipFolderInfo[];
   designed_routes: { path: string; milestone: string }[];
 };
 
+// Since v0.2 (ADR-0009) the cheap tiers run in Frigate (or in the camera itself, for a
+// clip folder, ADR-0010); Vidette owns the last two.
 const TIERS = [
-  { name: "T0 · Motion gate", detail: "~free, always on", milestone: "M2" },
-  { name: "T1 · Detection", detail: "tiny model, on motion", milestone: "M2" },
-  {
-    name: "T2 · Trajectory geometry",
-    detail: "pure math: approach · dwell · touch",
-    milestone: "M2",
-  },
-  { name: "T3 · Scene reasoning", detail: "VLM, rare & budgeted", milestone: "M3" },
-  { name: "T4 · Your policy", detail: "plain language, compiled & inspectable", milestone: "M4" },
+  { name: "T0 · Motion", detail: "Frigate, or the camera's own trigger", milestone: "upstream" },
+  { name: "T1 · Detection", detail: "Frigate", milestone: "upstream" },
+  { name: "T2 · Tracking + zones", detail: "Frigate review items", milestone: "upstream" },
+  { name: "T3 · Scene verdict", detail: "VLM, local or cloud, budgeted", milestone: "Vidette" },
+  { name: "T4 · Your policy", detail: "plain language, measured with vidette eval", milestone: "Vidette" },
 ];
+
+function ago(ts: number): string {
+  const minutes = Math.round((Date.now() / 1000 - ts) / 60);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+}
 
 /** Status-line copy per push state; "muted" dots get their color inline. */
 const PUSH_STATUS: Record<PushState, { dot: "ok" | "bad" | "muted"; label: string }> = {
@@ -105,7 +126,6 @@ export function SystemPage() {
     }
   };
 
-  const gateway = system?.gateway;
   const pushStatus = push === null ? null : PUSH_STATUS[push];
 
   return (
@@ -116,25 +136,43 @@ export function SystemPage() {
         {health && (
           <p>
             <span className="dot ok" /> API <strong>{health.status}</strong> · v{health.version} ·
-            milestone <strong>{system?.milestone ?? "M1"}</strong>
+            <strong>{system?.milestone ?? "…"}</strong>
           </p>
         )}
         {!health && !error && <p>Contacting API…</p>}
-        {gateway && (
+        {system && system.frigate === null && system.clip_folders.length === 0 && (
           <p>
-            <span className={gateway.reachable ? "dot ok" : "dot bad"} /> Stream gateway{" "}
-            {gateway.reachable ? (
+            <span className="dot bad" /> <strong>No incident source</strong>: add a{" "}
+            <code>frigate:</code> or <code>clip_folders:</code> section to receive incidents
+          </p>
+        )}
+        {system?.clip_folders.map((folder) => (
+          <p key={folder.path} className="source-line">
+            <span className={folder.exists ? "dot ok" : "dot bad"} /> Clip folder{" "}
+            <code className="path">{folder.path}</code>{" "}
+            {folder.exists ? (
               <>
-                <strong>reachable</strong>
-                {gateway.version ? ` · go2rtc ${gateway.version}` : ""} ·{" "}
-                {gateway.streams.length} stream{gateway.streams.length === 1 ? "" : "s"}
+                · {folder.clips_total} new clip{folder.clips_total === 1 ? "" : "s"} since start
+                {folder.last_clip_at !== null ? `, last ${ago(folder.last_clip_at)}` : ""}
+                {folder.errors_total > 0 ? `, ${folder.errors_total} unreadable` : ""}
               </>
             ) : (
-              <>
-                <strong>unreachable</strong>
-                {gateway.detail ? ` — ${gateway.detail}` : ""}
-              </>
+              <strong>not found</strong>
             )}
+          </p>
+        ))}
+        {system?.frigate && (
+          <p>
+            <span className={system.frigate.connected ? "dot ok" : "dot bad"} /> Frigate broker{" "}
+            <strong>{system.frigate.connected ? "connected" : "not connected"}</strong> (
+            {system.frigate.broker}) · Frigate{" "}
+            {system.frigate.available === null
+              ? "availability unknown"
+              : system.frigate.available
+                ? "online"
+                : "offline"}{" "}
+            · {system.frigate.messages_total} messages, {system.frigate.incidents_total} incidents
+            {system.frigate.invalid_total > 0 ? `, ${system.frigate.invalid_total} unreadable` : ""}
           </p>
         )}
         {system && system.config_warnings.length > 0 && (
@@ -145,23 +183,27 @@ export function SystemPage() {
           </ul>
         )}
         <p className="muted">
-          What works today: recording, live view, review timeline and export. Events and
-          understanding land in M2–M4
+          What works today: incidents from Frigate or a clip folder land in the Events feed;
+          with a VLM selected below, each closed incident is judged against your policies and
+          only an alert verdict notifies. Policies live in the config file
           {system && system.designed_routes.length > 0 && (
             <>
               {" "}
-              — still designed:{" "}
+              (still designed:{" "}
               {system.designed_routes
                 .map((route) => `${route.path} (${route.milestone})`)
                 .join(", ")}
+              )
             </>
           )}
           .
         </p>
       </section>
 
+      <VerdictsCard />
+
       <section className="card">
-        <h2>The cascade</h2>
+        <h2>Who does what</h2>
         <ol className="cascade">
           {TIERS.map((tier) => (
             <li key={tier.name}>
@@ -212,8 +254,8 @@ export function SystemPage() {
         )}
         <p className="muted">
           iOS requires installing Vidette to the Home Screen (Share → Add to Home Screen) before
-          push works. Notifications arrive only for confirmed events, per your notification
-          rules.
+          push works. Notifications arrive only for confirmed events (an alert verdict), per
+          your notification rules.
         </p>
       </section>
 

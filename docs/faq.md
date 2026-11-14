@@ -2,6 +2,15 @@
 
 ## How is this different from Frigate?
 
+**Since v0.2 the answer is: Vidette runs on top of Frigate.** Frigate records, detects and
+groups activity into review items; Vidette reads them, judges them against a policy you
+wrote in plain words (week 2 of the v0.2 plan) and measures how well that works with
+`vidette eval`. Frigate 0.17+ GenAI summaries describe and rate a scene; Vidette decides
+whether it notifies under your rule and scores Frigate's summaries as a baseline. Details:
+[ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md), [frigate.md](frigate.md).
+
+The comparison below is the v0.1 answer, kept for the record.
+
 [Frigate](https://github.com/blakeblackshear/frigate) is an excellent, mature, detection-centric
 NVR — if you want real-time object detection with deep Home Assistant integration today, use
 it, and we mean that.
@@ -41,7 +50,8 @@ clip set so you can see the error rates instead of trusting adjectives
 
 ## What about face recognition?
 
-Vidette ships one identity feature, scoped tightly: **trusted faces** (📐 M4) — opt-in,
+Vidette ships one identity feature, scoped tightly: **trusted faces** (🚧 as
+[known people](people.md), ADR-0012; encryption at rest still 📐) — opt-in,
 local-only matching whose sole job is *suppressing* alerts caused by people you enrolled
 (household members, regular visitors). "The system shouldn't page me about my own family
 taking out the trash" is a legitimate ask that zones and schedules alone can't express.

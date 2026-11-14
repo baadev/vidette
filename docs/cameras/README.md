@@ -1,5 +1,10 @@
 # Camera support
 
+> **Frozen (v0.1 NVR core).** This page describes code that lives at tag `nvr-core`
+> and is not part of the `v0.2` line, where Frigate does this job
+> ([ADR-0009](../architecture/adr/0009-intent-layer-over-frigate.md)). It stays as a record, linked from the
+> ADRs and useful as field notes for Frigate users; it is not maintained.
+
 Vidette's core is vendor-neutral; every ecosystem connects through an
 [adapter](../architecture/plugins.md). This page is the support matrix; each vendor gets its
 own page written to be *the* guide for pairing that hardware with open software — including

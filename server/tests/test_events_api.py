@@ -1,29 +1,25 @@
-"""Events REST surface tests: list/get/feedback/favorites/snapshot + the lazy clip path.
+"""Events REST surface tests: list/get/feedback/favorites/snapshot and Frigate clips.
 
-Same pattern as tests/test_routers_m1.py: a bare FastAPI() with only the events router,
-`app.state.runtime` a SimpleNamespace of fakes conforming to the DB contract, auth
-overridden at the `current_principal` dependency. The lazy-clip round trip uses real
-ffmpeg over two tiny generated segments (skipped when ffmpeg is absent).
+A bare FastAPI() with only the events router, `app.state.runtime` a SimpleNamespace of
+fakes conforming to the DB contract, auth overridden at the `current_principal`
+dependency.
 """
 
 from __future__ import annotations
 
-import subprocess
-from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from conftest import FFMPEG, requires_ffmpeg
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import vidette.auth.deps as auth_deps
 from vidette.auth.service import ANONYMOUS_ADMIN, Principal
 from vidette.core.config import VidetteConfig
-from vidette.db import EventRow, SegmentRow
+from vidette.db import EventRow
 
 T0 = 1_751_900_000.0
 
@@ -64,11 +60,9 @@ def make_event(
 class FakeDb:
     def __init__(self) -> None:
         self.rows: dict[str, EventRow] = {}
-        self.segments: list[SegmentRow] = []
         self.list_calls: list[tuple[str | None, float | None, bool, int]] = []
         self.updates: list[dict[str, Any]] = []
         self.favorite_calls: list[tuple[str, bool]] = []
-        self.upgrade_calls: list[tuple[str, float, float, str, tuple[str, ...]]] = []
 
     async def list_events(
         self,
@@ -107,46 +101,12 @@ class FakeDb:
         self.rows[event_id] = replace(row, favorite=favorite)
         return True
 
-    async def upgrade_segments_class(
-        self,
-        camera: str,
-        start_ts: float,
-        end_ts: float,
-        new_klass: str,
-        *,
-        only_from: Sequence[str] = ("continuous", "motion"),
-    ) -> int:
-        self.upgrade_calls.append((camera, start_ts, end_ts, new_klass, tuple(only_from)))
-        upgraded = 0
-        for index, segment in enumerate(self.segments):
-            if (
-                segment.camera == camera
-                and segment.end_ts > start_ts
-                and segment.start_ts < end_ts
-                and segment.klass in only_from
-            ):
-                self.segments[index] = replace(segment, klass=new_klass)
-                upgraded += 1
-        return upgraded
-
     async def update_event(self, event_id: str, **fields: Any) -> None:
         self.updates.append({"id": event_id, **fields})
         row = self.rows.get(event_id)
         if row is not None:
             changed = {key: value for key, value in fields.items() if value is not None}
             self.rows[event_id] = replace(row, **changed)
-
-    async def segments_between(
-        self, camera: str, start_ts: float, end_ts: float
-    ) -> list[SegmentRow]:
-        return sorted(
-            (
-                row
-                for row in self.segments
-                if row.camera == camera and row.end_ts > start_ts and row.start_ts < end_ts
-            ),
-            key=lambda row: row.start_ts,
-        )
 
 
 @dataclass
@@ -163,7 +123,7 @@ def harness(test_config: VidetteConfig) -> Harness:
     app = FastAPI()
     app.include_router(events.router)
     harness = Harness(client=TestClient(app), app=app)
-    app.state.runtime = SimpleNamespace(config=test_config, db=harness.db)
+    app.state.runtime = SimpleNamespace(config=test_config, db=harness.db, frigate_client=None)
     app.dependency_overrides[auth_deps.current_principal] = lambda: ANONYMOUS_ADMIN
     return harness
 
@@ -208,7 +168,10 @@ def test_list_events_newest_first_full_shape(harness: Harness) -> None:
         "feedback": None,
         "favorite": False,
         "snapshot": None,  # no snapshot on disk → no URL invented
-        "clip": "/api/v1/events/ev-0001/clip.mp4",
+        "clip": None,  # not from Frigate, nothing cached: no clip URL invented
+        "source": None,
+        "upstream": None,
+        "people": None,  # no face check: known people are off
     }
     assert harness.db.list_calls == [(None, None, False, 50)]  # default limit is 50
 
@@ -278,71 +241,23 @@ def test_feedback_unknown_event_404(harness: Harness) -> None:
 # --- favorites ----------------------------------------------------------------------------------
 
 
-def test_favorite_star_pins_footage_to_favorite_class(harness: Harness, media_dir: Path) -> None:
+def test_favorite_star_and_unstar(harness: Harness) -> None:
     harness.db.rows["ev-0001"] = make_event("ev-0001", started_at=T0, ended_at=T0 + 30.0)
-    fake_path = media_dir / "front-door" / "seg.mp4"  # never exists; the fake ignores it
-    harness.db.segments = [
-        seg_row(1, T0 - 20.0, fake_path, seconds=10.0),  # ends before the pre-roll: untouched
-        seg_row(2, T0, fake_path, seconds=10.0),  # continuous → favorite
-        seg_row(3, T0 + 10.0, fake_path, seconds=10.0, klass="motion"),  # motion → favorite
-        seg_row(4, T0 + 20.0, fake_path, seconds=10.0, klass="event"),  # event lifts too
-        seg_row(5, T0 + 40.0, fake_path, seconds=10.0),  # starts after the post-roll: untouched
-    ]
 
     response = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": True})
-
     assert response.status_code == 204
-    assert harness.db.favorite_calls == [("ev-0001", True)]
-    assert harness.db.rows["ev-0001"].favorite is True
-    assert harness.db.upgrade_calls == [
-        ("front-door", T0 - 5.0, T0 + 35.0, "favorite", ("continuous", "motion", "event"))
-    ]
-    assert [segment.klass for segment in harness.db.segments] == [
-        "continuous",
-        "favorite",
-        "favorite",
-        "favorite",
-        "continuous",
-    ]
     assert harness.client.get("/api/v1/events/ev-0001").json()["favorite"] is True
 
-
-def test_unfavorite_returns_footage_to_event_class(harness: Harness, media_dir: Path) -> None:
-    """Unstar drops `favorite` back to `event` — retention resumes the event schedule."""
-    harness.db.rows["ev-0001"] = make_event(
-        "ev-0001", started_at=T0, ended_at=T0 + 30.0, favorite=True
-    )
-    fake_path = media_dir / "front-door" / "seg.mp4"
-    harness.db.segments = [
-        seg_row(1, T0, fake_path, seconds=10.0, klass="favorite"),
-        seg_row(2, T0 + 10.0, fake_path, seconds=10.0),  # never was favorite: untouched
-    ]
-
     response = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": False})
-
     assert response.status_code == 204
-    assert harness.db.favorite_calls == [("ev-0001", False)]
-    assert harness.db.rows["ev-0001"].favorite is False
-    assert harness.db.upgrade_calls == [("front-door", T0 - 5.0, T0 + 35.0, "event", ("favorite",))]
-    assert [segment.klass for segment in harness.db.segments] == ["event", "continuous"]
+    assert harness.db.favorite_calls == [("ev-0001", True), ("ev-0001", False)]
     assert harness.client.get("/api/v1/events/ev-0001").json()["favorite"] is False
-
-
-def test_favorite_open_event_pads_range_to_max_clip_span(harness: Harness) -> None:
-    harness.db.rows["ev-0001"] = make_event("ev-0001", started_at=T0)  # still open
-    response = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": True})
-    assert response.status_code == 204
-    assert harness.db.upgrade_calls == [
-        ("front-door", T0 - 5.0, T0 + 305.0, "favorite", ("continuous", "motion", "event"))
-    ]
 
 
 def test_favorite_unknown_event_404(harness: Harness) -> None:
     response = harness.client.post("/api/v1/events/ghost/favorite", json={"favorite": True})
     assert response.status_code == 404
     assert _problem(response.json())["title"] == "Event not found"
-    assert harness.db.favorite_calls == []
-    assert harness.db.upgrade_calls == []
 
 
 def test_favorite_bad_body_422(harness: Harness) -> None:
@@ -389,113 +304,6 @@ def test_snapshot_outside_media_dir_404(harness: Harness, media_dir: Path, tmp_p
     assert harness.client.get("/api/v1/events/ev-0001/snapshot.jpeg").status_code == 404
 
 
-# --- clip (lazy materialization) ----------------------------------------------------------------
-
-
-def make_segment_clip(path: Path, seconds: float = 2.0) -> None:
-    assert FFMPEG is not None
-    path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            FFMPEG,
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"testsrc2=size=320x240:rate=10:duration={seconds}",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-y",
-            str(path),
-        ],
-        check=True,
-        timeout=60,
-    )
-
-
-def seg_row(
-    row_id: int, start_ts: float, path: Path, seconds: float = 2.0, klass: str = "continuous"
-) -> SegmentRow:
-    return SegmentRow(
-        id=row_id,
-        camera="front-door",
-        start_ts=start_ts,
-        end_ts=start_ts + seconds,
-        path=str(path),
-        size_bytes=path.stat().st_size if path.exists() else 0,
-        klass=klass,
-        codec="h264",
-    )
-
-
-@requires_ffmpeg
-def test_clip_lazy_materialization_roundtrip(harness: Harness, media_dir: Path) -> None:
-    seg_dir = media_dir / "front-door" / "2026" / "07" / "07" / "12"
-    clip_a = seg_dir / f"{int(T0)}.mp4"
-    clip_b = seg_dir / f"{int(T0) + 2}.mp4"
-    make_segment_clip(clip_a)
-    make_segment_clip(clip_b)
-    harness.db.segments = [seg_row(1, T0, clip_a), seg_row(2, T0 + 2.0, clip_b)]
-    harness.db.rows["ev-0001"] = make_event("ev-0001", started_at=T0 + 1.0, ended_at=T0 + 3.0)
-
-    response = harness.client.get("/api/v1/events/ev-0001/clip.mp4")
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "video/mp4"
-    out = media_dir / "front-door" / "events" / "ev-0001" / "clip.mp4"
-    assert out.is_file()
-    assert response.content == out.read_bytes()
-    assert harness.db.updates == [{"id": "ev-0001", "clip_path": str(out)}]
-    assert harness.db.rows["ev-0001"].clip_path == str(out)
-
-    # Second request serves the cached file without another materialization.
-    again = harness.client.get("/api/v1/events/ev-0001/clip.mp4")
-    assert again.status_code == 200
-    assert len(harness.db.updates) == 1
-
-
-def test_clip_cached_path_served_directly(harness: Harness, media_dir: Path) -> None:
-    cached = media_dir / "front-door" / "events" / "ev-0001" / "clip.mp4"
-    cached.parent.mkdir(parents=True)
-    cached.write_bytes(b"cached-mp4")
-    harness.db.rows["ev-0001"] = make_event("ev-0001", clip_path=str(cached))
-    response = harness.client.get("/api/v1/events/ev-0001/clip.mp4")
-    assert response.status_code == 200
-    assert response.content == b"cached-mp4"
-    assert harness.db.updates == []
-
-
-def test_clip_no_footage_404(harness: Harness) -> None:
-    harness.db.rows["ev-0001"] = make_event("ev-0001", ended_at=T0 + 5.0)  # no segments
-    response = harness.client.get("/api/v1/events/ev-0001/clip.mp4")
-    assert response.status_code == 404
-    detail = _problem(response.json())
-    assert detail["title"] == "Clip not available"
-    assert "no recorded footage for this event yet" in detail["detail"]
-
-
-def test_clip_segment_outside_media_dir_404(
-    harness: Harness, media_dir: Path, tmp_path: Path
-) -> None:
-    outside = tmp_path / "outside.mp4"
-    outside.write_bytes(b"not ours")
-    harness.db.segments = [seg_row(1, T0, outside)]
-    harness.db.rows["ev-0001"] = make_event("ev-0001", ended_at=T0 + 2.0)
-    response = harness.client.get("/api/v1/events/ev-0001/clip.mp4")
-    assert response.status_code == 404
-    assert not (media_dir / "front-door" / "events" / "ev-0001" / "clip.mp4").exists()
-
-
-def test_clip_unknown_event_404(harness: Harness) -> None:
-    assert harness.client.get("/api/v1/events/ghost/clip.mp4").status_code == 404
-
-
 # --- auth guard ---------------------------------------------------------------------------------
 
 
@@ -512,3 +320,85 @@ def test_scope_guard_requires_read_events(harness: Harness) -> None:
     assert harness.client.get("/api/v1/events/ev-0001").status_code == 403
     favorite = harness.client.post("/api/v1/events/ev-0001/favorite", json={"favorite": True})
     assert favorite.status_code == 403
+
+
+# --- clips from Frigate -------------------------------------------------------------------------
+
+
+class FakeClipClient:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[tuple[str, float, float, Path]] = []
+
+    async def download_clip(self, camera: str, start: float, end: float, dest: Path) -> Path:
+        self.calls.append((camera, start, end, dest))
+        if self.error is not None:
+            raise self.error
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        return dest
+
+
+def frigate_event(**overrides: Any) -> EventRow:
+    fields: dict[str, Any] = {
+        "state": "observed",
+        "source": "frigate",
+        "source_ref": "1763107200.802000-m2p7xd",
+        "upstream": {"severity": "alert", "summary": None},
+        "ended_at": T0 + 30.0,
+    }
+    fields.update(overrides)
+    return make_event("ev-0009", **fields)
+
+
+def test_frigate_event_advertises_a_clip_and_its_upstream(harness: Harness) -> None:
+    harness.db.rows["ev-0009"] = frigate_event()
+    body = harness.client.get("/api/v1/events/ev-0009").json()
+    assert body["clip"] == "/api/v1/events/ev-0009/clip.mp4"
+    assert body["source"] == "frigate"
+    assert body["upstream"]["severity"] == "alert"
+
+
+def test_clip_is_fetched_from_frigate_once_then_cached(harness: Harness, media_dir: Path) -> None:
+    harness.db.rows["ev-0009"] = frigate_event()
+    client = FakeClipClient()
+    harness.app.state.runtime.frigate_client = client
+    first = harness.client.get("/api/v1/events/ev-0009/clip.mp4")
+    assert first.status_code == 200
+    assert first.headers["content-type"] == "video/mp4"
+    out = media_dir / "clips" / "ev-0009.mp4"
+    assert client.calls == [("front-door", T0, T0 + 30.0, out)]
+    assert harness.db.rows["ev-0009"].clip_path == str(out)
+    assert harness.client.get("/api/v1/events/ev-0009/clip.mp4").status_code == 200
+    assert len(client.calls) == 1  # served from the cache
+
+
+def test_clip_open_event_is_capped(harness: Harness) -> None:
+    harness.db.rows["ev-0009"] = frigate_event(ended_at=None)
+    client = FakeClipClient()
+    harness.app.state.runtime.frigate_client = client
+    harness.client.get("/api/v1/events/ev-0009/clip.mp4")
+    (_camera, start, end, _dest) = client.calls[0]
+    assert end - start <= 300.0
+
+
+def test_clip_errors_are_explained(harness: Harness) -> None:
+    from vidette.frigate.client import FrigateError, FrigateNotFoundError
+
+    harness.db.rows["ev-0009"] = frigate_event()
+    harness.app.state.runtime.frigate_client = FakeClipClient(FrigateNotFoundError("404"))
+    missing = harness.client.get("/api/v1/events/ev-0009/clip.mp4")
+    assert missing.status_code == 404
+    assert "enable `record`" in _problem(missing.json())["detail"]
+
+    harness.app.state.runtime.frigate_client = FakeClipClient(FrigateError("cannot reach"))
+    down = harness.client.get("/api/v1/events/ev-0009/clip.mp4")
+    assert down.status_code == 502
+    assert harness.db.rows["ev-0009"].clip_path is None
+
+
+def test_clip_without_frigate_is_404(harness: Harness) -> None:
+    harness.db.rows["ev-0001"] = make_event("ev-0001")
+    response = harness.client.get("/api/v1/events/ev-0001/clip.mp4")
+    assert response.status_code == 404
+    assert _problem(response.json())["title"] == "Clip not available"

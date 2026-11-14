@@ -1,18 +1,20 @@
-# Vidette stack: app + go2rtc stream gateway (+ optional local VLM via `--profile vlm`).
+# Vidette v0.2 (development line): one service beside an existing Frigate + MQTT broker.
 #
-# Quickstart (no build — pulls published images):
-#   docker compose -f deploy/docker-compose.yml up -d   →  http://localhost:8642
-# Build from source instead (repo checkout):
-#   docker compose -f deploy/docker-compose.yml up -d --build
+#   docker compose -f deploy/docker-compose.yml up -d --build   →  http://localhost:8642
 #
-# Zero config to start: bring it up, create your admin account, then add cameras in the UI
-# (Cameras page). To manage cameras as code instead, see the `config` bind-mount note below.
+# Vidette needs to reach Frigate's API (frigate.url, usually port 5000) and the MQTT broker
+# Frigate publishes to. The easiest way is to add this service to the compose project that
+# already runs Frigate; docs/frigate.md shows that and the separate-project variant.
+#
+# Published images (ghcr.io/baadev/vidette) are still the v0.1.x NVR line; this file always
+# builds from your checkout so you get what you read.
 
 name: vidette
 
 services:
   vidette:
-    image: ghcr.io/baadev/vidette:${VIDETTE_TAG:-latest}
+    image: vidette:dev
+    pull_policy: build
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -20,19 +22,17 @@ services:
     ports:
       - "8642:8642"
     volumes:
-      - vidette-config:/config          # DB + generated go2rtc.yaml (writable, uid 1000)
-      - vidette-media:/media/vidette
-      # IaC option — manage cameras from a file instead of the UI. Put vidette.yaml in
-      # ./config next to this compose file, then on Linux: chown 1000:1000 ./config
+      - vidette-config:/config          # DB (writable, uid 1000); put vidette.yaml here
+      - vidette-media:/media/vidette    # snapshots cached from Frigate
+      # Manage the config as a file instead: put vidette.yaml in ./config next to this
+      # compose file, then on Linux: chown 1000:1000 ./config
       # - ./config:/config
     environment:
       - TZ=${TZ:-UTC}
       # Secrets referenced from config as ${VAR} live here or in a .env file beside this
       # compose file (see .env.example):
-      # - CAM_PASSWORD=
+      # - FRIGATE_MQTT_PASSWORD=
       # - VIDETTE_WEBHOOK_SECRET=
-    depends_on:
-      - go2rtc
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8642/healthz', timeout=3)"]
       interval: 30s
@@ -40,34 +40,6 @@ services:
       retries: 3
       start_period: 20s
 
-  go2rtc:
-    image: alexxit/go2rtc:1.9.14
-    restart: unless-stopped
-    volumes:
-      - vidette-config:/config    # vidette generates /config/go2rtc.yaml from your cameras
-    ports:
-      - "8555:8555/tcp"      # WebRTC media (browsers connect here directly)
-      - "8555:8555/udp"
-    # Deliberately NOT published: admin API (1984) and RTSP restream (8554) stay on the
-    # compose network — browsers reach streams via Vidette's authenticated WHEP proxy.
-
-  # Optional local VLM for Tier 3 (M3):  docker compose --profile vlm up -d
-  ollama:
-    image: ollama/ollama:latest
-    profiles: [vlm]
-    restart: unless-stopped
-    volumes:
-      - ollama:/root/.ollama
-    # NVIDIA GPU: uncomment
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-
 volumes:
   vidette-config:
   vidette-media:
-  ollama:

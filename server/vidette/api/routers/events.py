@@ -1,11 +1,9 @@
-"""Events API (M2): list/inspect understood events, serve their media, take feedback.
+"""Events API: list/inspect events, serve their cached media, take feedback.
 
-Events are read straight from the SQLite event store; the snapshot is written at
-confirmation time, while the clip is **lazy** — materialized (concat remux via
-`events.clips`) on the first request and cached on the row. Starring an event pins its
-footage to the `favorite` retention class (kept forever by default —
-docs/architecture/storage.md); unstarring returns it to the `event` schedule. Guarded by
-the `read:events` scope.
+Events are read straight from the SQLite event store. Since v0.2 (ADR-0009) Vidette
+records no footage of its own: a snapshot is whatever the intake cached from the upstream
+NVR, and a clip is fetched from Frigate's recordings on first request and cached next to
+it. Starring an event only pins the row. Guarded by the `read:events` scope.
 
 Path safety: snapshot/clip files are only served when their resolved path stays under
 `storage.media_dir` — rows come from our own DB, but defense in depth is house policy.
@@ -15,17 +13,18 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from vidette.api.errors import problem
+from vidette.api.routers.people import EventPeopleOut, event_people
 from vidette.auth.deps import require_scope
 from vidette.db import EventRow
-from vidette.events.clips import materialize_clip
-from vidette.events.engine import EVENT_FOOTAGE_PAD_S
+from vidette.events.payload import event_clip_url
+from vidette.frigate.client import FrigateError, FrigateNotFoundError
 from vidette.runtime import AppRuntime
 
 router = APIRouter(
@@ -35,7 +34,7 @@ router = APIRouter(
 )
 
 # An event still open when its clip is requested gets footage up to "now", capped so a
-# stuck-open event cannot demand an hour-long remux.
+# stuck-open event cannot demand an hour-long clip from Frigate.
 MAX_OPEN_CLIP_SPAN_S = 300.0
 
 _EVENT_GONE = (
@@ -66,7 +65,10 @@ class EventOut(BaseModel):
     feedback: str | None
     favorite: bool
     snapshot: str | None
-    clip: str
+    clip: str | None
+    source: str | None = None  # "frigate" since v0.2
+    upstream: dict[str, Any] | None = None  # what Frigate said: severity, its GenAI summary
+    people: EventPeopleOut | None = None  # the local face check, when known people are on
 
 
 class FeedbackIn(BaseModel):
@@ -98,7 +100,10 @@ def _event_out(row: EventRow) -> EventOut:
         snapshot=(
             f"/api/v1/events/{row.id}/snapshot.jpeg" if row.snapshot_path is not None else None
         ),
-        clip=f"/api/v1/events/{row.id}/clip.mp4",
+        clip=event_clip_url(row),
+        source=row.source,
+        upstream=row.upstream,
+        people=event_people(row.id, (row.intent or {}).get("people")),
     )
 
 
@@ -110,12 +115,17 @@ async def _get_event_or_404(request: Request, event_id: str) -> EventRow:
 
 
 def _safe_media_file(runtime: AppRuntime, raw_path: str) -> Path | None:
-    """Resolve a DB-supplied path; None unless it is a real file under media_dir."""
-    media_root = runtime.config.storage.media_dir.resolve()
+    """Resolve a DB-supplied path; None unless it is a real file under media_dir or a
+    configured clip folder (whose clips are served in place, never copied)."""
+    roots = [runtime.config.storage.media_dir.resolve()]
+    roots += [folder.path.resolve() for folder in runtime.config.clip_folders]
     path = Path(raw_path).resolve()
-    if not path.is_relative_to(media_root) or not path.is_file():
+    if not any(path.is_relative_to(root) for root in roots) or not path.is_file():
         return None
     return path
+
+
+_VIDEO_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".mkv": "video/x-matroska"}
 
 
 @router.get("/events")
@@ -143,7 +153,7 @@ async def event_snapshot(event_id: str, request: Request) -> FileResponse:
     unavailable = problem(
         404,
         "Snapshot not available",
-        "this event has no snapshot on disk — snapshots are best-effort at confirmation "
+        "this event has no snapshot on disk; snapshots are fetched from the upstream NVR "
         "time and may be missing when the stream gateway was unreachable",
     )
     if row.snapshot_path is None:
@@ -156,30 +166,41 @@ async def event_snapshot(event_id: str, request: Request) -> FileResponse:
 
 @router.get("/events/{event_id}/clip.mp4")
 async def event_clip(event_id: str, request: Request) -> FileResponse:
+    """Serve the cached clip, or fetch it from Frigate's recordings once and cache it."""
     runtime = _runtime(request)
     row = await _get_event_or_404(request, event_id)
-
     if row.clip_path is not None:
         cached = _safe_media_file(runtime, row.clip_path)
         if cached is not None:
-            return FileResponse(cached, media_type="video/mp4")
-
-    media_dir = runtime.config.storage.media_dir
-    out_path = media_dir / row.camera / "events" / row.id / "clip.mp4"
+            return FileResponse(
+                cached, media_type=_VIDEO_TYPES.get(cached.suffix.lower(), "video/mp4")
+            )
+    client = runtime.frigate_client
+    if row.source != "frigate" or client is None:
+        raise problem(
+            404,
+            "Clip not available",
+            "this event has no footage Vidette can serve: its clip is gone from the clip "
+            "folder, or it did not come from Frigate, or no frigate: section is configured",
+        )
     end_ts = (
         row.ended_at
         if row.ended_at is not None
         else min(time.time(), row.started_at + MAX_OPEN_CLIP_SPAN_S)
     )
-    ok = await materialize_clip(runtime.db, media_dir, row.camera, row.started_at, end_ts, out_path)
-    if not ok:
+    media_dir = runtime.config.storage.media_dir
+    out_path = media_dir / "clips" / f"{row.id}.mp4"
+    try:
+        await client.download_clip(row.camera, row.started_at, end_ts, out_path)
+    except FrigateNotFoundError as exc:
         raise problem(
             404,
             "Clip not available",
-            "no recorded footage for this event yet — the recorder may still be writing "
-            "the segment, or retention already removed it; retry shortly or check "
-            "GET /api/v1/recordings for the camera",
-        )
+            "Frigate has no recording for this event: enable `record` for the camera in "
+            "Frigate, or its retention already removed the footage",
+        ) from exc
+    except FrigateError as exc:
+        raise problem(502, "Frigate unreachable", str(exc)) from exc
     await runtime.db.update_event(row.id, clip_path=str(out_path))
     return FileResponse(out_path, media_type="video/mp4")
 
@@ -193,25 +214,8 @@ async def event_feedback(event_id: str, body: FeedbackIn, request: Request) -> N
 
 @router.post("/events/{event_id}/favorite", status_code=204)
 async def event_favorite(event_id: str, body: FavoriteIn, request: Request) -> None:
-    """Star/unstar an event — and move its footage between retention classes.
-
-    Starring pins the event's segments (with the engine's pre/post-roll pad) to the
-    `favorite` class, lifting even already-`event` footage; unstarring drops the same
-    range from `favorite` back to `event`, so retention resumes the event schedule.
-    Requires only `read:events` like its neighbors: viewers may star what they can see.
-    """
-    runtime = _runtime(request)
-    row = await _get_event_or_404(request, event_id)
-    start_ts = row.started_at - EVENT_FOOTAGE_PAD_S
-    end_ts = (
-        row.ended_at if row.ended_at is not None else row.started_at + MAX_OPEN_CLIP_SPAN_S
-    ) + EVENT_FOOTAGE_PAD_S
-    await runtime.db.set_event_favorite(event_id, body.favorite)
-    if body.favorite:
-        await runtime.db.upgrade_segments_class(
-            row.camera, start_ts, end_ts, "favorite", only_from=("continuous", "motion", "event")
-        )
-    else:
-        await runtime.db.upgrade_segments_class(
-            row.camera, start_ts, end_ts, "event", only_from=("favorite",)
-        )
+    """Star/unstar an event. Requires only `read:events` like its neighbors: viewers may
+    star what they can see."""
+    updated = await _runtime(request).db.set_event_favorite(event_id, body.favorite)
+    if not updated:
+        raise problem(404, "Event not found", _EVENT_GONE)

@@ -1,9 +1,10 @@
 # API
 
-> **Status:** the M1–M2 surface is ✅ live — auth, cameras (incl. managed-camera CRUD),
-> recordings, streams, export, events, notifications/push, WebSocket, metrics, system.
-> Policies (M4) remain an honest `501 {"status": "designed", …}` stub.
-> Interactive OpenAPI docs are served at `/api/docs`.
+> **Status (v0.2):** auth, events (with Frigate snapshots and clips), push, WebSocket,
+> metrics and system are live. The v0.1 camera, stream, recording and export routes left with
+> the NVR core (tag `nvr-core`, [ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md))
+> and now answer 404. Policies remain an honest `501 {"status": "designed", …}` stub until
+> the verdict worker lands. Interactive OpenAPI docs are served at `/api/docs`.
 
 ## Principles
 
@@ -30,18 +31,16 @@ created in settings, shown once, revocable, and audit-logged.
 
 | Resource | Routes | Milestone |
 |---|---|---|
-| System | `GET /healthz` (public) · `GET /api/v1/system` · `GET /api/v1/system/events` | ✅ |
+| System | `GET /healthz` (public) · `GET /api/v1/system` (stage, config warnings, Frigate source and clip folder state) · `GET /api/v1/system/events` | ✅ |
+| Settings | `GET /api/v1/settings/vlm` (read:config): the chosen VLM backend, each option's model, endpoint, where frames go and today's calls against the budget, the verdict worker's counters · `PUT /api/v1/settings/vlm {backend: none\|local\|cloud}` (write:config): stored, wins over the config; 409 with what to add when the backend is not configured; recorded as `vlm.backend_changed` | ✅ |
 | Auth | `GET /api/v1/auth/status` (public) · `POST …/bootstrap` · `POST …/login` · `POST …/logout` · `GET …/me` · `POST/GET/DELETE …/tokens` | ✅ M1 |
 | Config | `POST /api/v1/config/validate` | ✅ |
-| Managed cameras | `GET/POST /api/v1/config/cameras` · `PUT/DELETE …/{id}` · `POST …/discover` (ONVIF) · `POST …/{id}/probe` — UI-created cameras live in the DB and hot-apply; the YAML file stays the IaC source of truth (id collisions: the file wins) | ✅ |
 | Web push | `GET /api/v1/push/vapid-key` · `POST/DELETE /api/v1/push/subscriptions` | ✅ |
-| Cameras | `GET /api/v1/cameras` · `GET /api/v1/cameras/{id}` (recorder state, probe, stream readiness) | ✅ M1 |
-| Streams | `GET /api/v1/streams/{camera}` · `POST …/whep` (SDP in/out, authenticated proxy to go2rtc) · `GET …/snapshot.jpeg` | ✅ M1 |
-| Recordings | `GET /api/v1/recordings?camera=&from_ts=&to_ts=` · `GET …/summary?camera=&day=` · `GET …/segments/{id}/file` | ✅ M1 |
-| Export | `POST /api/v1/export` → job · `GET /api/v1/export/{id}` · `GET …/download` | ✅ M1 |
-| Events | `GET /api/v1/events?since_ts=&camera=&limit=` · `GET /api/v1/events/{id}` · media: `…/snapshot.jpeg`, `…/clip.mp4` (lazy remux) · `POST …/feedback {verdict: up\|down}` — semantic `q=` search lands in M3 | ✅ |
-| Policies | `GET/PUT /api/v1/policies` · `POST /api/v1/policies/{id}/dry-run` | 📐 M4 |
-| Live events | `WS /api/v1/ws?topics=event.*,system.*` — JSON frames `{topic, payload}`; closes 4401 unauthenticated, 4400 on invalid topics | ✅ |
+| Cameras, streams, recordings, export, managed cameras | v0.1 only (tag `nvr-core`) | ❌ on v0.2 |
+| Events | `GET /api/v1/events?since_ts=&camera=&favorite=&limit=` · `GET /api/v1/events/{id}` (with `source`, `upstream`) · media: `…/snapshot.jpeg` (cached from Frigate or a clip folder's key frame), `…/clip.mp4` (fetched from Frigate's recordings once and cached, or served from the clip folder) · `POST …/feedback {verdict: up\|down}` · `POST …/favorite {favorite}` | ✅ |
+| People | `GET /api/v1/people` (read:config): state, enrolled people, their reference faces · `POST /api/v1/people {name}` · `DELETE /api/v1/people/{id}` · `POST /api/v1/people/{id}/photos` (raw JPEG/PNG/WebP body, ≤ 15 MB; every readable face is enrolled) · `GET …/faces/{face}.jpg` · `DELETE …/faces/{face}` · on events: `people` in `GET /api/v1/events/{id}`, `GET /api/v1/events/{id}/people/{n}.jpg`, `POST /api/v1/events/{id}/people/{n} {answer: name\|stranger\|unsure}`. Changes need write:config; 409 while `people.enabled` is false ([people.md](people.md)) | ✅ |
+| Policies | `GET/PUT /api/v1/policies` · `POST /api/v1/policies/{id}/dry-run` | 📐 v0.2 week 2 (policies live in the config file; they are judged live already) |
+| Live events | `WS /api/v1/ws?topics=event.*,system.*`: JSON frames `{topic, payload}` (including `event.observed`); closes 4401 unauthenticated, 4400 on invalid topics | ✅ |
 | Metrics | `GET /metrics` (Prometheus text; scrape with `Authorization: Bearer vd_…`) | ✅ |
 
 ### Example: what works today
@@ -55,14 +54,14 @@ curl -s localhost:8642/api/v1/system | jq
 
 curl -s -X POST localhost:8642/api/v1/config/validate \
   --data-binary @config/vidette.yaml -H "content-type: application/yaml" | jq
-# {"valid": true, "errors": [], "warnings": ["understanding.vlm: designed — lands in M3", ...]}
+# {"valid": true, "errors": [], "warnings": ["policies: understanding.vlm.backend is none, ...", ...]}
 ```
 
 ### Example: designed route honesty
 
 ```bash
 curl -s localhost:8642/api/v1/policies | jq
-# {"status": "designed", "milestone": "M4",
+# {"status": "designed", "milestone": "v0.2",
 #  "docs": "https://github.com/baadev/vidette/blob/main/ROADMAP.md"}   ← HTTP 501
 ```
 

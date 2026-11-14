@@ -1,0 +1,14 @@
+# Optional local hooks (https://pre-commit.com): `pre-commit install`. Without pre-commit,
+# `make hooks` installs the same checks as a plain git hook (.githooks/pre-commit).
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: local
+    hooks:
+      - id: vidette-privacy-check
+        name: privacy check (credentials in URLs, private addresses, media, e-mails)
+        entry: python3 .github/scripts/privacy_check.py
+        language: system
+        pass_filenames: true

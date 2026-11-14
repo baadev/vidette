@@ -1,5 +1,10 @@
 # Storage design
 
+> **Frozen (v0.1 NVR core).** This page describes code that lives at tag `nvr-core`
+> and is not part of the `v0.2` line, where Frigate does this job
+> ([ADR-0009](adr/0009-intent-layer-over-frigate.md)). It stays as a record, linked from the
+> ADRs and useful as field notes for Frigate users; it is not maintained.
+
 > **Status: 📐 designed** (M1 recorder, M3 compaction/off-site). The retention planner is
 > implemented and tested today (`server/vidette/recording/retention.py`). Numbers are design
 > targets unless marked measured.

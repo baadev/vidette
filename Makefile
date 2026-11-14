@@ -1,10 +1,10 @@
 # Vidette developer entry points. Requires: uv (https://docs.astral.sh/uv/), node >= 20.
 
-.PHONY: setup test lint fmt dev web build up down validate
+.PHONY: setup test lint fmt dev web build up down validate hooks privacy
 
 setup:
-	cd server && uv sync
-	cd web && npm install
+	cd server && uv sync --locked --extra people
+	cd web && npm ci
 
 test:
 	cd server && uv run pytest
@@ -21,7 +21,7 @@ fmt:
 dev:
 	@mkdir -p config media-dev
 	@test -f config/dev.yaml || printf 'server:\n  auth:\n    mode: none  # dev only\nstorage:\n  media_dir: $(CURDIR)/media-dev\n  database: $(CURDIR)/config/dev.db\n' > config/dev.yaml
-	cd server && VIDETTE_CONFIG=$(CURDIR)/config/dev.yaml VIDETTE_GO2RTC_URL=http://127.0.0.1:1984 VIDETTE_GO2RTC_RTSP=rtsp://127.0.0.1:8554 \
+	cd server && VIDETTE_CONFIG=$(CURDIR)/config/dev.yaml \
 		uv run uvicorn vidette.api.app:create_app --factory --reload --port 8642
 
 web:
@@ -39,3 +39,9 @@ down:
 
 validate:
 	cd server && uv run vidette validate ../deploy/config.example.yaml
+
+hooks:
+	git config core.hooksPath .githooks
+
+privacy:
+	python3 .github/scripts/privacy_check.py

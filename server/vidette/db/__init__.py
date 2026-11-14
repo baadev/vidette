@@ -1,7 +1,7 @@
 """SQLite store (WAL) — the single database of ADR-0008.
 
-CONTRACT FILE: signatures and row shapes below are the interface the rest of M1 codes
-against (auth, recorder, janitor, API routers). Implementation notes:
+CONTRACT FILE: signatures and row shapes below are the interface the rest of the server
+codes against (auth, events intake, notifiers, API routers). Implementation notes:
 
 - aiosqlite; WAL mode; foreign keys on; one `Database` instance per process (single-writer
   discipline per ADR-0008 — all writes go through this class).
@@ -9,6 +9,8 @@ against (auth, recorder, janitor, API routers). Implementation notes:
   `meta(key='schema_version')` row. Migrations are append-only.
 - Timestamps are unix epoch seconds (float, UTC). No datetime objects cross this boundary.
 - No ORM. Plain SQL, parameterized always.
+- The v0.1 NVR tables (`segments`, `managed_cameras`) still exist because migrations are
+  append-only; nothing on the v0.2 line reads or writes them (ADR-0009).
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,11 +31,6 @@ import aiosqlite
 from vidette.db.schema import MIGRATIONS, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
-
-# SQLite's default host-parameter limit is 999 on older builds; stay well under it when
-# expanding IN (...) lists.
-_MAX_PARAMS_PER_STATEMENT = 500
-
 
 @dataclass(frozen=True)
 class UserRow:
@@ -62,25 +59,6 @@ class ApiTokenRow:
     created_at: float
     last_used_at: float | None
     revoked_at: float | None
-
-
-@dataclass(frozen=True)
-class SegmentRow:
-    id: int
-    camera: str
-    start_ts: float
-    end_ts: float
-    path: str  # absolute path on the media volume
-    size_bytes: int
-    klass: str  # continuous | motion | event | favorite (SegmentClass values)
-    codec: str | None
-
-
-@dataclass(frozen=True)
-class HourBucket:
-    hour_start_ts: float
-    recorded_seconds: float
-    bytes: int
 
 
 @dataclass(frozen=True)
@@ -113,6 +91,9 @@ class EventRow:
     snapshot_path: str | None
     clip_path: str | None
     favorite: bool = False
+    source: str | None = None  # upstream NVR ("frigate"); None for v0.1 rows
+    source_ref: str | None = None  # upstream id (Frigate review id)
+    upstream: dict[str, Any] | None = None  # what the upstream said (severity, summary)
 
 
 def _user(row: sqlite3.Row) -> UserRow:
@@ -147,19 +128,6 @@ def _api_token(row: sqlite3.Row) -> ApiTokenRow:
     )
 
 
-def _segment(row: sqlite3.Row) -> SegmentRow:
-    return SegmentRow(
-        id=row["id"],
-        camera=row["camera"],
-        start_ts=row["start_ts"],
-        end_ts=row["end_ts"],
-        path=row["path"],
-        size_bytes=row["size_bytes"],
-        klass=row["klass"],
-        codec=row["codec"],
-    )
-
-
 def _system_event(row: sqlite3.Row) -> SystemEventRow:
     return SystemEventRow(
         id=row["id"],
@@ -184,17 +152,12 @@ def _event(row: sqlite3.Row) -> EventRow:
         policy=row["policy"],
         feedback=row["feedback"],
         favorite=bool(row["favorite"]),
+        source=row["source"],
+        source_ref=row["source_ref"],
+        upstream=json.loads(row["upstream"]) if row["upstream"] is not None else None,
         snapshot_path=row["snapshot_path"],
         clip_path=row["clip_path"],
     )
-
-
-@dataclass(frozen=True)
-class ManagedCameraRow:
-    id: str
-    config: dict[str, Any]  # validated CameraConfig as a plain dict
-    created_at: float
-    updated_at: float
 
 
 @dataclass(frozen=True)
@@ -203,15 +166,6 @@ class PushSubscriptionRow:
     subscription: dict[str, Any]  # the browser's PushSubscription JSON
     user_id: int
     created_at: float
-
-
-def _managed_camera(row: sqlite3.Row) -> ManagedCameraRow:
-    return ManagedCameraRow(
-        id=row["id"],
-        config=json.loads(row["config"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
 
 
 def _push_subscription(row: sqlite3.Row) -> PushSubscriptionRow:
@@ -419,128 +373,6 @@ class Database:
             )
             await self._db.commit()
 
-    # --- segments -----------------------------------------------------------------------
-    async def add_segment(
-        self,
-        camera: str,
-        start_ts: float,
-        end_ts: float,
-        path: str,
-        size_bytes: int,
-        klass: str = "continuous",
-        codec: str | None = None,
-    ) -> int:
-        """Upsert by path (recorder may re-announce after restart)."""
-        async with self._write_lock:
-            async with self._db.execute(
-                "INSERT INTO segments (camera, start_ts, end_ts, path, size_bytes, klass, codec)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(path) DO UPDATE SET"
-                "   camera = excluded.camera,"
-                "   start_ts = excluded.start_ts,"
-                "   end_ts = excluded.end_ts,"
-                "   size_bytes = excluded.size_bytes,"
-                "   klass = excluded.klass,"
-                "   codec = excluded.codec"
-                " RETURNING id",
-                (camera, start_ts, end_ts, path, size_bytes, klass, codec),
-            ) as cur:
-                row = await cur.fetchone()
-            await self._db.commit()
-        assert row is not None
-        return int(row["id"])
-
-    async def segments_between(
-        self, camera: str, start_ts: float, end_ts: float
-    ) -> list[SegmentRow]:
-        """Segments overlapping [start_ts, end_ts), ordered by start_ts."""
-        async with self._db.execute(
-            "SELECT * FROM segments"
-            " WHERE camera = ? AND end_ts > ? AND start_ts < ?"
-            " ORDER BY start_ts",
-            (camera, start_ts, end_ts),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [_segment(row) for row in rows]
-
-    async def segment_paths(self, camera: str) -> set[str]:
-        """Every indexed segment path for a camera — the reconciler diffs disk against this."""
-        async with self._db.execute(
-            "SELECT path FROM segments WHERE camera = ?", (camera,)
-        ) as cur:
-            rows = await cur.fetchall()
-        return {str(row["path"]) for row in rows}
-
-    async def all_segments(self) -> list[SegmentRow]:
-        async with self._db.execute(
-            "SELECT * FROM segments ORDER BY camera, start_ts"
-        ) as cur:
-            rows = await cur.fetchall()
-        return [_segment(row) for row in rows]
-
-    async def latest_segment(self, camera: str) -> SegmentRow | None:
-        async with self._db.execute(
-            "SELECT * FROM segments WHERE camera = ? ORDER BY start_ts DESC LIMIT 1",
-            (camera,),
-        ) as cur:
-            row = await cur.fetchone()
-        return _segment(row) if row is not None else None
-
-    async def get_segment(self, segment_id: int) -> SegmentRow | None:
-        async with self._db.execute(
-            "SELECT * FROM segments WHERE id = ?", (segment_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        return _segment(row) if row is not None else None
-
-    async def delete_segments_by_path(self, paths: Sequence[str]) -> int:
-        if not paths:
-            return 0
-        deleted = 0
-        async with self._write_lock:
-            for i in range(0, len(paths), _MAX_PARAMS_PER_STATEMENT):
-                chunk = paths[i : i + _MAX_PARAMS_PER_STATEMENT]
-                placeholders = ", ".join("?" for _ in chunk)
-                async with self._db.execute(
-                    f"DELETE FROM segments WHERE path IN ({placeholders})",
-                    tuple(chunk),
-                ) as cur:
-                    deleted += cur.rowcount
-            await self._db.commit()
-        return deleted
-
-    async def media_bytes_total(self) -> int:
-        async with self._db.execute(
-            "SELECT COALESCE(SUM(size_bytes), 0) AS total FROM segments"
-        ) as cur:
-            row = await cur.fetchone()
-        assert row is not None  # aggregate always yields one row
-        return int(row["total"])
-
-    async def hourly_summary(
-        self, camera: str, day_start_ts: float, day_end_ts: float
-    ) -> list[HourBucket]:
-        """Per-hour recorded seconds + bytes for the timeline; buckets with data only."""
-        async with self._db.execute(
-            "SELECT CAST(start_ts / 3600 AS INTEGER) * 3600 AS hour_start,"
-            "       SUM(end_ts - start_ts) AS recorded_seconds,"
-            "       SUM(size_bytes) AS total_bytes"
-            " FROM segments"
-            " WHERE camera = ? AND start_ts >= ? AND start_ts < ?"
-            " GROUP BY hour_start"
-            " ORDER BY hour_start",
-            (camera, day_start_ts, day_end_ts),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [
-            HourBucket(
-                hour_start_ts=float(row["hour_start"]),
-                recorded_seconds=float(row["recorded_seconds"]),
-                bytes=int(row["total_bytes"]),
-            )
-            for row in rows
-        ]
-
     # --- system events --------------------------------------------------------------------
     async def add_system_event(self, kind: str, payload: dict[str, Any]) -> int:
         async with self._write_lock:
@@ -591,28 +423,39 @@ class Database:
         policy: str | None = None,
         snapshot_path: str | None = None,
         clip_path: str | None = None,
+        source: str | None = None,
+        source_ref: str | None = None,
+        upstream: dict[str, Any] | None = None,
     ) -> None:
+        """Raises ValueError when (source, source_ref) already has a row."""
         async with self._write_lock:
-            await self._db.execute(
-                "INSERT INTO events (id, camera, started_at, ended_at, state, kinds, zones,"
-                " geometry, summary, intent, policy, feedback, snapshot_path, clip_path)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                (
-                    event_id,
-                    camera,
-                    started_at,
-                    ended_at,
-                    state,
-                    json.dumps(kinds),
-                    json.dumps(zones),
-                    json.dumps(geometry),
-                    summary,
-                    json.dumps(intent) if intent is not None else None,
-                    policy,
-                    snapshot_path,
-                    clip_path,
-                ),
-            )
+            try:
+                await self._db.execute(
+                    "INSERT INTO events (id, camera, started_at, ended_at, state, kinds, zones,"
+                    " geometry, summary, intent, policy, feedback, snapshot_path, clip_path,"
+                    " source, source_ref, upstream)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                    (
+                        event_id,
+                        camera,
+                        started_at,
+                        ended_at,
+                        state,
+                        json.dumps(kinds),
+                        json.dumps(zones),
+                        json.dumps(geometry),
+                        summary,
+                        json.dumps(intent) if intent is not None else None,
+                        policy,
+                        snapshot_path,
+                        clip_path,
+                        source,
+                        source_ref,
+                        json.dumps(upstream) if upstream is not None else None,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"event {source}:{source_ref} already exists") from exc
             await self._db.commit()
 
     async def update_event(
@@ -623,6 +466,12 @@ class Database:
         ended_at: float | None = None,
         snapshot_path: str | None = None,
         clip_path: str | None = None,
+        kinds: list[str] | None = None,
+        zones: list[str] | None = None,
+        upstream: dict[str, Any] | None = None,
+        summary: str | None = None,
+        intent: dict[str, Any] | None = None,
+        policy: str | None = None,
     ) -> None:
         """Partial update: only the provided (non-None) fields change; a no-op otherwise."""
         assignments: list[str] = []
@@ -632,6 +481,12 @@ class Database:
             ("ended_at", ended_at),
             ("snapshot_path", snapshot_path),
             ("clip_path", clip_path),
+            ("kinds", None if kinds is None else json.dumps(kinds)),
+            ("zones", None if zones is None else json.dumps(zones)),
+            ("upstream", None if upstream is None else json.dumps(upstream)),
+            ("summary", summary),
+            ("intent", None if intent is None else json.dumps(intent)),
+            ("policy", policy),
         ):
             if value is not None:
                 assignments.append(f"{column} = ?")
@@ -657,6 +512,14 @@ class Database:
 
     async def get_event(self, event_id: str) -> EventRow | None:
         async with self._db.execute("SELECT * FROM events WHERE id = ?", (event_id,)) as cur:
+            row = await cur.fetchone()
+        return _event(row) if row is not None else None
+
+    async def get_event_by_source(self, source: str, source_ref: str) -> EventRow | None:
+        """The event mirroring one upstream item (e.g. a Frigate review), if any."""
+        async with self._db.execute(
+            "SELECT * FROM events WHERE source = ? AND source_ref = ?", (source, source_ref)
+        ) as cur:
             row = await cur.fetchone()
         return _event(row) if row is not None else None
 
@@ -704,28 +567,6 @@ class Database:
             await self._db.commit()
         return cursor.rowcount > 0
 
-    # --- segments: class upgrades -----------------------------------------------------------
-    async def upgrade_segments_class(
-        self,
-        camera: str,
-        start_ts: float,
-        end_ts: float,
-        new_klass: str,
-        *,
-        only_from: Sequence[str] = ("continuous", "motion"),
-    ) -> int:
-        """Promote overlapping segments to a higher retention class (never downgrades:
-        `only_from` guards event/favorite footage from being touched)."""
-        placeholders = ", ".join("?" for _ in only_from)
-        async with self._write_lock:
-            cursor = await self._db.execute(
-                f"UPDATE segments SET klass = ? WHERE camera = ? AND end_ts > ? AND"
-                f" start_ts < ? AND klass IN ({placeholders})",
-                (new_klass, camera, start_ts, end_ts, *only_from),
-            )
-            await self._db.commit()
-        return cursor.rowcount
-
     # --- meta (key/value: schema version, VAPID keys, …) -------------------------------------
     async def get_meta(self, key: str) -> str | None:
         async with self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)) as cur:
@@ -740,31 +581,6 @@ class Database:
                 (key, value),
             )
             await self._db.commit()
-
-    # --- managed cameras (UI-created; YAML stays the IaC source of truth) --------------------
-    async def list_managed_cameras(self) -> list[ManagedCameraRow]:
-        async with self._db.execute("SELECT * FROM managed_cameras ORDER BY id") as cur:
-            rows = await cur.fetchall()
-        return [_managed_camera(row) for row in rows]
-
-    async def upsert_managed_camera(self, camera_id: str, config: dict[str, Any]) -> None:
-        now = self._clock()
-        async with self._write_lock:
-            await self._db.execute(
-                "INSERT INTO managed_cameras (id, config, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET"
-                " config = excluded.config, updated_at = excluded.updated_at",
-                (camera_id, json.dumps(config), now, now),
-            )
-            await self._db.commit()
-
-    async def delete_managed_camera(self, camera_id: str) -> bool:
-        async with self._write_lock:
-            cursor = await self._db.execute(
-                "DELETE FROM managed_cameras WHERE id = ?", (camera_id,)
-            )
-            await self._db.commit()
-        return cursor.rowcount > 0
 
     # --- web-push subscriptions ---------------------------------------------------------------
     async def upsert_push_subscription(

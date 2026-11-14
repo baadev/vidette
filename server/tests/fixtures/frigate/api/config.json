@@ -1,0 +1,22 @@
+{
+  "mqtt": {
+    "enabled": true,
+    "host": "mqtt",
+    "topic_prefix": "frigate"
+  },
+  "cameras": {
+    "front_door": {
+      "enabled": true,
+      "zones": {
+        "path": {},
+        "porch": {}
+      }
+    },
+    "street": {
+      "enabled": true,
+      "zones": {
+        "sidewalk": {}
+      }
+    }
+  }
+}

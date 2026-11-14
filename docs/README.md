@@ -9,18 +9,24 @@ the top; absence of a banner means it describes reality.
 | If you want to… | Read |
 |---|---|
 | Run it | [getting-started.md](getting-started.md) |
+| Connect it to Frigate | [frigate.md](frigate.md) |
+| Measure a policy | [eval.md](eval.md) |
+| Tell the judge who it saw (opt-in face recognition) | [people.md](people.md) |
 | Understand the system | [architecture/overview.md](architecture/overview.md) |
-| Understand the AI | [architecture/ai-pipeline.md](architecture/ai-pipeline.md) |
-| Connect a camera | [cameras/README.md](cameras/README.md) · [Eufy](cameras/eufy.md) · [RTSP/ONVIF](cameras/onvif-rtsp.md) |
+| Know why it changed course | [ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md) |
 | Configure everything | [configuration.md](configuration.md) + annotated [config.example.yaml](../deploy/config.example.yaml) |
 | Automate on events | [events-and-automations.md](events-and-automations.md) |
 | Use the API | [api.md](api.md) |
-| Size hardware | [hardware.md](hardware.md) |
 | Judge our choices | [architecture/adr/](architecture/adr/) |
 | Harden a deployment | [architecture/security-model.md](architecture/security-model.md) |
-| Write an adapter/plugin | [architecture/plugins.md](architecture/plugins.md) |
 | Know what the project stands for | [project/principles.md](project/principles.md) |
 | Common questions | [faq.md](faq.md) |
+
+Frozen with the v0.1 NVR core (tag `nvr-core`), kept as records:
+[ai-pipeline.md](architecture/ai-pipeline.md) (tiers 0 to 2),
+[storage.md](architecture/storage.md), [plugins.md](architecture/plugins.md),
+[cameras/](cameras/README.md) (including the [Eufy field notes](cameras/eufy.md)),
+[hardware.md](hardware.md).
 
 ## Documentation rules
 

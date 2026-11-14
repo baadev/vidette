@@ -73,7 +73,7 @@ export function LoginPage({ mode, onAuthed }: LoginPageProps) {
         <h1 className="wordmark">
           VIDE<span className="accent">TT</span>E
         </h1>
-        <p className="tagline">Self-hosted video security that understands intent.</p>
+        <p className="tagline">Alert policies in plain language, on top of Frigate.</p>
       </div>
 
       <form className="card login-card" onSubmit={handleSubmit} noValidate>

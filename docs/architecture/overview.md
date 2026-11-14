@@ -1,98 +1,80 @@
 # Architecture overview
 
-Vidette is a **modular monolith** shipped as one container plus a stream-gateway sidecar
-(go2rtc). One box, one compose file, no cluster — deliberately boring infrastructure so the
-interesting parts (the understanding cascade) get the complexity budget.
-Rationale: [ADR-0001](adr/0001-runtime-and-languages.md).
+Since v0.2 Vidette is an **intent layer on top of Frigate**
+([ADR-0009](adr/0009-intent-layer-over-frigate.md)): one small Python service beside an
+existing Frigate and its MQTT broker. Frigate owns cameras, recording, detection and review
+items; Vidette owns the decision of which incidents deserve a person's attention, and the
+measurement of how good that decision is. The v0.1 NVR architecture (go2rtc sidecar,
+recorder, detection cascade) is frozen at tag `nvr-core`.
 
 ```mermaid
 flowchart TB
-    subgraph cams [Cameras]
-      C1["RTSP / ONVIF"]
-      C2["Eufy via NAS (RTSP) — supported models"]
-      C3["Other adapters"]
+    subgraph upstream [Frigate install]
+      CAM[Cameras] --> FR["Frigate\nrecord · detect · track · review items"]
+      FR --> MQ[(MQTT broker)]
     end
 
-    subgraph host [Vidette host — one compose stack]
-      GW["go2rtc\nstream gateway (sidecar)"]
-      subgraph app [vidette container]
-        AD["Adapters\n(discover · streams · events)"]
-        REC["Recorder\ncodec-copy fMP4 segments"]
-        PIPE["Understanding cascade\nT0 motion → T1 detect → T2 track → T3 VLM"]
-        EVT["Event engine\npolicies · lifecycle · dedupe"]
-        API["REST + WebSocket API"]
-        NOT["Notifier\nwebhooks · push · Apprise · MQTT"]
-      end
-      DB[("SQLite (WAL)\n+ sqlite-vec")]
-      FS[("Media store\nsegments · clips · previews")]
-      UI["Web app (React)"]
+    subgraph vidette [vidette container]
+      SRC["Frigate source\nMQTT → typed incidents"]
+      BUS(("event bus\nincident.* · object.*\nevent.* · system.*"))
+      INT["Event intake\nincident → observed event"]
+      JUDGE["Judge (week 2)\npolicy + VLM verdict"]
+      NOT["Notifier\nwebhooks · Apprise · web push"]
+      MQO["MQTT out\n+ HA discovery"]
+      API["REST + WebSocket API"]
+      CLI["CLI\nvalidate · frigate · eval"]
     end
 
-    C1 --> GW
-    C2 --> GW
-    C3 --> GW
-    AD -. "configures sources" .-> GW
-    GW -->|main stream| REC --> FS
-    GW -->|sub stream| PIPE --> EVT
-    AD -->|vendor events| EVT
-    EVT --> NOT
-    EVT --> DB
-    REC --> DB
+    DB[("SQLite (WAL)\nevents · users · tokens")]
+    FS[("media_dir\nsnapshots · clips cache")]
+    UI["Web app\nEvents · System"]
+
+    MQ -- reviews, events, available --> SRC --> BUS
+    BUS --> INT --> DB
+    INT -. "snapshot (HTTP)" .-> FR
+    INT --> FS
+    BUS --> JUDGE
+    JUDGE -. "frames (HTTP)" .-> FR
+    BUS -- "event.confirmed / system.*" --> NOT
+    BUS --> MQO
     API --> DB
-    API --> FS
-    API -->|live: WebRTC/MSE redirect| GW
+    API -. "clip (HTTP), cached" .-> FR
     UI --> API
-    NOT --> EXT["Home Assistant · Telegram · your webhook · …"]
 ```
 
 ## Components
 
-| Component | Role | Runtime | Status |
+| Component | Role | Code | Status |
 |---|---|---|---|
-| **go2rtc** (sidecar) | One connection per camera; fan-out to recorder, pipeline, and browsers (WebRTC/MSE/RTSP). We manage its config; we do not fork it. [ADR-0002](adr/0002-stream-gateway-go2rtc.md) | Go (upstream) | 📐 M1 (managed); runs today as sidecar |
-| **Adapters** | Turn any camera ecosystem into: stream endpoints + event feed + capabilities. Vendor pain isolated here. [plugins.md](plugins.md) | Python (+ sidecars for non-Python bridges) | ✅ SDK interfaces · 📐 runtime |
-| **Recorder** | Segmented codec-copy recording (no transcode), segment index, retention enforcement. *Sacred: nothing may stall it.* [storage.md](storage.md) | Python supervising FFmpeg | 📐 M1 (retention planner ✅) |
-| **Understanding cascade** | Tiered analysis: cheap filters gate expensive reasoning. [ai-pipeline.md](ai-pipeline.md) | Python + ONNX Runtime + llama.cpp/Ollama | 📐 M2–M3 (protocols ✅) |
-| **Event engine** | Observations → events; policy evaluation; dedupe; feedback. | Python | 📐 M2 (models ✅) |
-| **Notifier** | Signed webhooks, web push (VAPID), Apprise (100+ services), MQTT + HA discovery. | Python | 📐 M2 (signing ✅) |
-| **API** | REST + WebSocket, OpenAPI; session auth + scoped tokens. [api.md](../api.md) | FastAPI | ✅ skeleton |
-| **Web app** | Live wall, timeline, event review, zone editor, settings. | React + TS + Vite | ✅ shell |
-| **Store** | SQLite WAL (metadata, events, embeddings via sqlite-vec, FTS5); filesystem for media. Postgres optional later. [ADR-0008](adr/0008-database.md) | — | ✅ choice · 📐 schema M1 |
+| **Frigate source** | Subscribes to `<prefix>/reviews`, `/events`, `/available`; parses leniently; filters by camera and severity; publishes `incident.*` / `object.*`. [frigate.md](../frigate.md) | `vidette/frigate/source.py` | ✅ |
+| **Frigate client** | Read-only HTTP: review items, event snapshots, recording frames, clips. | `vidette/frigate/client.py` | ✅ |
+| **Incident model** | Source-agnostic `Incident` / `TrackedObject`; the same type `vidette eval` builds from labels. | `vidette/core/incidents.py` | ✅ |
+| **Event intake** | One `observed` event per incident; snapshot cache; `event.observed` for live UIs. | `vidette/events/intake.py` | ✅ |
+| **Judges** | `Judge` interface; baselines today, the VLM judge in week 2. | `vidette/verdicts/` | ✅ interface · 📐 VLM |
+| **Evaluation** | Dataset format, metrics with intervals, cost projection. [eval.md](../eval.md) | `vidette/eval/` | ✅ |
+| **Notifier** | Signed webhooks, Apprise, web push; `event.observed` never notifies. | `vidette/notify/` | ✅ |
+| **MQTT out** | Vidette's own events to a broker, Home Assistant discovery. | `vidette/notify/mqtt.py` | ✅ |
+| **API + web app** | Auth, events, push, system, metrics, WebSocket; Events and System pages. [api.md](../api.md) | `vidette/api/`, `web/` | ✅ |
+| **Store** | SQLite WAL, append-only migrations. [ADR-0008](adr/0008-database.md) | `vidette/db/` | ✅ |
 
-## Process model
+## Containment rules (unchanged in spirit)
 
-One container, a small supervised process tree — not microservices:
+- Every worker (source, intake, notifier, MQTT) catches its own failures, reports them as
+  rate-limited system events and keeps running. Frigate or the broker being down never
+  blocks boot or the API.
+- Every queue on the bus is bounded; drops are counted in `vidette_bus_dropped_total`.
+- Nothing is confirmed, so nothing notifies, without a verdict. Incidents travel on
+  internal topics (`incident.*`) that no notification rule can match, and `event.observed`
+  is dropped by the dispatcher by rule.
+- Vidette never writes to Frigate.
 
-- **api** — FastAPI/uvicorn, serves UI + API + WebSocket.
-- **recorder** — one FFmpeg child per camera (copy mode), watchdog with exponential backoff,
-  segment finalization and fsync policy.
-- **pipeline workers** — decode substreams and run tiers; inference in a process pool sized to
-  hardware; VLM via local sidecar (Ollama) or external API.
-- **notifier** — delivery queue with retries/backoff, per-channel rate limits.
-
-Crash isolation: a worker dying never takes the recorder down; the supervisor restarts children
-with jitter and surfaces repeated failures as system events (visible in UI, forwardable as
-notifications — the system snitches on itself).
-
-## Data flow and backpressure
-
-Priority order under load — the **shedding ladder** ([principles](../project/principles.md)):
-
-1. Tier 3 (VLM) work is dropped first (queued events keep their Tier 2 verdicts).
-2. Tier 1–2 detection fps degrades next.
-3. Preview/scrub-strip generation pauses.
-4. The recorder and the event log **never** shed.
-
-Every queue is bounded; every drop is counted and visible in `/metrics` (M2) and the UI.
-
-## Directory layout at runtime
+## Runtime layout
 
 ```
-/config/vidette.yaml        # your config (env-interpolated, validated on boot)
-/config/vidette.db          # SQLite (WAL): segments, events, embeddings, users, tokens
-/media/vidette/<camera>/YYYY/MM/DD/HH/*.mp4     # fMP4 segments (codec-copy)
-/media/vidette/<camera>/events/<event-id>/      # clip.mp4 · snapshot.webp · context.json
-/media/vidette/<camera>/previews/               # scrub strips for the timeline
+/config/vidette.yaml                       # your config (env-interpolated, validated on boot)
+/config/vidette.db                         # SQLite (WAL): events, users, tokens, push subscriptions
+/media/vidette/<camera>/events/<id>/snapshot.jpeg   # cached from Frigate
+/media/vidette/clips/<id>.mp4                       # fetched from Frigate on first request
 ```
 
 ## Network surface
@@ -100,18 +82,13 @@ Every queue is bounded; every drop is counted and visible in `/metrics` (M2) and
 | Port | What | Exposure guidance |
 |---|---|---|
 | 8642/tcp | Vidette UI + API | LAN or VPN only; TLS via your reverse proxy if exposed |
-| 1984/tcp | go2rtc admin API | localhost/compose network only — never publish |
-| 8554/tcp | go2rtc RTSP restreaming | optional, LAN only |
-| 8555/tcp+udp | go2rtc WebRTC | LAN; WebRTC handles NAT via ICE when proxied |
+| outbound | Frigate API (usually :5000) and the MQTT broker | compose network; never publish Frigate's port 5000 |
 
-Cameras should live on an isolated VLAN with no WAN egress; Vidette is their only client.
 Full guidance: [security-model.md](security-model.md).
 
 ## What Vidette deliberately is not
 
-- **Not a distributed system.** One node until M5's multi-node exploration; SQLite until a
-  real deployment proves it insufficient ([ADR-0008](adr/0008-database.md)).
-- **Not a home-automation hub.** HA/MQTT are first-class *integrations*, not something we
-  reimplement.
-- **Not a fork farm.** go2rtc, FFmpeg, ONNX Runtime, Apprise and community bridge projects
-  are consumed as upstreams; we contribute fixes upstream instead of vendoring.
+- **Not an NVR** any more: no recording, decoding, detection or camera adapters on this line.
+- **Not a distributed system**: one process, SQLite until a real deployment proves it
+  insufficient.
+- **Not a home-automation hub**: Home Assistant and MQTT are integrations.

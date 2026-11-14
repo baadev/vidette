@@ -222,6 +222,7 @@ footer a:hover {
   max-width: 44rem;
   margin: 0 auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr); /* long paths and code wrap instead of widening */
   gap: 1.25rem;
 }
 
@@ -366,4 +367,170 @@ button.ghost:hover:not(:disabled) {
 .login-card .error {
   margin: 0 0 0.75rem;
   font-size: 0.9rem;
+}
+
+/* --- verdicts: the VLM backend switch (docs/vlm.md) ------------------------------------ */
+
+.verdicts-lead {
+  margin: 0 0 0.9rem;
+}
+
+.vlm-choices {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.vlm-choice {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.vlm-choice input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.vlm-choice:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.vlm-choice:hover:not(.unavailable) {
+  border-color: var(--muted);
+}
+
+.vlm-choice.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.vlm-choice.pending {
+  border-color: var(--danger);
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.vlm-choice.unavailable {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.vlm-choice-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.vlm-choice-label {
+  font-weight: 600;
+}
+
+.vlm-choice-model,
+.vlm-choice-endpoint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.vlm-choice-endpoint {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+.vlm-privacy {
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.vlm-privacy.cloud {
+  color: var(--accent);
+}
+
+.vlm-choice-usage,
+.vlm-choice-reason {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.vlm-confirm {
+  margin-top: 0.9rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: rgba(229, 83, 75, 0.08);
+}
+
+.vlm-confirm p {
+  margin: 0 0 0.75rem;
+  font-size: 0.92rem;
+}
+
+.vlm-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.vlm-status {
+  margin: 0.9rem 0 0.25rem;
+}
+
+.vlm-source {
+  margin: 0;
+}
+
+.dot.idle {
+  background: var(--muted);
+}
+
+.source-line code.path {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 40rem) {
+  .vlm-choices {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Phones: the header must fit without sideways scrolling. */
+@media (max-width: 30rem) {
+  .app-header {
+    gap: 0.6rem;
+    padding: 0 0.75rem;
+  }
+
+  .app-header .wordmark-small {
+    letter-spacing: 0.2em;
+  }
+
+  .tab {
+    padding: 0 0.45rem;
+  }
+
+  .tabs {
+    gap: 0;
+  }
+
+  .session-user {
+    display: none;
+  }
+
+  .session button.ghost {
+    padding: 0.3rem 0.55rem;
+  }
+
+  .session button {
+    white-space: nowrap;
+  }
 }

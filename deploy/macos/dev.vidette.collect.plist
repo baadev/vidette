@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for `vidette collect` on a Mac (docs/collect.md).
+
+  Fill in the three placeholders, then load it:
+
+    sed -e "s|__VIDETTE__|$HOME/development/vidette/server/.venv/bin/vidette|" \
+        -e "s|__DATASET__|$HOME/vidette-data/front-door|" \
+        -e "s|__HOME__|$HOME|" \
+        deploy/macos/dev.vidette.collect.plist > ~/Library/LaunchAgents/dev.vidette.collect.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.vidette.collect.plist
+
+  Stop:   launchctl bootout gui/$(id -u)/dev.vidette.collect
+  Logs:   tail -f ~/Library/Logs/vidette-collect.log
+
+  The camera URL is NOT in this file: the collector reads ~/.config/vidette/rtsp-url
+  (chmod 600). keep-awake holds an idle-sleep assertion (caffeinate) while the collector
+  runs; a closed MacBook lid still sleeps the Mac. Drop that argument to allow sleep.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.vidette.collect</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VIDETTE__</string>
+    <string>collect</string>
+    <string>__DATASET__</string>
+    <string>--camera</string>
+    <string>front_door</string>
+    <string>--max-size</string>
+    <string>5GB</string>
+    <string>--min-free</string>
+    <string>10GB</string>
+    <string>--keep-awake</string>
+  </array>
+
+  <!-- launchd's PATH does not include Homebrew; ffmpeg and ffprobe live there. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart after a crash, not after a clean stop (SIGTERM from bootout exits 0). -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- A clean stop finishes the clip in progress (TEARDOWN, remux, frames). -->
+  <key>ExitTimeOut</key>
+  <integer>40</integer>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/vidette-collect.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/vidette-collect.log</string>
+</dict>
+</plist>

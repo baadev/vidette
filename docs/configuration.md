@@ -1,28 +1,32 @@
 # Configuration reference
 
 One YAML file: `/config/vidette.yaml`. The schema is executable
-(`server/vidette/core/config.py`, pydantic) and this page mirrors it — a test keeps the
+(`server/vidette/core/config.py`, pydantic) and this page mirrors it. A test keeps the
 [annotated example](../deploy/config.example.yaml) valid against the schema, so example, code
 and docs cannot drift apart silently.
 
-**Validation is always available**, even for design-stage features:
+This page describes the v0.2 line (intent layer over Frigate,
+[ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md)). The v0.1 NVR schema
+(`cameras:`, retention, detector, zones) lives at tag `nvr-core`; a v0.1 config fails
+validation on v0.2 with a message that says so.
+
+**Validation is always available:**
 
 ```bash
 vidette validate /config/vidette.yaml          # CLI (inside the container or `uv run`)
 POST /api/v1/config/validate                   # API
 ```
 
-Output separates **errors** (config cannot load) from **warnings** — including a warning for
-every configured feature that is still 📐 design-stage, with its milestone. The config never
-silently lies about what will happen.
+Output separates **errors** (the config cannot load) from **warnings**, including one for
+every configured feature that does not work yet. The config never silently lies about what
+will happen.
 
 ## Conventions
 
-- Keys are `snake_case`.
-- Durations: `"90s"`, `"30m"`, `"12h"`, `"3d"`, or `"forever"`.
-- Secrets are env references: `${VAR}` (strict — unset vars are an error listing every
+- Keys are `snake_case`. Unknown keys are errors, not silent no-ops.
+- Secrets are env references: `${VAR}` (strict: unset variables are an error listing every
   missing name). Never put literal secrets in the file.
-- Zone points are normalized `[x, y]` in `0.0–1.0` — resolution-independent.
+- Camera names are Frigate's camera keys (`back_yard`), not their `friendly_name`.
 
 ## `server`
 
@@ -33,9 +37,6 @@ server:
   base_url: null          # public URL used in notification links, e.g. https://vidette.example.com
   auth:
     mode: builtin         # builtin | none  (none = kiosk LANs only; loud permanent warning)
-  webrtc_candidates: []   # e.g. ["192.168.1.20:8555"] — your host's LAN address for direct
-                          # (sub-second) WebRTC. Optional: without it, live view falls back
-                          # to MSE over WebSocket automatically. Env: VIDETTE_WEBRTC_CANDIDATES
 ```
 
 No credentials live here: the first run forces admin creation
@@ -45,126 +46,121 @@ No credentials live here: the first run forces admin creation
 
 ```yaml
 storage:
-  media_dir: /media/vidette
+  media_dir: /media/vidette   # snapshots and clips cached from Frigate for Vidette's events
   database: /config/vidette.db
-  retention:              # per-class; per-camera overridable
-    continuous: 3d
-    motion: 14d
-    events: 90d
-    favorites: forever
-  compaction:             # 📐 M3 — archive re-encode of cold continuous footage
-    enabled: false
-    after: 7d
-    codec: hevc           # hevc | av1
-  offsite:                # 📐 M3 — S3-compatible event backup
-    enabled: false
 ```
 
-Semantics: [storage design](architecture/storage.md).
+Vidette records nothing. `media_dir` holds one snapshot per event and clips fetched on
+request. Nothing prunes it yet; snapshots add tens of kilobytes per event, clips more.
 
-## `cameras`
+## `frigate`
 
 ```yaml
-cameras:
-  front-door:                     # id: [a-z0-9-], stable, used in URLs/topics
-    adapter: rtsp                 # rtsp (✅) | onvif (📐 M1) — Eufy uses rtsp via NAS (RTSP)
-    name: "Front door"            # display name; defaults to id
-    source:                       # adapter-specific for bridge adapters (see their docs)
-      main: rtsp://user:${CAM_PASSWORD}@10.0.20.11:554/stream1
-      sub:  rtsp://user:${CAM_PASSWORD}@10.0.20.11:554/stream2
-    options: {}                   # adapter-specific extras (reserved for bridge adapters)
-    power_profile: mains          # mains (default) | battery — see below
-    record:
-      mode: continuous            # continuous | motion | events | off
-      retention: null             # override global storage.retention for this camera
-    detect:
-      enabled: true
-      fps: 5                      # Tier 1 cadence during motion
-      resolution: 720             # analysis substream height
-    understand: true              # eligible for Tier 3 (VLM) promotion
-    zones:
-      door:   { kind: entry,  points: [[0.42, 0.31], [0.58, 0.31], [0.58, 0.78], [0.42, 0.78]] }
-      street: { kind: public, points: [[0.0, 0.8], [1.0, 0.8], [1.0, 1.0], [0.0, 1.0]] }
+frigate:
+  url: http://frigate:5000        # Frigate's internal API port (required)
+  mqtt:                           # the broker Frigate publishes to (required)
+    host: mqtt
+    port: 1883
+    username: null
+    password: null                # ${FRIGATE_MQTT_PASSWORD}
+    topic_prefix: frigate         # Frigate's mqtt.topic_prefix
+  cameras: all                    # or a list of Frigate camera keys
+  severities: [alert, detection]  # which review severities become incidents
+  tracked_objects: true           # also read <prefix>/events
 ```
 
-Zone kinds and their semantics (`entry`, `object`, `private`, `public`) are defined in the
-[cascade doc](architecture/ai-pipeline.md#tier-2--trajectory-geometry). Draw them in the
-web app's zone editor: for UI-managed cameras it saves directly; for file-defined cameras it
-produces a YAML snippet to paste here — Vidette never rewrites your config file.
+Without this section (and without `clip_folders`) Vidette starts, warns, and receives
+nothing. Supported Frigate versions, what to enable in Frigate and network layouts:
+[frigate.md](frigate.md).
 
-### `power_profile`: mains vs battery
+## `clip_folders`
 
-`mains` (default) treats the camera as always available: Vidette holds one **keep-warm
-connection** open through the gateway so live view attaches instantly, single-RTSP-client
-cameras (Eufy) never see connection churn, and any failure is retried within 30 s.
+```yaml
+clip_folders:                     # incidents from folders of finished clips (ADR-0010)
+  - path: /clips/front-door       # required; read-only is enough
+    camera: camera                # event camera when a clip has no vidette-collect sidecar
+    poll_every: 10s               # scan interval, at least 1s
+    settle: 5s                    # a file must be unchanged this long before it is read
+    backfill: false               # true: clips present on the first start count too
+```
 
-`battery` is the opt-in for cameras that sleep between events. No keep-warm connection —
-holding the stream open would keep the camera awake and drain it — and repeated failures
-back off up to 5 minutes (a sleeping camera that is reconnect-hammered every 45 s never
-sleeps; that loop drained a real S3 Pro and leaked gateway sessions). The camera card says
-"probably sleeping" instead of pretending the camera is broken; recording resumes
-automatically when it answers. Expect live view to take a few seconds while the camera
-wakes — that part is physics, not configuration.
-
-### Cameras from the UI (managed cameras)
-
-Cameras created on the web app's **Cameras** page live in the database, not in this file.
-The merge rules, chosen so both audiences win:
-
-- This YAML file is the infrastructure-as-code source of truth — the UI **never edits it**.
-- UI-managed cameras are merged in at boot and hot-applied on change (capture restarts for
-  a few seconds when the camera set changes).
-- An id defined in both places resolves to the file, with a loud warning; delete the UI
-  copy to silence it.
-- `GET /api/v1/config/cameras` shows every camera with its origin (`file` / `managed`).
+For cameras Frigate cannot use, such as a battery camera collected with `vidette collect`.
+Each clip is one incident; details and limits: [clip-folders.md](clip-folders.md).
 
 ## `understanding`
 
 ```yaml
 understanding:
-  detector:
-    model: auto                   # auto picks by hardware; or explicit model id
-    hardware: auto                # auto | cpu | cuda | openvino | coreml | hailo | coral
-  tracker:
-    engine: bytetrack
-  vlm:                            # 📐 M3
-    provider: none                # none | ollama | llama-cpp | openai | anthropic | google
-    model: null                   # e.g. qwen2.5-vl:7b
-    base_url: null                # e.g. http://ollama:11434
-    api_key: null                 # cloud providers: ${PROVIDER_KEY}
-    max_calls_per_minute: 6       # hard budget; overflow degrades to Tier 2 alerts
-    send: keyframes               # keyframes | crops — what leaves the box for cloud providers
-  faces:                          # 📐 M4 — trusted-faces suppression, opt-in & local-only
-    enabled: false                # enrollment happens in the UI; biometrics never live in YAML
-    min_confidence: 0.8           # below this, a match never suppresses (fail toward alerting)
-  embeddings:                     # 📐 M3 — semantic search
-    enabled: false
-    model: siglip2-base
+  vlm:                            # the VLM judge: docs/vlm.md
+    backend: none                 # none | local | cloud; the System page can switch it
+    frames_per_call: 4            # 1 to 8
+    local:                        # an OpenAI-compatible server you run (Ollama default)
+      base_url: http://localhost:11434/v1
+      model: qwen2.5vl:7b
+      api_key: null
+      timeout_s: 120
+      max_calls_per_day: 2000     # hard budget: the judge abstains past it
+      max_calls_per_minute: 20
+      max_output_tokens: 400
+      max_image_side: 768         # frames are shrunk to this before sending
+      prices: {}                  # usd_per_mtok_in/out, usd_per_image, usd_per_call
+    cloud:                        # optional; choosing it sends camera frames to the vendor
+      preset: openai              # openai | gemini | openrouter | custom (+ base_url)
+      base_url: null              # default from the preset
+      model: null                 # default from the preset
+      api_key: ${OPENAI_API_KEY}  # required, always a ${VAR}
+      timeout_s: 45
+      max_calls_per_day: 200
+      max_calls_per_minute: 10
+      prices: {}                  # set them, or cost reports say "unknown"
 ```
 
-Trusted-faces guardrails (suppression-only, local-only, fail-toward-alerting) are product
-promises — see the [FAQ](faq.md#what-about-face-recognition) and
-[cascade design](architecture/ai-pipeline.md#trusted-faces-suppression--m4).
+The v0.1 keys `provider` and `send` are rejected with a pointer here. `vidette validate`
+warns when a cloud section exists (frames would go to that vendor when it is selected)
+and when its prices are missing.
 
 ## `policies`
 
 ```yaml
 policies:
-  - name: entry-interest
-    description: >
-      Alert when a person shows interest in entering: approaching the door, lingering,
-      touching the door or windows, peering in. Ignore pass-through pedestrians and
-      routine deliveries.
-    cameras: [front-door]         # or "all"
+  - name: entry-interest          # [a-z0-9-], unique
+    description: >                # plain language: what should alert and what should not
+      Alert when a person shows interest in getting in: tries the door handle, lingers at
+      the door or windows, peers inside. Ignore people passing by on the street, couriers
+      dropping off a parcel, cats and car headlights.
+    cameras: all                  # or Frigate camera keys; must be in frigate.cameras when
+                                  # that is an explicit list
     sensitivity: balanced         # relaxed | balanced | paranoid
-    ignore_trusted: true          # default: skip alerts for enrolled trusted faces (M4)
     actions: [notify]
+    known_people: judge           # judge | quiet (with people.enabled; docs/people.md)
 ```
 
-`description` is the plain-language policy (Tier 4, 📐 M4). Until M4, policies fall back to
-their geometric skeleton (zone + trigger heuristics per sensitivity preset) — configuring
-them early is not a no-op, and `vidette validate` tells you exactly which interpretation is
-active.
+`known_people: quiet` tells the judge that people the local face check recognized as
+known never need an alert by themselves; anyone else is judged as usual. `vidette
+validate` warns when it is set while `people.enabled` is false.
+
+## `people`
+
+Known people: local face recognition for people who agreed to be enrolled
+([people.md](people.md), [ADR-0012](architecture/adr/0012-known-people.md)). Needs
+`pip install 'vidette[people]'` and the model files (`vidette people models`).
+
+```yaml
+people:
+  enabled: false                  # opt-in
+  dir: ~/vidette-data/people      # default $VIDETTE_DATA/people, else ~/vidette-data/people;
+                                  # refused inside a git work tree
+  models_dir: ~/.cache/vidette/models   # default; serve never downloads, the CLI does
+  threshold: 0.4                  # SFace cosine similarity for a match (0.2 to 0.95)
+  min_face_px: 40                 # smaller faces are "unclear", never "unknown"
+  frames_per_second: 2            # sampled from each clip at full resolution
+  max_frames: 24
+  max_faces_per_person: 60
+```
+
+Policies are stored and validated today but **not evaluated**: incidents become
+`observed` events and nothing is notified until the verdict worker lands (week 2). Measure
+a policy offline before trusting it: [eval.md](eval.md).
 
 ## `notifications`
 
@@ -185,16 +181,17 @@ notifications:
       channels: [hooks]
 ```
 
-Full delivery contract and signature verification:
+`event.observed` (an incident without a verdict) never reaches a channel, even under
+`when: event.*`. Delivery contract and signature verification:
 [events-and-automations.md](events-and-automations.md).
 
 ## `integrations`
 
 ```yaml
 integrations:
-  mqtt:
+  mqtt:                           # Vidette's own outbound MQTT
     enabled: false
-    host: mqtt.local
+    host: mqtt
     port: 1883
     username: null
     password: null                # ${MQTT_PASSWORD}
@@ -202,25 +199,22 @@ integrations:
     discovery: true               # Home Assistant MQTT discovery
 ```
 
-## Environment variables
+This is separate from `frigate.mqtt` on purpose, even when both point at the same broker.
+Discovery announces the cameras in `frigate.cameras` on connect; with `cameras: all`, each
+camera is announced the first time an event for it arrives.
 
-Deployment-level knobs live in the environment, not the YAML (they describe *where things
-run*, not *what to do*):
+## Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VIDETTE_CONFIG` | `/config/vidette.yaml` | config file path (missing file → wizard mode) |
-| `VIDETTE_GO2RTC_URL` | `http://go2rtc:1984` | gateway admin API (compose-internal) |
-| `VIDETTE_GO2RTC_RTSP` | `rtsp://go2rtc:8554` | gateway restream base the recorder reads from |
-| `VIDETTE_GO2RTC_CONF` | next to the database | where the generated go2rtc config is written |
+| `VIDETTE_CONFIG` | `/config/vidette.yaml` | config file path (missing file: starts with defaults and a warning) |
 | `VIDETTE_WEB_DIST` | `/app/web-dist` | built web app directory |
 
 ## `telemetry`
 
 ```yaml
 telemetry:
-  enabled: false                  # default; and there is nothing it would send today anyway
+  enabled: false                  # default; and there is nothing it would send anyway
 ```
 
-Exists so the promise is visible in the schema. If opt-in stats ever ship, the exact payload
-will be documented here and readable in the source first.
+Exists so the promise is visible in the schema.

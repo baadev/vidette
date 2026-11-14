@@ -1,5 +1,11 @@
 # The understanding cascade
 
+> **v0.2 note (2026-11-14).** Tiers 0 to 2 (motion, detection, tracking and zones) are
+> no longer Vidette's: Frigate runs them, and their v0.1 implementation is frozen at tag
+> `nvr-core` ([ADR-0009](adr/0009-intent-layer-over-frigate.md)). Tiers 3 and 4 below (VLM
+> verdict, plain-language policy) remain the plan for week 2 of v0.2; the evaluation they
+> call for now exists as `vidette eval` ([docs/eval.md](../eval.md)).
+
 > **Status: 📐 designed.** Tiers 0–2 land in M2, Tier 3 in M3, Tier 4 in M4. Protocols are
 > implemented and typed in `server/vidette/pipeline/base.py`. All numbers below are **design
 > targets**, not measurements; the M2 milestone ships a public reference clip set and an

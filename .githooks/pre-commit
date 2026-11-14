@@ -1,0 +1,17 @@
+#!/bin/sh
+# Installed by `make hooks` (git config core.hooksPath .githooks). Refuses a commit that
+# would publish credentials, a real LAN address, a face image or footage. See
+# .github/scripts/privacy_check.py; bypass only for a reviewed false positive with
+# `git commit --no-verify`.
+set -e
+root=$(git rev-parse --show-toplevel)
+files=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -n "$files" ]; then
+  # shellcheck disable=SC2086
+  (cd "$root" && python3 .github/scripts/privacy_check.py $files)
+fi
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --staged --redact --no-banner --config "$root/.gitleaks.toml" "$root"
+else
+  echo "pre-commit: gitleaks not installed, secret scan skipped (CI runs it)" >&2
+fi

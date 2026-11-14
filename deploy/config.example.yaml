@@ -1,12 +1,11 @@
-# Vidette configuration — annotated example.
+# Vidette configuration: annotated example (v0.2, intent layer over Frigate).
 #
 # This file is executable documentation: a test in server/tests/test_config.py keeps it valid
 # against the schema, so it can never drift from the code. Reference: docs/configuration.md.
 #
 # Conventions:
-#   - durations: "90s" "30m" "12h" "3d" "forever"
-#   - secrets are ${ENV_VAR} references — never literals (unset vars fail validation, loudly)
-#   - zone points are normalized 0.0–1.0 → resolution-independent
+#   - secrets are ${ENV_VAR} references, never literals (unset vars fail validation, loudly)
+#   - camera names are Frigate's camera keys (back_yard), not their friendly_name
 #
 # Validate any time:  vidette validate /config/vidette.yaml
 
@@ -17,80 +16,67 @@ server:
     mode: builtin          # first run forces admin creation; no default credentials, ever
 
 storage:
-  media_dir: /media/vidette
+  media_dir: /media/vidette   # snapshots cached from Frigate for Vidette's events; no recordings
   database: /config/vidette.db
-  retention:               # per-class retention — not one global dial (docs/architecture/storage.md)
-    continuous: 3d
-    motion: 14d
-    events: 90d
-    favorites: forever
-  compaction:              # 📐 M3: re-encode cold footage to HEVC/AV1 during idle hours
-    enabled: false
-  offsite:                 # 📐 M3: S3-compatible backup of events + DB snapshot
-    enabled: false
 
-cameras:
-  # Any RTSP/ONVIF camera — Vidette's native tongue (docs/cameras/onvif-rtsp.md).
-  front-door:
-    adapter: rtsp
-    name: "Front door"
-    source:
-      main: rtsp://cam:${CAM_PASSWORD}@10.0.20.11:554/stream1
-      sub:  rtsp://cam:${CAM_PASSWORD}@10.0.20.11:554/stream2   # low-res twin — the AI decodes this one
-    power_profile: mains   # mains (default): stream held permanently open, instant live view,
-                           # fast retries. battery: opt-in for cameras that sleep between
-                           # events — no keep-warm, failures back off up to 5 min.
-    record:
-      mode: continuous     # continuous | motion | events | off
-    detect:
-      fps: 5
-    zones:
-      # entry: approach/dwell/touch here is high-signal
-      door:   { kind: entry,  points: [[0.42, 0.31], [0.58, 0.31], [0.58, 0.78], [0.42, 0.78]] }
-      # public: tracks that never leave this zone are suppressed — the passers-by killer
-      street: { kind: public, points: [[0.0, 0.8], [1.0, 0.8], [1.0, 1.0], [0.0, 1.0]] }
+# Where incidents come from (docs/frigate.md). Vidette opens no camera connection itself.
+frigate:
+  url: http://frigate:5000    # Frigate's internal API port on the compose network
+  mqtt:                       # the broker Frigate publishes to (Frigate's own `mqtt:` section)
+    host: mqtt
+    port: 1883
+    username: vidette
+    password: ${FRIGATE_MQTT_PASSWORD}
+    topic_prefix: frigate     # Frigate's mqtt.topic_prefix
+  cameras: all                # or a list of Frigate camera keys: [front_door, back_yard]
+  severities: [alert, detection]
+  tracked_objects: true       # also read <prefix>/events (zones, stationary, scores per object)
 
-  # Eufy cameras: the ONLY integration path is the camera's built-in NAS (RTSP) feature,
-  # available on supported models (Eufy app → camera → Settings → General → Storage →
-  # NAS (RTSP)). No bridge, no cloud — it's a plain RTSP source. Eufy serves exactly ONE
-  # RTSP client at a time — Vidette funnels everything through its single gateway
-  # connection, so don't point VLC/another NVR at the camera too. Details, supported-model
-  # notes and battery caveats: docs/cameras/eufy.md.
-  backyard:
-    adapter: rtsp
-    name: "Backyard (eufyCam via NAS/RTSP)"
-    power_profile: battery # battery Eufys sleep between events — let them
-    source:
-      main: rtsp://user:${EUFY_RTSP_PASSWORD}@10.0.20.30/live0
+# Or (and): folders of finished clips, for cameras Frigate cannot use, such as a battery
+# camera collected with `vidette collect` (docs/clip-folders.md, ADR-0010).
+# clip_folders:
+#   - path: /clips/front-door   # mount it read-only into the container
+#     camera: front_door        # used when a clip has no vidette-collect sidecar
+#     poll_every: 10s
+#     settle: 5s                # unchanged this long before it is read (uploads)
 
 understanding:
-  detector:
-    model: auto            # picked by hardware (docs/architecture/ai-pipeline.md#tier-1--detection)
-    hardware: auto         # auto | cpu | cuda | openvino | coreml | hailo | coral
-  vlm:                     # 📐 M3 — scene reasoning; local-first
-    provider: none         # switch to `ollama` + model: qwen2.5-vl:7b with the compose vlm profile
-  faces:                   # 📐 M4 — trusted faces: suppress alerts caused by your household.
-    enabled: false         # Local-only; enrollment via the UI — biometrics never live in YAML.
-  embeddings:
-    enabled: false         # 📐 M3 — semantic search over events
+  vlm:                     # the VLM judge (docs/vlm.md); one OpenAI-compatible client
+    backend: none          # none | local | cloud; the System page can switch it
+    frames_per_call: 4
+    local:                 # Ollama by default: frames never leave your network
+      base_url: http://localhost:11434/v1   # in Docker: http://host.docker.internal:11434/v1
+      model: qwen2.5vl:7b
+    # cloud:               # opt-in: choosing it sends camera frames to the vendor
+    #   preset: openai     # openai | gemini | openrouter | custom (+ base_url)
+    #   model: gpt-4.1-mini
+    #   api_key: ${OPENAI_API_KEY}
+    #   max_calls_per_day: 200
+    #   prices: {usd_per_mtok_in: 0, usd_per_mtok_out: 0}   # yours, for cost reports
 
 policies:
-  # 📐 M4 north star: plain language, compiled to an inspectable spec you approve.
-  # Until M4 the geometric skeleton applies (zones + sensitivity presets, M2).
+  # Plain language. Stored today, judged from week 2 of the v0.2 plan; measure a policy
+  # offline first with `vidette eval` (docs/eval.md).
   - name: entry-interest
     description: >
-      Alert when a person shows interest in entering: approaching the door, lingering,
-      touching the door or windows, peering in. Ignore pass-through pedestrians and
-      routine deliveries.
-    cameras: [front-door]
+      Alert when a person shows interest in getting in: tries the door handle, lingers at
+      the door or windows, peers inside. Ignore people passing by on the street, couriers
+      dropping off a parcel, cats and car headlights.
+    cameras: all
     sensitivity: balanced  # relaxed | balanced | paranoid
-    # ignore_trusted: true # default — don't alert on enrolled trusted faces (M4)
     actions: [notify]
+    known_people: judge    # judge | quiet: known people never need an alert (docs/people.md)
+
+# people:                  # known people: local face recognition, opt-in (docs/people.md)
+#   enabled: true          # needs `pip install 'vidette[people]'` and `vidette people models`
+#   dir: /config/people    # biometric data: outside any git repository, owner-only
+#   threshold: 0.4
+#   min_face_px: 40
 
 notifications:
   channels:
     push:
-      kind: webpush        # PWA push — no vendor cloud between camera and phone
+      kind: webpush        # PWA push, no vendor cloud between camera and phone
     telegram:
       kind: apprise        # one Apprise URL = Telegram/Discord/Slack/ntfy/… (100+ services)
       url: "tgram://${TG_BOT_TOKEN}/${TG_CHAT_ID}"
@@ -100,15 +86,15 @@ notifications:
       secret: ${VIDETTE_WEBHOOK_SECRET}
       include: [summary, snapshot_url, clip_url]
   rules:
-    - when: event.confirmed
+    - when: event.confirmed  # nothing is confirmed until verdicts land (v0.2, week 2)
       channels: [push, telegram, hooks]
-    - when: system.*       # disk pressure, camera offline, recorder gaps — it snitches on itself
+    - when: system.*         # Frigate unreachable, broker down: it snitches on itself
       channels: [hooks]
 
 integrations:
-  mqtt:
-    enabled: false         # 📐 M2 — Home Assistant discovery included
-    # host: mqtt.local
+  mqtt:                    # Vidette's own outbound MQTT (verdict events, HA discovery)
+    enabled: false
+    # host: mqtt
     # username: vidette
     # password: ${MQTT_PASSWORD}
 

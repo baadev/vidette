@@ -310,6 +310,28 @@ async def test_dispatcher_routes_matching_topics_only() -> None:
         await dispatcher.stop()
 
 
+async def test_observed_events_never_notify_even_under_a_wildcard_rule() -> None:
+    """ADR-0009: an incident without a verdict must not reach a phone."""
+    received: list[httpx.Request] = []
+    bus = InProcessEventBus()
+    dispatcher = NotificationDispatcher(
+        dispatcher_config(rules=[{"when": "event.*", "channels": ["hooks"]}]),
+        bus,
+        emit=EmitRecorder(),
+        notifiers={"webhook": WebhookNotifier(transport=recording_transport(received))},
+    )
+    dispatcher.start()
+    try:
+        await bus.publish("event.observed", {**PAYLOAD, "event": "event.observed"})
+        await bus.publish("event.confirmed", dict(PAYLOAD))
+        await wait_for(lambda: len(received) == 1)
+        await asyncio.sleep(0.05)
+        assert len(received) == 1
+        assert json.loads(received[0].content)["event"] == "event.confirmed"
+    finally:
+        await dispatcher.stop()
+
+
 async def test_dispatcher_rewrites_relative_media_to_base_url() -> None:
     received: list[httpx.Request] = []
     bus = InProcessEventBus()

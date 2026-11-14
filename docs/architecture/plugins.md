@@ -1,5 +1,10 @@
 # Plugin architecture
 
+> **Frozen (v0.1 NVR core).** This page describes code that lives at tag `nvr-core`
+> and is not part of the `v0.2` line, where Frigate does this job
+> ([ADR-0009](adr/0009-intent-layer-over-frigate.md)). It stays as a record, linked from the
+> ADRs and useful as field notes for Frigate users; it is not maintained.
+
 > **Status:** adapter SDK interfaces ✅ (typed, in `server/vidette/adapters/base.py`);
 > runtime loading 📐 M1–M2; third-party registry 📐 M5. Rationale: [ADR-0005](adr/0005-plugin-model.md).
 

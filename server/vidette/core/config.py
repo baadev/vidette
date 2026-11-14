@@ -13,18 +13,16 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from datetime import timedelta
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Literal
 
 import yaml
 from pydantic import (
     BaseModel,
-    BeforeValidator,
     ConfigDict,
     Field,
-    PlainSerializer,
     ValidationError,
     model_validator,
 )
@@ -32,47 +30,6 @@ from pydantic import (
 
 class ConfigError(Exception):
     """Configuration cannot be loaded; the message says what to fix."""
-
-
-# --- durations -------------------------------------------------------------------------------
-
-_DURATION_RE = re.compile(r"^(\d+)([smhd])$")
-_DURATION_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
-
-
-def parse_duration(value: object) -> timedelta | None:
-    """Parse '90s' / '30m' / '12h' / '3d' / 'forever' → timedelta (None means forever)."""
-    if value is None or isinstance(value, timedelta):
-        return value
-    if isinstance(value, str):
-        if value == "forever":
-            return None
-        match = _DURATION_RE.match(value)
-        if match:
-            amount, unit = match.groups()
-            return timedelta(**{_DURATION_UNITS[unit]: int(amount)})
-    raise ValueError(
-        f"invalid duration {value!r} — use e.g. '90s', '30m', '12h', '3d' or 'forever'"
-    )
-
-
-def format_duration(value: timedelta | None) -> str:
-    """Inverse of parse_duration — keeps model_dump(mode="json") round-trippable
-    (pydantic's default ISO-8601 'P3D' would be rejected on the way back in)."""
-    if value is None:
-        return "forever"
-    total = int(value.total_seconds())
-    for unit_seconds, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
-        if total >= unit_seconds and total % unit_seconds == 0:
-            return f"{total // unit_seconds}{suffix}"
-    return f"{total}s"
-
-
-Duration = Annotated[
-    timedelta | None,
-    BeforeValidator(parse_duration),
-    PlainSerializer(format_duration, when_used="json"),
-]
 
 
 # --- building blocks -------------------------------------------------------------------------
@@ -97,170 +54,285 @@ class ServerConfig(StrictModel):
     port: int = Field(default=8642, ge=1, le=65535)
     base_url: str | None = None
     auth: AuthConfig = AuthConfig()
-    # ICE candidates advertised by the WebRTC gateway, e.g. ["192.168.10.20:8555"].
-    # Inside a container go2rtc only knows its bridge/STUN addresses, which LAN browsers
-    # cannot reach — set your host's LAN IP here (or VIDETTE_WEBRTC_CANDIDATES) for direct
-    # WebRTC. Live view works without it: the player falls back to MSE over WebSocket.
-    webrtc_candidates: list[str] = Field(default_factory=list)
-
-
-class Retention(StrictModel):
-    continuous: Duration = timedelta(days=3)
-    motion: Duration = timedelta(days=14)
-    events: Duration = timedelta(days=90)
-    favorites: Duration = None  # forever
-
-
-class CompactionConfig(StrictModel):
-    enabled: bool = False
-    after: Duration = timedelta(days=7)
-    codec: Literal["hevc", "av1"] = "hevc"
-
-
-class OffsiteConfig(StrictModel):
-    enabled: bool = False
 
 
 class StorageConfig(StrictModel):
+    # Vidette records nothing (ADR-0009): media_dir only caches what it fetched from
+    # Frigate for its own events (snapshots, judged frames, clips on demand).
     media_dir: Path = Path("/media/vidette")
     database: Path = Path("/config/vidette.db")
-    retention: Retention = Retention()
-    compaction: CompactionConfig = CompactionConfig()
-    offsite: OffsiteConfig = OffsiteConfig()
 
 
-class ZoneKind(StrEnum):
-    entry = "entry"      # doors, gates, windows — approach/dwell/touch is high-signal
-    object = "object"    # protected things: wall equipment, bike, car
-    private = "private"  # yard, porch — presence notable, transit not
-    public = "public"    # street, sidewalk — tracks that never leave it are suppressed
+# Frigate camera names are its config keys: letters, digits, '_' and '-'.
+_FRIGATE_CAMERA_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-class Zone(StrictModel):
-    kind: ZoneKind
-    points: list[tuple[float, float]] = Field(min_length=3)
+def _check_camera_names(names: list[str], where: str) -> None:
+    for name in names:
+        if not _FRIGATE_CAMERA_RE.match(name):
+            raise ValueError(
+                f"{where}: camera '{name}' is not a valid Frigate camera name; use the "
+                "camera's key from Frigate's config (letters, digits, '_' and '-'), not its "
+                "friendly_name"
+            )
+
+
+class FrigateMqttConfig(StrictModel):
+    """The broker Frigate publishes to (Frigate's own `mqtt:` section)."""
+
+    host: str
+    port: int = Field(default=1883, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None  # reference it as ${FRIGATE_MQTT_PASSWORD}
+    topic_prefix: str = "frigate"  # Frigate's mqtt.topic_prefix
+
+
+class Severity(StrEnum):
+    alert = "alert"
+    detection = "detection"
+
+
+class FrigateConfig(StrictModel):
+    """Where Vidette reads incidents from (docs/frigate.md).
+
+    `url` is Frigate's HTTP API base, normally the internal unauthenticated port on the
+    compose network (`http://frigate:5000`). The authenticated port (8971) is not supported
+    yet.
+    """
+
+    url: str
+    mqtt: FrigateMqttConfig
+    cameras: list[str] | Literal["all"] = "all"
+    # Review severities that become incidents. Frigate marks a review `alert` when its
+    # alert rules match (by default person/car in any zone) and `detection` otherwise.
+    severities: list[Severity] = Field(
+        default_factory=lambda: [Severity.alert, Severity.detection], min_length=1
+    )
+    # Also subscribe to <prefix>/events (per tracked object: zones, stationary, scores).
+    tracked_objects: bool = True
 
     @model_validator(mode="after")
-    def _points_normalized(self) -> Zone:
-        for x, y in self.points:
-            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
-                raise ValueError(
-                    f"zone points must be normalized to 0.0–1.0, got ({x}, {y})"
-                )
+    def _check(self) -> FrigateConfig:
+        if not self.url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"frigate.url '{self.url}' must start with http:// or https://, e.g. "
+                "http://frigate:5000"
+            )
+        self.url = self.url.rstrip("/")
+        if self.cameras != "all":
+            _check_camera_names(self.cameras, "frigate.cameras")
         return self
 
 
-class RecordMode(StrEnum):
-    continuous = "continuous"
-    motion = "motion"
-    events = "events"
-    off = "off"
+def _duration(value: str, where: str) -> float:
+    from vidette.units import parse_duration
+
+    try:
+        return parse_duration(value)
+    except ValueError as exc:
+        raise ValueError(f"{where}: {exc}") from None
 
 
-class PowerProfile(StrEnum):
-    """How aggressively Vidette may hold on to and retry the camera's stream.
+class ClipFolderConfig(StrictModel):
+    """A folder of finished clips, read as incidents without Frigate (ADR-0010).
 
-    `mains` (default): the stream is kept permanently open on the server (instant live
-    view, one persistent connection — important for single-RTSP-client cameras like Eufy)
-    and failures are retried quickly.
-
-    `battery`: opt-in for battery cameras that sleep between events. No keep-warm
-    connection, and repeated stalls back off up to 5 minutes so the camera can actually
-    sleep instead of being reconnect-hammered awake (field case: Eufy S3 Pro drained by
-    a 45 s reconnect loop).
+    For cameras that cannot feed Frigate: a `vidette collect` dataset, or a folder a
+    camera uploads its motion clips to (FTP, SMB). One clip becomes one incident; a
+    `vidette collect` JSON sidecar next to it supplies the camera, times and key frames.
     """
 
-    mains = "mains"
-    battery = "battery"
+    path: Path
+    camera: str = "camera"  # event camera name when a clip has no sidecar
+    poll_every: str = "10s"
+    settle: str = "5s"  # a file must be unchanged this long (uploads in progress)
+    backfill: bool = False  # also turn clips that were there before the first start
+
+    @model_validator(mode="after")
+    def _check(self) -> ClipFolderConfig:
+        _check_camera_names([self.camera], "clip_folders.camera")
+        if _duration(self.poll_every, "clip_folders.poll_every") < 1:
+            raise ValueError("clip_folders.poll_every must be at least 1s")
+        _duration(self.settle, "clip_folders.settle")
+        return self
+
+    @property
+    def poll_every_s(self) -> float:
+        return _duration(self.poll_every, "poll_every")
+
+    @property
+    def settle_s(self) -> float:
+        return _duration(self.settle, "settle")
 
 
-class RecordConfig(StrictModel):
-    mode: RecordMode = RecordMode.continuous
-    retention: Retention | None = None  # None → global storage.retention
+class VlmBackend(StrEnum):
+    """Which model judges: none, the local one, or the cloud one (the user chooses)."""
 
-
-class DetectConfig(StrictModel):
-    enabled: bool = True
-    fps: float = Field(default=5.0, gt=0, le=30)
-    resolution: int = Field(default=720, ge=240, le=2160)
-
-
-class CameraSource(StrictModel):
-    main: str
-    sub: str | None = None
-
-
-class CameraConfig(StrictModel):
-    adapter: str = "rtsp"
-    name: str | None = None
-    source: CameraSource | None = None
-    options: dict[str, Any] = Field(default_factory=dict)  # adapter-specific, validated by adapter
-    power_profile: PowerProfile = PowerProfile.mains
-    record: RecordConfig = RecordConfig()
-    detect: DetectConfig = DetectConfig()
-    understand: bool = True
-    zones: dict[str, Zone] = Field(default_factory=dict)
-
-
-class Hardware(StrEnum):
-    auto = "auto"
-    cpu = "cpu"
-    cuda = "cuda"
-    openvino = "openvino"
-    coreml = "coreml"
-    hailo = "hailo"
-    coral = "coral"
-
-
-class DetectorConfig(StrictModel):
-    model: str = "auto"
-    hardware: Hardware = Hardware.auto
-
-
-class TrackerConfig(StrictModel):
-    engine: Literal["bytetrack"] = "bytetrack"
-
-
-class VlmProvider(StrEnum):
     none = "none"
-    ollama = "ollama"
-    llama_cpp = "llama-cpp"
+    local = "local"
+    cloud = "cloud"
+
+
+class CloudPreset(StrEnum):
     openai = "openai"
-    anthropic = "anthropic"
-    google = "google"
+    gemini = "gemini"  # Google Gemini's OpenAI-compatible endpoint
+    openrouter = "openrouter"
+    custom = "custom"  # any other OpenAI-compatible API: set base_url
+
+
+@dataclass(frozen=True)
+class PresetDefaults:
+    base_url: str
+    model: str
+    vendor: str  # who receives the frames, for the privacy line in the UI
+    token_param: str = "max_tokens"  # OpenAI's newer models want max_completion_tokens
+
+
+OLLAMA_URL = "http://localhost:11434/v1"
+
+# Model names are suggestions that existed when this was written; check your provider's
+# current list. Prices are never defaulted: a cost of $0 is printed as "price not set".
+CLOUD_PRESETS: dict[CloudPreset, PresetDefaults] = {
+    CloudPreset.openai: PresetDefaults(
+        "https://api.openai.com/v1", "gpt-4.1-mini", "OpenAI", "max_completion_tokens"
+    ),
+    CloudPreset.gemini: PresetDefaults(
+        "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash", "Google"
+    ),
+    CloudPreset.openrouter: PresetDefaults(
+        "https://openrouter.ai/api/v1", "google/gemini-2.5-flash", "OpenRouter"
+    ),
+}
+
+
+class VlmPrices(StrictModel):
+    """What one call costs, to report money next to accuracy. All default to 0."""
+
+    usd_per_mtok_in: float = Field(default=0.0, ge=0)  # per million input tokens
+    usd_per_mtok_out: float = Field(default=0.0, ge=0)
+    usd_per_image: float = Field(default=0.0, ge=0)  # for APIs that bill per image
+    usd_per_call: float = Field(default=0.0, ge=0)
+
+    @property
+    def is_set(self) -> bool:
+        return any(
+            (self.usd_per_mtok_in, self.usd_per_mtok_out, self.usd_per_image, self.usd_per_call)
+        )
+
+
+class LocalVlmConfig(StrictModel):
+    """An OpenAI-compatible server on your own hardware; Ollama by default."""
+
+    base_url: str = OLLAMA_URL  # in Docker: http://host.docker.internal:11434/v1
+    model: str = "qwen2.5vl:7b"
+    api_key: str | None = None  # Ollama needs none; llama.cpp/vLLM may
+    timeout_s: float = Field(default=120.0, gt=0)  # CPU inference with 4 images is slow
+    max_calls_per_day: int = Field(default=2000, ge=1)
+    max_calls_per_minute: int = Field(default=20, ge=1)
+    max_output_tokens: int = Field(default=400, ge=50)
+    max_image_side: int = Field(default=768, ge=128, le=2048)
+    prices: VlmPrices = VlmPrices()
+
+    @model_validator(mode="after")
+    def _check(self) -> LocalVlmConfig:
+        _check_http_url(self.base_url, "understanding.vlm.local.base_url")
+        self.base_url = self.base_url.rstrip("/")
+        return self
+
+
+class CloudVlmConfig(StrictModel):
+    """A hosted OpenAI-compatible API. Choosing it sends camera frames to that vendor."""
+
+    preset: CloudPreset = CloudPreset.openai
+    base_url: str | None = None  # default from the preset; required for custom
+    model: str | None = None  # default from the preset
+    api_key: str  # ${OPENAI_API_KEY}, ${GEMINI_API_KEY}, ${OPENROUTER_API_KEY}; never a literal
+    timeout_s: float = Field(default=45.0, gt=0)
+    max_calls_per_day: int = Field(default=200, ge=1)
+    max_calls_per_minute: int = Field(default=10, ge=1)
+    max_output_tokens: int = Field(default=400, ge=50)
+    max_image_side: int = Field(default=768, ge=128, le=2048)
+    prices: VlmPrices = VlmPrices()
+
+    @model_validator(mode="after")
+    def _check(self) -> CloudVlmConfig:
+        if self.preset is CloudPreset.custom and not self.base_url:
+            raise ValueError("understanding.vlm.cloud: preset custom requires base_url")
+        if self.base_url is not None:
+            _check_http_url(self.base_url, "understanding.vlm.cloud.base_url")
+            self.base_url = self.base_url.rstrip("/")
+        if not self.api_key.strip():
+            raise ValueError("understanding.vlm.cloud.api_key is empty")
+        return self
+
+    @property
+    def resolved_base_url(self) -> str:
+        if self.base_url:
+            return self.base_url
+        return CLOUD_PRESETS[self.preset].base_url
+
+    @property
+    def resolved_model(self) -> str:
+        if self.model:
+            return self.model
+        if self.preset is CloudPreset.custom:
+            raise ValueError("understanding.vlm.cloud: preset custom requires model")
+        return CLOUD_PRESETS[self.preset].model
+
+    @property
+    def vendor(self) -> str:
+        if self.preset is CloudPreset.custom:
+            return "a custom provider"
+        return CLOUD_PRESETS[self.preset].vendor
+
+    @property
+    def token_param(self) -> str:
+        if self.preset is CloudPreset.custom:
+            return "max_tokens"
+        return CLOUD_PRESETS[self.preset].token_param
+
+
+def _check_http_url(url: str, where: str) -> None:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"{where} '{url}' must start with http:// or https://")
 
 
 class VlmConfig(StrictModel):
-    provider: VlmProvider = VlmProvider.none
-    model: str | None = None
-    base_url: str | None = None
-    api_key: str | None = None  # reference it as ${PROVIDER_KEY}; never a literal
-    max_calls_per_minute: int = Field(default=6, ge=1)
-    send: Literal["keyframes", "crops"] = "keyframes"
+    """The VLM judge (docs/vlm.md): one OpenAI-compatible client, two backends.
 
-
-class EmbeddingsConfig(StrictModel):
-    enabled: bool = False
-    model: str = "siglip2-base"
-
-
-class FacesConfig(StrictModel):
-    """Trusted-faces suppression (M4) — opt-in, local-only; guardrails in docs/faq.md.
-
-    Enrollment (photos → local embeddings) happens in the UI; biometrics never live in YAML.
-    An uncertain match never suppresses — the system fails toward alerting.
+    `backend` is the default choice; the System page can switch it, and that choice is
+    stored in the database and wins until changed again.
     """
 
-    enabled: bool = False
-    min_confidence: float = Field(default=0.8, ge=0.5, le=1.0)
+    backend: VlmBackend = VlmBackend.none
+    frames_per_call: int = Field(default=4, ge=1, le=8)
+    local: LocalVlmConfig = LocalVlmConfig()
+    cloud: CloudVlmConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _v01_keys(cls, data: object) -> object:
+        if isinstance(data, dict) and ("provider" in data or "send" in data):
+            raise ValueError(
+                "understanding.vlm.provider/send were replaced in v0.2: use backend: "
+                "none | local | cloud, with a local: (Ollama) and/or cloud: section "
+                "(docs/vlm.md)"
+            )
+        return data
+
+    @model_validator(mode="after")
+    def _check(self) -> VlmConfig:
+        if self.backend is VlmBackend.cloud and self.cloud is None:
+            raise ValueError(
+                "understanding.vlm.backend is cloud but there is no cloud: section; add one "
+                "with preset, model and api_key (docs/vlm.md)"
+            )
+        if self.cloud is not None:
+            self.cloud.resolved_model  # noqa: B018 - raises for custom without a model
+        return self
 
 
 class UnderstandingConfig(StrictModel):
-    detector: DetectorConfig = DetectorConfig()
-    tracker: TrackerConfig = TrackerConfig()
     vlm: VlmConfig = VlmConfig()
-    faces: FacesConfig = FacesConfig()
-    embeddings: EmbeddingsConfig = EmbeddingsConfig()
 
 
 class Sensitivity(StrEnum):
@@ -272,11 +344,41 @@ class Sensitivity(StrEnum):
 class PolicyConfig(StrictModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     description: str
-    cameras: list[str] | Literal["all"] = "all"
+    cameras: list[str] | Literal["all"] = "all"  # Frigate camera names
     sensitivity: Sensitivity = Sensitivity.balanced
-    # Skip alerts for tracks confidently matched to trusted faces (understanding.faces, M4).
-    ignore_trusted: bool = True
     actions: list[str] = Field(default_factory=lambda: ["notify"])
+    # With people: enabled, "quiet" tells the judge that people recognized as known never
+    # need an alert by themselves; "judge" only reports who was seen (docs/people.md).
+    known_people: Literal["judge", "quiet"] = "judge"
+
+
+def _default_people_dir() -> Path:
+    base = os.environ.get("VIDETTE_DATA")
+    return (Path(base) if base else Path("~/vidette-data")).expanduser() / "people"
+
+
+class PeopleConfig(StrictModel):
+    """Known people (docs/people.md, ADR-0012): local face recognition, opt-in.
+
+    Needs `pip install 'vidette[people]'` and the two model files (`vidette people
+    models`). The folder holds biometric data: it must be outside any git repository and
+    is kept readable by its owner only."""
+
+    enabled: bool = False
+    dir: Path = Field(default_factory=_default_people_dir)
+    models_dir: Path | None = None  # default ~/.cache/vidette/models
+    threshold: float = Field(default=0.4, ge=0.2, le=0.95)  # SFace cosine similarity
+    min_face_px: int = Field(default=40, ge=16, le=400)  # smaller faces are "unclear"
+    frames_per_second: float = Field(default=2.0, gt=0, le=10)  # sampled from each clip
+    max_frames: int = Field(default=24, ge=1, le=120)
+    max_faces_per_person: int = Field(default=60, ge=5, le=500)
+
+    @model_validator(mode="after")
+    def _expand(self) -> PeopleConfig:
+        self.dir = self.dir.expanduser()
+        if self.models_dir is not None:
+            self.models_dir = self.models_dir.expanduser()
+        return self
 
 
 class ChannelKind(StrEnum):
@@ -317,6 +419,9 @@ class NotificationsConfig(StrictModel):
 
 
 class MqttConfig(StrictModel):
+    """Vidette's own outbound MQTT (verdict events, HA discovery). May be the same broker
+    Frigate uses; it is configured separately on purpose."""
+
     enabled: bool = False
     host: str | None = None
     port: int = Field(default=1883, ge=1, le=65535)
@@ -341,34 +446,51 @@ class TelemetryConfig(StrictModel):
     enabled: bool = False
 
 
-_CAMERA_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-
 class VidetteConfig(StrictModel):
     server: ServerConfig = ServerConfig()
     storage: StorageConfig = StorageConfig()
-    cameras: dict[str, CameraConfig] = Field(default_factory=dict)
+    frigate: FrigateConfig | None = None
+    clip_folders: list[ClipFolderConfig] = Field(default_factory=list)
     understanding: UnderstandingConfig = UnderstandingConfig()
     policies: list[PolicyConfig] = Field(default_factory=list)
+    people: PeopleConfig = Field(default_factory=PeopleConfig)
     notifications: NotificationsConfig = NotificationsConfig()
     integrations: IntegrationsConfig = IntegrationsConfig()
     telemetry: TelemetryConfig = TelemetryConfig()
 
+    @model_validator(mode="before")
+    @classmethod
+    def _v01_sections(cls, data: object) -> object:
+        """Name the v0.1 NVR section instead of a bare 'extra inputs' error."""
+        if isinstance(data, dict) and "cameras" in data:
+            raise ValueError(
+                "cameras: this is a v0.1 NVR section; since v0.2 Vidette reads cameras from "
+                "Frigate (docs/architecture/adr/0009-intent-layer-over-frigate.md); configure "
+                "them in Frigate, delete this section and add a `frigate:` section instead"
+            )
+        return data
+
     @model_validator(mode="after")
     def _cross_references(self) -> VidetteConfig:
-        for camera_id in self.cameras:
-            if not _CAMERA_ID_RE.match(camera_id):
-                raise ValueError(
-                    f"camera id '{camera_id}' must match [a-z0-9-] (it is used in URLs and topics)"
-                )
+        watched = None if self.frigate is None else self.frigate.cameras
+        if isinstance(watched, list):
+            watched = [*watched, *(folder.camera for folder in self.clip_folders)]
+        names: set[str] = set()
         for policy in self.policies:
+            if policy.name in names:
+                raise ValueError(f"policy name '{policy.name}' is used twice")
+            names.add(policy.name)
             if policy.cameras == "all":
                 continue
-            for camera_id in policy.cameras:
-                if camera_id not in self.cameras:
-                    raise ValueError(
-                        f"policy '{policy.name}' references unknown camera '{camera_id}'"
-                    )
+            _check_camera_names(policy.cameras, f"policy '{policy.name}'")
+            if isinstance(watched, list):
+                for camera in policy.cameras:
+                    if camera not in watched:
+                        raise ValueError(
+                            f"policy '{policy.name}' references camera '{camera}', which is "
+                            "not in frigate.cameras (or a clip folder); add it there or use "
+                            "cameras: all"
+                        )
         for rule in self.notifications.rules:
             for channel in rule.channels:
                 if channel not in self.notifications.channels:
@@ -377,57 +499,63 @@ class VidetteConfig(StrictModel):
                     )
         return self
 
+    def watched_cameras(self) -> list[str] | None:
+        """Explicit Frigate camera list, or None for `all` / no Frigate configured."""
+        if self.frigate is None or self.frigate.cameras == "all":
+            return None
+        return list(self.frigate.cameras)
+
 
 # --- honesty: designed-but-not-implemented warnings -------------------------------------------
 
 def designed_feature_warnings(config: VidetteConfig) -> list[str]:
-    """One warning per configured feature that is still design-stage, with its milestone.
+    """One warning per configured feature that is not working yet, with where it lands.
 
     Keep in sync with ROADMAP.md — the point is that `vidette validate` never lets a config
-    silently pretend. Remove entries as milestones ship.
+    silently pretend. Remove entries as features ship.
     """
     warnings: list[str] = []
-    roadmap = "see ROADMAP.md"
-    if not config.cameras:
-        warnings.append("cameras: none configured — Vidette will start, but watch nothing")
-    for camera_id, camera in config.cameras.items():
-        if camera.record.mode in (RecordMode.motion, RecordMode.events):
-            warnings.append(
-                f"cameras.{camera_id}: record.mode '{camera.record.mode.value}' falls back "
-                f"to continuous until detection lands in M2 ({roadmap}) — recording more "
-                "than asked, never less"
-            )
-        if camera.adapter == "eufy":
-            # The most likely misconfiguration from Eufy owners: there is no bridge adapter
-            # (Anker shut down the legacy API the community client relied on).
-            warnings.append(
-                f"cameras.{camera_id}: there is no 'eufy' adapter — Eufy cameras connect "
-                "through their built-in NAS (RTSP) feature using `adapter: rtsp`, and only "
-                "on models that support it; see docs/cameras/eufy.md"
-            )
+    if config.frigate is None and not config.clip_folders:
+        warnings.append(
+            "no incident source: configure frigate: (docs/frigate.md) or clip_folders: "
+            "(docs/clip-folders.md). Vidette starts, but receives no incidents"
+        )
     if config.server.auth.mode is AuthMode.none:
         warnings.append(
             "server.auth.mode=none disables authentication — acceptable only on a trusted "
             "LAN/kiosk; a permanent UI banner will remind you"
         )
-    if config.storage.compaction.enabled:
-        warnings.append(f"storage.compaction: designed — lands in M3 ({roadmap})")
-    if config.storage.offsite.enabled:
-        warnings.append(f"storage.offsite: designed — lands in M3 ({roadmap})")
-    if config.understanding.vlm.provider is not VlmProvider.none:
-        warnings.append(f"understanding.vlm: designed — lands in M3 ({roadmap})")
-    if config.understanding.faces.enabled:
+    vlm = config.understanding.vlm
+    if vlm.cloud is not None:
         warnings.append(
-            f"understanding.faces (trusted-faces suppression): designed — lands in M4 ({roadmap})"
+            f"understanding.vlm.cloud: when the cloud backend is selected, frames from your "
+            f"cameras are sent to {vlm.cloud.vendor} ({vlm.cloud.resolved_base_url})"
         )
-    if config.understanding.embeddings.enabled:
+        if not vlm.cloud.prices.is_set:
+            warnings.append(
+                "understanding.vlm.cloud.prices: not set, so reports show the cloud judge's "
+                "cost as unknown; copy your provider's prices (docs/vlm.md)"
+            )
+    if config.policies and vlm.backend is VlmBackend.none:
         warnings.append(
-            f"understanding.embeddings (semantic search): designed — lands in M3 ({roadmap})"
+            "policies: understanding.vlm.backend is none, so incidents stay 'observed' and "
+            "nothing is notified until a backend is selected here or on the System page; "
+            "measure a policy first with `vidette eval` (docs/vlm.md)"
         )
-    if config.policies:
+    if not config.policies:
         warnings.append(
-            "policies: plain-language interpretation lands in M4 — today each policy "
-            "applies its geometric skeleton (zones + sensitivity presets)"
+            "policies: none configured, so no incident is ever judged or notified"
+        )
+    if config.people.enabled and not config.people.dir.is_dir():
+        warnings.append(
+            f"people.dir {config.people.dir} does not exist yet; add someone with "
+            "`vidette people add NAME PHOTO…` or on the People page (docs/people.md)"
+        )
+    quiet = [p.name for p in config.policies if p.known_people == "quiet"]
+    if quiet and not config.people.enabled:
+        warnings.append(
+            f"policies {quiet}: known_people: quiet has no effect while people.enabled is "
+            "false"
         )
     return warnings
 

@@ -110,10 +110,23 @@ CREATE TABLE push_subscriptions (
 ALTER TABLE events ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
 """
 
+_V4_UPSTREAM: Final[str] = """
+-- v0.2 (ADR-0009): events come from an upstream NVR. `source`/`source_ref` identify the
+-- upstream item (Frigate review id) so every phase of one incident lands on one row;
+-- `upstream` keeps what the upstream said (severity, its own GenAI summary) as JSON.
+-- The v0.1 tables `segments` and `managed_cameras` stay (append-only) but are unused.
+ALTER TABLE events ADD COLUMN source TEXT;
+ALTER TABLE events ADD COLUMN source_ref TEXT;
+ALTER TABLE events ADD COLUMN upstream TEXT;
+CREATE UNIQUE INDEX idx_events_source_ref ON events(source, source_ref)
+    WHERE source IS NOT NULL;
+"""
+
 MIGRATIONS: Final[list[str]] = [
     _V1_INITIAL,
     _V2_EVENTS,
     _V3_MANAGEMENT,
+    _V4_UPSTREAM,
 ]
 
 SCHEMA_VERSION: Final[int] = len(MIGRATIONS)

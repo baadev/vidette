@@ -2,7 +2,9 @@
 
 Publishes Vidette events to an MQTT broker under ``<topic_prefix>/…`` and, when discovery is
 enabled, announces one person-occupancy binary sensor per camera via Home Assistant MQTT
-discovery. The topic contract lives in docs/events-and-automations.md:
+discovery. Cameras are Frigate's (ADR-0009): an explicit ``frigate.cameras`` list is
+announced on connect, and with ``cameras: all`` each camera is announced the first time an
+event for it arrives. The topic contract lives in docs/events-and-automations.md:
 
 - ``<prefix>/status``          retained ``online``/``offline`` availability (offline is the LWT);
 - ``<prefix>/<camera>/event``  the canonical event JSON, on ``event.confirmed``;
@@ -102,6 +104,7 @@ class MqttPublisher:
         self._published = 0
         self._failed = 0
         self._failure_streak = 0
+        self._announced: set[str] = set()
 
     # --- lifecycle -----------------------------------------------------------------------------
 
@@ -190,34 +193,39 @@ class MqttPublisher:
                 self._client = None
 
     async def _announce(self, client: MqttClient) -> None:
-        """Retained availability + (optionally) one HA discovery config per camera."""
+        """Retained availability + (optionally) one HA discovery config per known camera."""
         await self._publish(client, self._status_topic, "online", retain=True)
-        if not self._mqtt.discovery:
+        self._announced.clear()  # a new connection (maybe a new broker) gets everything again
+        for camera_id in self._config.watched_cameras() or []:
+            await self._announce_camera(client, camera_id)
+
+    async def _announce_camera(self, client: MqttClient, camera_id: str) -> None:
+        """One retained HA discovery config for `camera_id` (once per connection)."""
+        if not self._mqtt.discovery or camera_id in self._announced:
             return
+        self._announced.add(camera_id)
         prefix = self._mqtt.topic_prefix
-        for camera_id, camera in self._config.cameras.items():
-            display_name = camera.name or camera_id
-            object_id = f"{prefix}_{camera_id}_person"
-            discovery = {
-                "name": f"{display_name} person",
-                "unique_id": object_id,
-                "state_topic": f"{prefix}/{camera_id}/person",
-                "device_class": "occupancy",
-                "payload_on": "ON",
-                "payload_off": "OFF",
-                "availability_topic": self._status_topic,
-                "device": {
-                    "identifiers": [f"{prefix}_{camera_id}"],
-                    "name": display_name,
-                    "manufacturer": "Vidette",
-                },
-            }
-            await self._publish(
-                client,
-                f"{_DISCOVERY_PREFIX}/binary_sensor/{object_id}/config",
-                _dumps(discovery),
-                retain=True,
-            )
+        object_id = f"{prefix}_{camera_id}_person"
+        discovery = {
+            "name": f"{camera_id} person",
+            "unique_id": object_id,
+            "state_topic": f"{prefix}/{camera_id}/person",
+            "device_class": "occupancy",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "availability_topic": self._status_topic,
+            "device": {
+                "identifiers": [f"{prefix}_{camera_id}"],
+                "name": camera_id,
+                "manufacturer": "Vidette",
+            },
+        }
+        await self._publish(
+            client,
+            f"{_DISCOVERY_PREFIX}/binary_sensor/{object_id}/config",
+            _dumps(discovery),
+            retain=True,
+        )
 
     # --- bus consumption --------------------------------------------------------------------------
 
@@ -248,6 +256,7 @@ class MqttPublisher:
         if not isinstance(camera, str) or not camera:
             logger.warning("mqtt: %s payload carries no camera id — skipped", topic)
             return
+        await self._announce_camera(client, camera)
         if topic == "event.confirmed":
             await self._publish(client, f"{prefix}/{camera}/event", _dumps(payload))
             kinds = payload.get("kinds")

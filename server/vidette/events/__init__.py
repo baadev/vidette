@@ -1,12 +1,7 @@
-"""Event engine (M2): Tier-2 tracks in, confirmed/dismissed events out.
+"""Events: what Vidette tells you about.
 
-`EventEngine` (engine.py) owns per-camera trackers, applies the promotion rules and the
-public-zone suppression from docs/architecture/ai-pipeline.md, persists events and
-publishes the canonical payload (docs/events-and-automations.md) on the in-process bus.
-`materialize_clip` (clips.py) lazily remuxes an event's footage into a shareable MP4.
+Since v0.2 (ADR-0009) events are not produced by an in-house detection cascade. They are
+incidents from the upstream NVR (Frigate review items), persisted in the event store and,
+from week 2 of the v0.2 plan, judged against your policies. The v0.1 Tier-2 engine and
+clip remuxer are frozen at tag `nvr-core`.
 """
-
-from vidette.events.clips import materialize_clip
-from vidette.events.engine import EventEngine
-
-__all__ = ["EventEngine", "materialize_clip"]

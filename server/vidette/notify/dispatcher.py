@@ -6,7 +6,9 @@ Design constraints (CLAUDE.md prime directives):
 - honesty: `webpush` channels are skipped with a one-time `notify.webpush_unavailable`
   event when no webpush notifier is registered, instead of silently pretending;
 - ordering is per receiver: one asyncio.Lock per channel, while channels of one message are
-  delivered concurrently.
+  delivered concurrently;
+- an incident without a verdict never notifies (ADR-0009): `event.observed` is dropped here
+  by rule, even when a rule like `when: event.*` would match it.
 """
 
 from __future__ import annotations
@@ -24,6 +26,9 @@ from vidette.notify.base import Notifier
 from vidette.notify.webhook import NotifyError, WebhookNotifier
 
 _FAILURE_EMIT_EVERY = 5  # emit on the 1st consecutive failure, then every 5th
+
+# Topics that exist for live UIs, never for notifications.
+NEVER_NOTIFY: frozenset[str] = frozenset({"event.observed"})
 
 
 @dataclass
@@ -109,6 +114,8 @@ class NotificationDispatcher:
     async def _pump(self, rule: NotifyRule, subscription: Subscription) -> None:
         while True:
             topic, payload = await subscription.get()
+            if topic in NEVER_NOTIFY:
+                continue
             # Concurrent across a message's channels; per-channel locks keep receiver order.
             await asyncio.gather(*(self._deliver(name, topic, payload) for name in rule.channels))
 

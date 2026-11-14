@@ -2,277 +2,188 @@
 
 # Vidette
 
-**Self-hosted video security that understands intent — not just motion.**
+**Alert policies in plain language, judged on top of Frigate, measured before you trust them.**
 
-*A **vidette** was a mounted sentry posted ahead of the picket line — the first to see
+*A **vidette** was a mounted sentry posted ahead of the picket line: the first to see
 trouble coming, and the one trusted to tell a passing farmer from an approaching threat.*
 
 [![Release](https://img.shields.io/github/v/release/baadev/vidette?color=8a2be2)](https://github.com/baadev/vidette/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![CI](https://github.com/baadev/vidette/actions/workflows/ci.yml/badge.svg)](https://github.com/baadev/vidette/actions/workflows/ci.yml)
-[![Image](https://img.shields.io/badge/ghcr.io-baadev%2Fvidette-2496ed)](https://github.com/baadev/vidette/pkgs/container/vidette)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
-[Why](#why) · [How it works](#how-it-works) · [Quickstart](#quickstart) ·
-[Roadmap](ROADMAP.md) · [Cameras](docs/cameras/README.md) · [Architecture](docs/architecture/overview.md)
+[Status](#status) · [Why](#why) · [How it works](#how-it-works) · [Try it](#try-it) ·
+[Roadmap](ROADMAP.md) · [Frigate setup](docs/frigate.md) · [Measuring](docs/eval.md)
 
 </div>
 
-> **Status: v0.1.0 — Watch + Detect are live.** From a single `docker compose up` you get:
-> RTSP/ONVIF ingest through a managed go2rtc gateway, codec-copy recording with an SQLite
-> index, a WebRTC live wall, an hour-strip review UI with scrub previews and MP4 export, and
-> the understanding cascade tiers 0–2 (motion → object detection → trajectory + zone geometry
-> that suppresses passers-by) turning motion into *events* — delivered as signed webhooks,
-> Apprise messages (Telegram/Discord/…), web-push, or MQTT with Home Assistant discovery.
-> Add and manage cameras from the UI or as code. Still ahead: the VLM tier and plain-language
-> policies (M3–M4). Reference N100 budgets remain an open ops task ([roadmap](ROADMAP.md)).
-> Feedback: [issues](https://github.com/baadev/vidette/issues) · **alex@baadev.com**.
+## Status
+
+> **v0.2 is a development line, not a release.** In November 2026 Vidette changed course: it
+> no longer tries to be an NVR. [Frigate](https://frigate.video) records, detects and groups
+> activity into review items; Vidette reads them and decides, under a policy you wrote in
+> plain words, which ones deserve your phone. Why:
+> [ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md).
+>
+> **Works on `v0.2` today**
+> - Frigate source: review items and tracked objects over MQTT, snapshots, recording frames
+>   and clips over Frigate's HTTP API, all typed and tested on recorded-format fixtures.
+> - Every Frigate review item becomes an `observed` event in Vidette's Events page, with
+>   Frigate's own severity and GenAI summary shown as Frigate's.
+> - `vidette eval`: precision, recall, false alarms per day and VLM cost for a judge on a
+>   labelled clip set, with 95 % intervals. Four model-free baselines to beat.
+> - `vidette frigate check | tail --record | replay` to inspect a Frigate install.
+> - Clip folders as a second incident source, and `vidette collect` to fill one from a
+>   battery camera that streams only while awake ([ADR-0010](docs/architecture/adr/0010-clip-folders.md)).
+> - The VLM judge, local (Ollama) or cloud (OpenAI, Gemini, OpenRouter), chosen in the
+>   config or on the System page: closed incidents become `confirmed` (notifies) or
+>   `dismissed` (quiet); `vidette eval` compares both judges side by side, and
+>   `vidette label` drafts labels with it for review on a phone. Tested against a fake
+>   OpenAI-compatible server only; no real model has judged real footage yet.
+>
+> **Not yet**
+> - A policy shown back as a structured spec, dry runs over past events, calibration from
+>   👍/👎, published accuracy numbers.
+>
+> **No accuracy numbers yet.** The first ones will come from `vidette eval` on a labelled set
+> of real clips, with the set's size printed next to them.
+>
+> The v0.1 NVR (recording, live view, detection cascade, ONVIF) is frozen at tag
+> [`nvr-core`](https://github.com/baadev/vidette/tree/nvr-core); v0.1.x images remain
+> published and unchanged.
 
 ## Why
 
-If you own cloud cameras, you already know the drill:
+A camera that sees everything is easy. A notification you do not learn to ignore is hard.
+Frigate already finds the person in the frame, and since 0.17 it can describe the scene and
+rate a threat level. What you still cannot do is say, in your own words, which situations
+should reach you, check how often that rule would have woken you last week, and see the
+error rates before you rely on it.
 
-- The app takes ten seconds to show a live view that is another five seconds stale.
-- "Smart alerts" means a ping for every cat, courier and headlight — or silence when it matters.
-- Recordings live in someone else's cloud, on their retention terms, behind their paywall.
-- No export, no webhooks, no API. Your own footage isn't really yours.
-- One camera at a time, in an interface nobody who uses it would have shipped.
-
-The hardware is usually fine. **The software is the product — and you don't own it.**
-
-Vidette is the software half done right, running on your hardware: a universal, self-hosted
-video security platform where vendor-specific quirks are just adapters, and where the
-notification you get is the one you actually asked for.
-
-## The north star
-
-> You tell Vidette, in your own words:
+> You tell Vidette:
 >
-> **"Alert me only when someone looks genuinely interested in getting in. Ignore passers-by."**
+> **"Alert me only when someone looks genuinely interested in getting in. Ignore passers-by,
+> couriers, cats and headlights."**
 >
-> And it watches the way a human sentry would: where a person is looking, whether they slow
-> down, whether they approach the door or just cut through, whether they glance around, linger,
-> reach for a handle or a window — and it stays quiet about everyone else.
+> It asks a vision-language model a structured question about the few frames that matter,
+> applies your rule, and stays quiet about everything else. And it tells you, with numbers
+> from your own clips, how often it gets that right.
 
-That is not a claim of magic — it is a direction we execute toward in the open, tier by tier.
-The [AI pipeline design](docs/architecture/ai-pipeline.md) explains exactly how far each
-milestone gets, and the [FAQ](docs/faq.md#can-it-really-recognize-intent) gives the honest
-answer about what "intent recognition" can and cannot do.
-
-## What Vidette is
-
-- **A universal NVR core.** Any RTSP/ONVIF camera works out of the box — including Eufy
-  models with the NAS (RTSP) feature. Closed ecosystems connect through
-  [adapters](docs/cameras/README.md) — vendor pain is a plugin, not a fork.
-- **An understanding cascade.** Motion → detection → trajectory geometry → vision-language
-  reasoning, each tier ~10–100× more expensive and invoked ~10–100× more rarely. Full local
-  processing; cloud models strictly opt-in.
-- **Plain-language policies.** Describe what matters in a sentence; Vidette compiles it into
-  zones, triggers and a scene-level question for the VLM — and shows you the compiled result.
-- **First-class outputs.** Signed webhooks with text + snapshot + clip, web push, Telegram /
-  Discord / 100+ services via Apprise, MQTT with Home Assistant discovery, one-call clip export.
-- **A fast, honest UI.** Multi-camera live wall with sub-second WebRTC, a timeline that scrubs
-  like a video editor, event review with one-tap feedback that tunes your alerts.
-- **Storage you can trust.** Codec-copy recording (no transcode), retention classes, archive
-  compaction, off-site event backup, disk health monitoring. Recording is sacred: analysis
-  sheds load first, the recorder last.
-
-Three budgets are treated as product features and tracked per release: **compute, storage,
-latency**. See [engineering principles](docs/project/principles.md).
+That last part is the product as much as the first: a policy you cannot measure is a
+vibe, and a security system that runs on vibes gets switched off.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A[Camera streams] --> B{"Tier 0
-motion gate
-~free"}
-    B -- "quiet (most of the time)" --> Z[Recorded only]
-    B -- motion --> C{"Tier 1
-object detector
-tiny model, low fps"}
-    C -- "no person / vehicle" --> Z
-    C --> D{"Tier 2
-tracking + zone geometry
-pure math"}
-    D -- "transit through public zone" --> Z
-    D -- "approach · dwell · touch" --> E{"Tier 3
-VLM scene reasoning
-rare, budgeted"}
-    E --> F["Tier 4
-your policy, in plain language"]
-    F -- matches --> G[["Notification
-text + snapshot + clip"]]
-    F -- otherwise --> Z
+    C[Cameras] --> F["Frigate
+record · detect · review items"]
+    F -- "MQTT: reviews, events" --> I["Vidette
+incident"]
+    F -. "HTTP: frames, clips" .-> I
+    I --> J{"Judge
+your policy, in plain words
+(VLM, local or cloud, budgeted)"}
+    J -- matches --> N[["Notification
+why + snapshot + clip"]]
+    J -- otherwise --> S[Kept, silent, searchable]
+    L["Labelled clips"] --> E["vidette eval
+precision · recall · false alarms/day · cost"]
+    J -. same judge .-> E
 ```
 
-A single camera produces ~2.6 million frames a day. Asking a vision-language model about every
-frame is absurd; asking it about the **ten moments that survived three cheap filters** is not.
-That is the whole trick — and it is why Vidette targets small boxes (an N100 mini-PC) rather
-than a GPU rack. Details and budgets: [AI pipeline](docs/architecture/ai-pipeline.md).
+- **Frigate does the cheap tiers** (motion, detection, tracking, zones) on hardware it
+  already supports. Vidette opens no camera connection and records nothing.
+- **Vidette owns the expensive, rare tier**: one judgment per incident, against your
+  policy, on a call budget.
+- **The judge that runs at home is the one `vidette eval` scores**: same interface, same
+  incident type, so offline numbers and live behaviour come from the same code path.
 
-Recording never depends on analysis. Streams are written to disk codec-copy (no re-encoding)
-regardless of what the AI tiers are doing. Details: [storage design](docs/architecture/storage.md).
+## Try it
 
-## A taste of the config
+Without a camera, in five minutes ([uv](https://docs.astral.sh/uv/) needed):
 
-```yaml
-cameras:
-  front-door:
-    adapter: rtsp
-    source:
-      main: rtsp://cam:${CAM_PASSWORD}@10.0.20.11:554/stream1
-      sub:  rtsp://cam:${CAM_PASSWORD}@10.0.20.11:554/stream2
-    zones:
-      door:   { kind: entry,  points: [[0.42, 0.31], [0.58, 0.31], [0.58, 0.78], [0.42, 0.78]] }
-      street: { kind: public, points: [[0.00, 0.80], [1.00, 0.80], [1.00, 1.00], [0.00, 1.00]] }
-
-policies:
-  - name: entry-interest
-    description: >
-      Alert when a person shows interest in entering: approaching the door, lingering,
-      touching the door or windows, peering in. Ignore pass-through pedestrians and
-      routine deliveries.
-    cameras: [front-door]
-    sensitivity: balanced
-    actions: [notify]
+```bash
+git clone https://github.com/baadev/vidette && cd vidette/server
+uv sync --locked
+uv run vidette eval ../datasets/synthetic-sample
 ```
 
-And the webhook you receive:
-
-```json
-{
-  "event": "event.confirmed",
-  "id": "01hxv7q8e9",
-  "camera": "front-door",
-  "started_at": "2026-07-07T21:14:03Z",
-  "summary": "A person approached the front door, tried the handle twice, and looked through the side window. No delivery indicators.",
-  "intent": { "label": "entry_attempt", "score": 0.87 },
-  "policy": "entry-interest",
-  "media": {
-    "snapshot_url": "https://vidette.local/api/v1/events/01hxv7q8e9/snapshot.webp",
-    "clip_url": "https://vidette.local/api/v1/events/01hxv7q8e9/clip.mp4"
-  }
-}
-```
-
-Payloads are HMAC-signed (`X-Vidette-Signature`), so your automations can trust them.
-Full spec: [events & automations](docs/events-and-automations.md).
+Next to a running Frigate (0.14 or newer): [docs/getting-started.md](docs/getting-started.md)
+and [docs/frigate.md](docs/frigate.md).
 
 ## Feature status
 
-Legend: ✅ shipped · 🚧 in progress · 📐 designed (spec published, RFC open) · 🔭 exploring.
-The full inventory lives in [ROADMAP.md](ROADMAP.md).
+Legend: ✅ works on `v0.2` · 🚧 in progress · 📐 designed · 🔭 exploring.
 
-| Capability | Status | Milestone |
-|---|---|---|
-| Architecture, config schema, API skeleton, CI | ✅ | M0 |
-| RTSP ingest via managed go2rtc, codec-copy recording + SQLite index | ✅ | M1 |
-| Auth: first-run admin wizard, sessions, scoped API tokens | ✅ | M1 |
-| Retention classes + watermark cleanup + disk health events | ✅ | M1 |
-| Multi-camera live wall (WebRTC via authenticated WHEP proxy) | ✅ | M1 |
-| Range export (remux, no re-encode) via UI + API | ✅ | M1 |
-| Timeline review: hour strip, segment playback, scrub-strip previews | ✅ | M1 |
-| ONVIF: `vidette discover`, profiles → main/sub, WSSE/digest auth (events, PTZ → M2) | ✅ beta | M1 |
-| Detection cascade tiers 0–2: motion gate → YOLOX (ONNX) → trajectories + zone algebra (passers-by suppression) | ✅ core | M2 |
-| Events: engine, review UI with feedback + favorites, snapshots, lazy clips, live WebSocket feed | ✅ core | M2 |
-| Notifications: signed webhooks (HMAC, retries) + Apprise (Telegram/Discord/100+) + web push (VAPID) | ✅ | M2 |
-| MQTT + Home Assistant discovery, Prometheus `/metrics` | ✅ | M2 |
-| Camera management + zone editor in the UI (managed cameras in DB; YAML stays the IaC source of truth) | ✅ | M2 |
-| Eufy via built-in NAS (RTSP), supported models — [guide + caveats](docs/cameras/eufy.md) | ✅ | M1 |
-| VLM scene descriptions + intent scoring (local via Ollama, opt-in cloud) | 📐 | M3 |
-| Semantic search over events ("someone touched the gate") | 📐 | M3 |
-| Off-site event backup (S3-compatible) | 📐 | M3 |
-| Plain-language policies (north star v1) + feedback loop | 📐 | M4 |
-| Trusted faces: suppress alerts from your household (opt-in, local-only, [guardrails](docs/faq.md#what-about-face-recognition)) | 📐 | M4 |
-| Plugin SDK stability, adapter registry, HA add-on, PWA push polish | 📐 | M5 |
-
-## Camera support
-
-| Ecosystem | Path | Status |
-|---|---|---|
-| Any RTSP camera | native | ✅ |
-| ONVIF (discovery + streams) | native | ✅ beta (events/PTZ 📐) |
-| Reolink, Amcrest/Dahua, Hikvision, Tapo | native RTSP/ONVIF | ✅ |
-| Eufy | built-in NAS (RTSP) — **supported models only**, [check yours](docs/cameras/eufy.md) | ✅ |
-| UniFi Protect, Ring, Wyze, HomeKit | bridges | 🔭 |
-
-Your camera not here? [Request it](https://github.com/baadev/vidette/issues/new?template=camera_support.yml) —
-requests double as the demand map that orders the adapter backlog. Details: [docs/cameras](docs/cameras/README.md).
-
-## Quickstart
-
-Pull the published images — no build, no accounts:
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/baadev/vidette/main/deploy/docker-compose.yml
-docker compose up -d
-# open http://localhost:8642 → create your admin account → add a camera in the UI
-```
-
-Or build from a checkout (`docker compose -f deploy/docker-compose.yml up -d --build`).
-Images are published to `ghcr.io/baadev/vidette` for `linux/amd64` and `linux/arm64`.
-
-> Honest alpha (v0.1.0): Watch + Detect are solid and tested end-to-end; the VLM/intent tier
-> (M3) and plain-language policies (M4) aren't here yet, and the N100 reference budgets are
-> measured on dev hardware but not yet on the reference box. Nothing in the UI or API pretends
-> to do more than it does.
-
-Full guide, hardware sizing and first-camera walkthrough: [getting started](docs/getting-started.md).
+| Capability | Status |
+|---|---|
+| Frigate source: reviews + tracked objects over MQTT, typed, filterable by camera and severity | ✅ |
+| Frigate media: event snapshots, recording frames, clips (read-only HTTP) | ✅ |
+| Events page with Frigate's severity and summary, feedback, favorites, live updates | ✅ |
+| `vidette eval`: dataset format, baselines, metrics with intervals, cost projection | ✅ |
+| Notifications: signed webhooks, Apprise (Telegram and 100+), web push, MQTT + HA discovery | ✅ fire on confirmed events only |
+| Clip folders as an incident source; `vidette collect` for wake-on-motion cameras, `--continuous` (ring + motion gate) for streaming ones | ✅ tested with fake RTSP cameras; first minutes on a real camera behind a base station |
+| VLM verdict worker: frames, structured answer, abstention, daily budget, OpenAI-compatible API with a local and a cloud backend, switch on the System page | ✅ tested with a fake model; not yet measured |
+| `vidette label`: VLM drafts, contact sheets, review replies by number | ✅ tested with a fake model |
+| Known people: local face recognition for enrolled people, the judge told who it saw, People page with confirm buttons ([docs/people.md](docs/people.md)) | 🚧 opt-in; small faces on security cameras are often unreadable |
+| Plain-language policy shown back as an inspectable spec | 📐 week 2 |
+| Dry run of a policy over the last N days of Frigate history | 📐 week 2 |
+| Calibration from 👍/👎 | 📐 |
+| Published accuracy on a labelled set of real clips | 📐 needs the set |
 
 ## The privacy promise
 
-- **Local-first.** Footage, events and models live on your hardware. Nothing leaves unless you
-  explicitly configure a destination (a webhook, a cloud VLM, an off-site backup).
-- **Zero telemetry by default.** Forever. If opt-in stats ever exist, the code that sends them
-  will be readable in this repo.
-- **No accounts, no phone-home, no paywalled features in the core.**
-- **Behavior first.** Vidette judges *what is happening*, not *who someone is*. The only
-  identity feature is opt-in, local-only [trusted faces](docs/faq.md#what-about-face-recognition) —
-  suppressing alerts from people *you* enrolled; never stranger identification, never
-  third-party face databases, never cloud biometrics.
+- **Local-first.** Clips stay in Frigate (or your clip folder); Vidette caches snapshots on
+  your disk. A hosted VLM is strictly opt-in: it needs its own config section, the System
+  page asks before switching to it, and it receives a few still frames per incident, never
+  streams.
+- **Zero telemetry.** No accounts, no phone-home, no paywalled features.
+- **Behaviour, not identity.** Vidette judges what is happening, not who someone is. The
+  one exception is opt-in: [known people](docs/people.md), recognized on your machine,
+  only among people who agreed to be enrolled; a cloud judge never hears their names.
 
-The threat model and hardening guide live in [security-model.md](docs/architecture/security-model.md).
+Threat model and hardening: [security-model.md](docs/architecture/security-model.md).
 
 ## Standing on giants
 
-Vidette deliberately reuses the best of the ecosystem instead of rewriting it:
-[go2rtc](https://github.com/AlexxIT/go2rtc) (stream gateway),
-[FFmpeg](https://ffmpeg.org) (recording/remux),
-[ONNX Runtime](https://onnxruntime.ai) + [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) (detection),
+[Frigate](https://github.com/blakeblackshear/frigate) (detection, recording, review items),
+[go2rtc](https://github.com/AlexxIT/go2rtc) (inside Frigate),
 [Apprise](https://github.com/caronc/apprise) (100+ notification services),
-[SQLite](https://sqlite.org) (metadata; sqlite-vec joins for semantic search in M3).
-[Frigate](https://github.com/blakeblackshear/frigate) deserves a special mention as prior art —
-see [the FAQ](docs/faq.md#how-is-this-different-from-frigate) for an honest comparison.
+[SQLite](https://sqlite.org), [FastAPI](https://fastapi.tiangolo.com).
 
-## FAQ (the three everyone asks)
+## FAQ
 
-**How is this different from Frigate?** Frigate is an excellent detection-centric NVR. Vidette
-starts one layer higher: scene understanding, plain-language policies, and an event-centric UX —
-and it shares ancestry (go2rtc, FFmpeg) rather than competing on decode loops. You can run both.
-[Longer answer](docs/faq.md#how-is-this-different-from-frigate).
+**Do I need Frigate?** No longer strictly: a folder of finished clips works as a source too
+([clip-folders.md](docs/clip-folders.md)), with the latency of a finished clip. For live
+cameras Frigate is still the answer.
 
-**Is "intent recognition" real or snake oil?** It is probabilistic. Vidette bounds it with
-cheap objective signals (zones, trajectories, dwell) and uses the VLM only as the final judge,
-with budgets, calibrated thresholds and your feedback closing the loop. You stay the judge;
-Vidette cuts the noise. [Longer answer](docs/faq.md#can-it-really-recognize-intent).
+**Frigate 0.17+ already writes GenAI summaries. Why this?** Those summaries describe and
+rate; they do not decide whether your phone buzzes under a rule you wrote, and they come
+without error rates. `vidette eval` scores Frigate's summaries as a baseline
+(`frigate-genai`), so the comparison is on the table, not in an adjective.
 
-**Are you affiliated with Eufy/Anker?** No. Eufy is the itch that started the project. The
-only integration path is the camera's built-in **NAS (RTSP)** feature on supported models —
-the community cloud/P2P bridge died with the vendor's API migration, which is
-[the thesis in one story](docs/cameras/eufy.md#why-there-is-no-bridge).
+**Is "intent recognition" real?** It is a probabilistic judgment from behaviour (approached,
+lingered, tried the handle), and it will make mistakes. That is why the measuring tool came
+first. More: [FAQ](docs/faq.md).
 
-## Contributing & contact
+**My camera is a battery Eufy.** A battery camera cannot feed Frigate continuously.
+[`vidette collect`](docs/collect.md) records its wake periods over NAS (RTSP) into a clip
+folder, which Vidette can judge live and [`vidette label`](docs/label.md) turns into a
+labelled set for `vidette eval`. Behind a HomeBase add `--base-station`; for a camera that
+streams all the time, `--continuous` cuts a clip around each motion.
 
-Vidette is at the stage where **design review is the most valuable contribution** — read the
-[architecture docs](docs/architecture/overview.md), then open an issue with what you'd do
-differently. Code contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
-Security reports: [SECURITY.md](SECURITY.md).
+## Contributing and contact
 
-- Issues & discussions: [github.com/baadev/vidette](https://github.com/baadev/vidette)
+The most useful contribution right now is a labelled clip set you are allowed to share
+(synthetic, staged or public domain; never footage of people who did not agree), or a
+recorded Frigate session from `vidette frigate tail --record` that Vidette fails to parse.
+Code: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
+
+- Issues and discussions: [github.com/baadev/vidette](https://github.com/baadev/vidette)
 - Email: **alex@baadev.com**
 
 ## License
 
 [Apache-2.0](LICENSE) © 2026 Alexander Belov and Vidette contributors.
-Camera trademarks belong to their owners; Vidette is not affiliated with any camera vendor.
+Camera and NVR trademarks belong to their owners; Vidette is not affiliated with Frigate or
+any camera vendor.
