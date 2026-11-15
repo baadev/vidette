@@ -777,7 +777,7 @@ class IdentityStore:
                 continue
             sure = self._score(strong.get(a, []), strong.get(b, [])) if a in strong else -1.0
             found.append(Duplicate(a, b, round(score, 3), weak=sure < score - 1e-6))
-        return sorted(found, key=lambda d: -d.score)[:limit]
+        return sorted(found, key=lambda d: (d.weak, -d.score))[:limit]  # clear faces first
 
     def was_checked(self, source: str, source_id: str) -> bool:
         if not self.db_path.exists():

@@ -80,7 +80,7 @@ export function PeopleSwitch({ current }: { current: "people" | "identities" }) 
 
 // --- the list ----------------------------------------------------------------------------
 
-type Filter = "all" | IdentityStatus;
+type Filter = "all" | "small" | IdentityStatus;
 
 function IdentityItem({
   identity,
@@ -112,15 +112,8 @@ function IdentityItem({
           {identity.weak && <span className="id-status">small face</span>}
         </span>
         <span className="muted id-item-stats">
-          {plural(identity.sightings, "sighting")} · {plural(identity.days, "day")} · last{" "}
-          {when(identity.last_seen)}
-        </span>
-        <span className="id-cameras">
-          {identity.cameras.map((camera) => (
-            <span key={camera} className="chip chip-zone">
-              {camera}
-            </span>
-          ))}
+          {when(identity.last_seen)} · {identity.cameras.join(", ")}
+          {identity.days > 1 ? ` · ${plural(identity.days, "day")}` : ""}
         </span>
       </span>
       <span className="id-count" aria-label={`${identity.sightings} sightings`}>
@@ -232,8 +225,11 @@ function IdentityList() {
     }
   };
 
+  const small = (state?.identities ?? []).filter((identity) => identity.weak).length;
   const shown = (state?.identities ?? [])
-    .filter((identity) => filter === "all" || identity.status === filter)
+    .filter((identity) =>
+      filter === "all" ? true : filter === "small" ? identity.weak : identity.status === filter,
+    )
     .sort((a, b) =>
       order === "most"
         ? b.sightings - a.sightings || (b.last_seen ?? 0) - (a.last_seen ?? 0)
@@ -330,6 +326,16 @@ function IdentityList() {
                   {key === "all" ? state.identities.length : counts[key]}
                 </button>
               ))}
+            {small > 0 && (
+              <button
+                type="button"
+                className={`ghost${filter === "small" ? " id-filter-active" : ""}`}
+                aria-pressed={filter === "small"}
+                onClick={() => setFilter("small")}
+              >
+                Small faces {small}
+              </button>
+            )}
             <button
               type="button"
               className="ghost"
