@@ -117,11 +117,15 @@ entries:
       threat_level: 1                      # Frigate GenAI potential_threat_level, 0-2
       summary: A person tried the handle twice.
     notes: free text for yourself
+    reason: passing                        # optional: why an alert was wrong (the bot's list)
 ```
 
 Entries written by `vidette label` also carry `number` (on the review sheets), `status`
 (`draft` until a person reviews it, then `reviewed`) and the model's `draft`; drafts are
-not scored until reviewed ([label.md](label.md)). An optional top-level `aliases:` maps
+not scored until reviewed ([label.md](label.md)). An answer from the Telegram bot adds the
+person's `reason` when they said why an alert was wrong (`passing`, `light`, `stalled`,
+`unimportant`: the alert was right but not worth it, …; [telegram.md](telegram.md#the-buttons));
+it is not scored, it is what the false-alert analysis counts. An optional top-level `aliases:` maps
 extra review words to scenarios.
 
 Rules the loader enforces (each failure names the entry):

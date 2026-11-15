@@ -865,15 +865,19 @@ async def _who_is_this(b: Any, people: PeopleStore, tmp_path: Path) -> None:
         },
     }  # fmt: skip
     await b.service.handle_update(reply)
-    edited = b.fake.last("editMessageText").params["text"]
-    assert "знакомый «Соседка»" in edited and "знакомый: Соседка" in edited
+    edited = b.fake.last("editMessageText").params
+    assert "знакомый: Соседка" in edited["text"]
+    buttons = [button["text"] for button in edited["reply_markup"]["inline_keyboard"][0]]
+    assert buttons[-1].startswith("👤 знакомый «Соседка» (№"), "one button says what was decided"
     stored = await b.db.get_event(event_id)
     assert stored is not None and stored.intent is not None
     face = stored.intent["people"]["seen"][0]
     assert face["identity"]["status"] == "familiar" and face["identity"]["name"] == "Соседка"
     assert "Готово" in b.fake.last("sendMessage").params["text"]
-    await b.service.handle_update(callback(b, row, "u:1", update_id=4))
-    assert "Решение по лицу отменено" in b.fake.last("editMessageText").params["text"]
+    await b.service.handle_update(callback(b, row, "u:1", update_id=4))  # tap that button
+    assert b.fake.last("answerCallbackQuery").params["text"] == "Решение отменено"
+    buttons = b.fake.last("editMessageText").params["reply_markup"]["inline_keyboard"]
+    assert buttons[0][0]["text"] == "👍 верно", "the full buttons are back"
     stored = await b.db.get_event(event_id)
     assert stored is not None and stored.intent is not None
     assert stored.intent["people"]["seen"][0]["identity"]["id"] == 1  # back where it was

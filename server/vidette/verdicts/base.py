@@ -114,6 +114,9 @@ class Verdict(BaseModel):
     persons: int | None = Field(default=None, ge=0)
     # When a person is first in view, seconds into the clip (the judge names the frame).
     person_at_s: float | None = Field(default=None, ge=0)
+    # the times of the frames that show what the verdict is about, clearest first: the
+    # alert's album shows these, not frames of an empty street (ADR-0017)
+    subject_at_s: list[float] = Field(default_factory=list)
 
 
 class Judge(Protocol):

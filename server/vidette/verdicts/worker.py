@@ -53,12 +53,12 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
-from vidette.core.config import PolicyConfig, Sensitivity, VidetteConfig, VlmBackend
+from vidette.core.config import PolicyConfig, Sensitivity, VidetteConfig, VlmBackend, Wake
 from vidette.core.events import EventState, InProcessEventBus, Subscription
 from vidette.core.incidents import Incident
 from vidette.db import Database, EventRow
 from vidette.events.payload import canonical_payload
-from vidette.ffmpeg import MediaToolError
+from vidette.ffmpeg import MediaToolError, extract_frame
 from vidette.frigate.client import Frame
 from vidette.people.check import CropWriter, crop_writer
 from vidette.people.report import PeopleReport
@@ -73,6 +73,9 @@ MIN_CONFIDENCE: dict[Sensitivity, float] = {
     Sensitivity.balanced: 0.5,
     Sensitivity.paranoid: 0.0,
 }
+ALBUM_MAX = 3  # frames kept for the alert's album: the subject, never an empty street
+ALBUM_FACES = 2  # of those, at most this many best moments of faces
+ALBUM_APART_S = 1.0  # two frames closer than this show the same moment
 _ROW_WAIT_S = (0.05, 0.1, 0.2, 0.4, 0.8)  # the intake may still be writing the row
 _FAILURE_EMIT_EVERY = 10
 
@@ -116,6 +119,13 @@ def counts_as_alert(policy: PolicyConfig, verdict: Verdict) -> bool:
         return False
     threshold = MIN_CONFIDENCE[policy.sensitivity]
     return verdict.confidence is None or verdict.confidence >= threshold
+
+
+def early_may_alert(policy: PolicyConfig, verdict: Verdict) -> bool:
+    """An early window's alert goes out now only at a level that wakes for anyone
+    (`wake: always`); other levels wait for the whole clip. A policy without levels keeps
+    its early alerts."""
+    return not policy.levels or policy.wake_for(verdict.label) is Wake.always
 
 
 class VerdictWorker:
@@ -317,6 +327,7 @@ class VerdictWorker:
         if chosen is not None:
             case = replace(case, frames=chosen)
         people: dict[str, Any] | None = None
+        report: PeopleReport | None = None
         if self._people is not None:
             try:
                 report = await self._people.check(
@@ -357,11 +368,23 @@ class VerdictWorker:
                     **chosen.health.model_dump(mode="json"),
                     "interrupted": chosen.health.interrupted,
                 }
+        album_dir = self._media_dir / "judge-frames" / (
+            f"{row.id}/early" if incident.partial else row.id
+        )
+        leading = alerting or decided
+        album = await album_frames(
+            case, chosen, leading[0][1] if leading else None, report, album_dir
+        )
+        if album:
+            intent["album"] = album
         intent["timeline"] = self._timeline(previous, incident, started, results)
         self.status.judged += 1
         self.status.last_judged_at = self._clock()
 
         if incident.partial:
+            # the first seconds alert only for levels that wake for anyone (ADR-0017): a
+            # person who seems to stop in 8 s mostly walks on, and the whole clip says so
+            alerting = [(p, v) for p, v in alerting if early_may_alert(p, v)]
             if not alerting:  # nothing yet: the whole clip decides
                 await self._db.update_event(row.id, intent=intent)
                 return await self._db.get_event(row.id)
@@ -442,6 +465,56 @@ class VerdictWorker:
         return updated
 
 
+async def album_frames(
+    case: Case,
+    chosen: FrameSet | None,
+    verdict: Verdict | None,
+    report: PeopleReport | None,
+    out_dir: Path,
+) -> list[dict[str, Any]]:
+    """The frames an alert should show: where the subject is, not an empty street.
+
+    First the best moment of each face the check found (the largest face first: that
+    frame is where the person is closest and sharpest), extracted from the clip; then
+    the judge's own frames that it said show what its verdict is about, clearest first.
+    Frames closer than a second to one already picked are skipped. Empty when neither
+    is known (no face, an older verdict): the bot then falls back to the judged frames
+    from the first one with a person in it."""
+    picks: list[dict[str, Any]] = []
+
+    def taken(at: float | None) -> bool:
+        return at is not None and any(
+            isinstance(p["t"], float | int) and abs(p["t"] - at) < ALBUM_APART_S for p in picks
+        )
+
+    video = first_video(case)
+    if report is not None and video is not None:
+        faces = sorted(
+            (s for s in report.seen if s.best_at_s is not None), key=lambda s: -s.face_px
+        )
+        for seen in faces:
+            if len([p for p in picks if p["why"] == "face"]) >= ALBUM_FACES:
+                break
+            assert seen.best_at_s is not None
+            if taken(seen.best_at_s):
+                continue
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = await extract_frame(video, seen.best_at_s, out_dir / f"face-{seen.n}.jpg")
+            except (MediaToolError, OSError) as exc:
+                logger.info("no album frame for face %d: %s", seen.n, exc)
+                continue
+            picks.append({"path": str(path), "t": seen.best_at_s, "why": "face"})
+    if verdict is not None and chosen is not None:
+        by_time = {at: path for path, at in chosen.timed() if at is not None}
+        for at in verdict.subject_at_s:
+            frame = by_time.get(at)
+            if frame is None or taken(at):
+                continue
+            picks.append({"path": str(frame), "t": at, "why": "subject"})
+    return picks[:ALBUM_MAX]
+
+
 def verdict_record(policy: PolicyConfig, verdict: Verdict) -> dict[str, Any]:
     """One policy's verdict as kept in the event's `intent.verdicts`."""
     return {
@@ -453,6 +526,7 @@ def verdict_record(policy: PolicyConfig, verdict: Verdict) -> dict[str, Any]:
         "level": verdict.level,
         "persons": verdict.persons,
         "person_at_s": verdict.person_at_s,
+        "subject_at_s": verdict.subject_at_s,
         "confidence": verdict.confidence,
         "rationale": verdict.rationale,
         "model": verdict.model,

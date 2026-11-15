@@ -24,7 +24,9 @@ from vidette.api.routers.people import EventPeopleOut, event_people
 from vidette.auth.deps import require_scope
 from vidette.db import EventRow
 from vidette.events.payload import event_clip_url
+from vidette.ffmpeg import MediaToolError
 from vidette.frigate.client import FrigateError, FrigateNotFoundError
+from vidette.linked import find_linked, mosaic
 from vidette.runtime import AppRuntime
 
 router = APIRouter(
@@ -219,3 +221,74 @@ async def event_favorite(event_id: str, body: FavoriteIn, request: Request) -> N
     updated = await _runtime(request).db.set_event_favorite(event_id, body.favorite)
     if not updated:
         raise problem(404, "Event not found", _EVENT_GONE)
+
+
+# --- the other cameras at the moment of an event (ADR-0017) ---------------------------------
+
+
+class LinkedClipOut(BaseModel):
+    camera: str
+    started_at: float
+    ended_at: float
+    own: bool  # the event's own clip
+    approximate: bool  # this camera's video can arrive late: its time is a guess
+    same_person: bool  # a face also seen in the event (identity or enrolled person)
+    persons: int | None  # how many people the judge counted in that clip, when judged
+    scenario: str | None
+    event_id: str | None
+    clip: str | None  # where to play it
+
+
+class LinkedOut(BaseModel):
+    event_id: str
+    moment: float
+    start: float
+    end: float
+    clips: list[LinkedClipOut]
+    silent_cameras: list[str]  # configured cameras that recorded nothing then
+    mosaic: str | None  # all of them at once, as one video (made on request)
+
+
+@router.get("/events/{event_id}/linked")
+async def event_linked(event_id: str, request: Request) -> LinkedOut:
+    """Every clip-folder clip around the event's moment, on every camera."""
+    runtime = _runtime(request)
+    row = await _get_event_or_404(request, event_id)
+    linked = await find_linked(row, runtime.config, runtime.db)
+    cameras = [folder.camera for folder in runtime.config.clip_folders]
+    clips = [
+        LinkedClipOut(
+            camera=c.camera, started_at=c.started_at, ended_at=c.ended_at, own=c.own,
+            approximate=c.approximate, same_person=c.same_person, persons=c.persons,
+            scenario=c.scenario, event_id=c.event_id,
+            clip=f"/api/v1/events/{c.event_id}/clip.mp4" if c.event_id else None,
+        )
+        for c in linked.clips
+    ]  # fmt: skip
+    many = len(linked.cameras()) >= 2
+    return LinkedOut(
+        event_id=row.id, moment=linked.window.moment, start=linked.window.start,
+        end=linked.window.end, clips=clips, silent_cameras=linked.silent_cameras(cameras),
+        mosaic=f"/api/v1/events/{row.id}/linked.mp4" if many else None,
+    )  # fmt: skip
+
+
+@router.get("/events/{event_id}/linked.mp4")
+async def event_linked_video(event_id: str, request: Request) -> FileResponse:
+    """The cameras at the event's moment as one mosaic video (the first part, when it
+    had to be cut to stay under the size limit)."""
+    runtime = _runtime(request)
+    row = await _get_event_or_404(request, event_id)
+    linked = await find_linked(row, runtime.config, runtime.db)
+    try:
+        made = await mosaic(linked, runtime.config)
+    except MediaToolError as exc:
+        raise problem(503, "Cannot stitch the clips", str(exc)) from exc
+    if made is None:
+        raise problem(
+            404,
+            "Nothing to stitch",
+            "no other camera recorded anything around this event's moment (battery cameras "
+            "record only while awake)",
+        )
+    return FileResponse(made.files[0], media_type="video/mp4")

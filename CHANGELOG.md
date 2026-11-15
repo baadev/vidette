@@ -11,6 +11,38 @@ Development line `v0.2`: Vidette becomes an intent layer on top of Frigate
 images published from it.
 
 ### Added
+- **Quieter alerts that can be argued with**
+  ([ADR-0017](docs/architecture/adr/0017-subject-frames-other-cameras-and-questions.md)):
+  an alert's album holds only frames that show its subject (the best moment of each face,
+  then the frames the judge says show what its verdict is about; at most `frames`, now
+  3), not four evenly spread frames of an empty street. The judge names those frames
+  (`subject_frames`), and a scenario that alerts with no frame showing it is an
+  abstention, not an alert. The prompt says that ordinary use (getting into a car,
+  unlocking a door) is not an attempt, that an alerting scenario needs the act in the
+  frames, and to describe what people do rather than a guessed gender, age or
+  ethnicity. 👎 offers reasons (passed by, own car, ours, animal, vehicle, light, stalled
+  recording, wrong camera, right but not worth it, other with a typed answer), kept on the
+  event (`intent.review`) and as the dataset entry's new `reason`; after any answer the
+  buttons shrink to one that says what was chosen, and tapping it takes the answer back
+  exactly (feedback, label, face decision).
+- **The other cameras at the moment of an event**
+  ([docs/other-cameras.md](docs/other-cameras.md)): every clip-folder clip overlapping
+  15 s before to 45 s after the moment a person was first seen, on every camera, found on
+  demand; "the same person" only when an identity or an enrolled person is in both face
+  reports; `cross_camera.lag_up_to` for cameras whose video arrives late (measured 0 to
+  100 s for a battery camera behind a base station, 0 to 4.5 s for cameras that stream all
+  the time), their times marked approximate. One mosaic video in real time (landscape
+  cameras stacked, a portrait camera beside them, grey where a camera recorded nothing),
+  ffmpeg only, split under the size limit. Web event card, «📹 Другие камеры» under an
+  alert, `GET /api/v1/events/{id}/linked` and `…/linked.mp4`.
+- **Questions in plain words, and MCP** ([docs/assistant.md](docs/assistant.md)): free
+  text from an allowed chat (a reply to an alert makes it the context) goes to a small
+  tool-calling assistant: find events, an event's details, the clips at a moment, where an
+  identity was seen, send the mosaic, mark an event, today's digest. The judge's local
+  endpoint by default (native tool calls, a JSON-action prompt for servers without them),
+  `assistant.backend: cloud` opt-in and never given a name, a face or a frame. The three
+  commonest questions skip the model. The read-only tools at `POST /api/v1/mcp` behind the
+  API's auth.
 - **Anonymous identities** ([docs/people.md](docs/people.md#strangers-who-come-back),
   [ADR-0014](docs/architecture/adr/0014-anonymous-identities.md)), opt-in
   `people.track_unknown` (off by default): a readable unknown face of at least 64 px that
@@ -181,6 +213,11 @@ images published from it.
 - `server/uv.lock`; CI installs from it (`--locked`).
 
 ### Changed
+- **No hourly Telegram digest.** `notifications.telegram.digest_at` (21:00) sends the
+  day's digest once, silently, only when something needs a look (confirmed events that
+  woke nobody, unanswered alerts), in plain lines; `/status` gives the same for today so
+  far. The day is recorded before sending, so a restart never repeats it.
+  `digest_every` and `digest_settle` are ignored with a `vidette validate` warning.
 - `vidette collect` keeps the camera's own clock (RTP timestamps) behind a restreamer too,
   with a jump guard on the input (`setts`): a packet more than 10 s after the previous
   one, or not after it, continues one frame later, so go2rtc splicing a reconnect no

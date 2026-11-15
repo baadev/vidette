@@ -109,7 +109,7 @@ def render_entry(entry: Mapping[str, Any], indent: str = "  ") -> str:
     """One entry as a YAML list item, house style: scalars inline, media as a flow list,
     `draft` as a nested mapping. Keys in a stable order; None values are left out."""
     order = ["id", "scenario", "status", "number", "camera", "at", "duration_s", "media",
-             "upstream", "notes", "draft"]  # fmt: skip
+             "upstream", "notes", "reason", "draft"]  # fmt: skip
     keys = [key for key in order if key in entry] + [key for key in entry if key not in order]
     lines: list[str] = []
     for key in keys:

@@ -45,7 +45,14 @@ SYSTEM_PROMPT = (
     "decide, answer \"unsure\" rather than guessing. "
     "A person whose position changes between frames is walking, not lingering. How long "
     "someone stayed can only be judged from frames with no stall between them: a stall "
-    "freezes the picture and hides how much time passed."
+    "freezes the picture and hides how much time passed. "
+    "Ordinary use is not an attempt: opening a car or a door and getting in or out, "
+    "loading or unloading a car, unlocking a door and walking in, is someone using it. An "
+    "attempt needs something visibly wrong: a handle pulled that stays shut, several doors "
+    "or cars tried one after another, force, tools, a broken window. Name a scenario that "
+    "alerts only when the frames themselves show it; when you would have to assume it, "
+    "name the closest scenario that does not alert. Describe what people do, not how they "
+    "look: say a person, not a guessed gender, age or ethnicity."
 )
 
 VERDICT_SCHEMA: dict[str, Any] = {
@@ -139,11 +146,15 @@ def levels_schema(policy: PolicyText) -> dict[str, Any]:
             "description": {"type": "string"},
             "persons": {"type": "integer"},
             "first_person_frame": {"type": "integer"},
+            "subject_frames": {"type": "array", "items": {"type": "integer"}},
             "confidence": {"type": "number"},
         },
-        "required": ["scenario", "description", "persons", "first_person_frame", "confidence"],
+        "required": [
+            "scenario", "description", "persons", "first_person_frame", "subject_frames",
+            "confidence",
+        ],
         "additionalProperties": False,
-    }
+    }  # fmt: skip
 
 
 def levels_block(policy: PolicyText) -> str:
@@ -185,6 +196,20 @@ def _frame_time(value: object, frames: FrameSet) -> float | None:
     timed = frames.timed()
     index = int(value) - 1
     return timed[index][1] if index < len(timed) else None
+
+
+def _subject_numbers(value: object, count: int) -> list[int] | None:
+    """The frame numbers (1-based) the judge said show its subject, clearest first, only
+    those that exist; None when it did not answer the question at all (an older prompt)."""
+    if not isinstance(value, list):
+        return None
+    numbers: list[int] = []
+    for number in value:
+        if isinstance(number, bool) or not isinstance(number, int | float):
+            continue
+        if 1 <= int(number) <= count and int(number) not in numbers:
+            numbers.append(int(number))
+    return numbers
 
 
 def _confidence(value: object) -> float | None:
@@ -241,7 +266,9 @@ class VlmJudge:
                 "Answer with JSON: scenario (one id from the list, or unsure when the frames "
                 f"do not show enough), description ({sentence}), persons (how many different "
                 "people are visible over all frames, 0 if none), first_person_frame (the "
-                "number of the first frame showing a person, 0 if none), confidence (0 to 1)."
+                "number of the first frame showing a person, 0 if none), subject_frames (the "
+                "numbers of the frames that clearly show the person, animal or vehicle your "
+                "scenario is about, the clearest first; [] when none does), confidence (0 to 1)."
             )
             schema, schema_name = levels_schema(policy), "level_verdict"
         else:
@@ -328,12 +355,28 @@ class VlmJudge:
                 **measured,
             )
         level = policy.scenario_level(scenario)
+        subject = _subject_numbers(data.get("subject_frames"), len(frames.paths))
+        if level is not None and level.alerts and subject is not None and not subject:
+            # an alert with no frame that shows it is an assumption: no alert (ADR-0017)
+            return Verdict(
+                alert=False,
+                abstained=True,
+                label=None,
+                rationale=(
+                    f"unsure: named {scenario} but pointed at no frame that shows it; "
+                    f"{description or ''}"
+                ).strip("; ")[:400],
+                **measured,
+            )
         return Verdict(
             alert=level is not None and level.alerts,
             label=scenario,
             level=None if level is None else level.name,
             persons=_persons(data.get("persons")),
             person_at_s=_frame_time(data.get("first_person_frame"), frames),
+            subject_at_s=[
+                at for at in (_frame_time(n, frames) for n in subject or []) if at is not None
+            ],
             confidence=_confidence(data.get("confidence")),
             rationale=str(description)[:400] if description else None,
             **measured,

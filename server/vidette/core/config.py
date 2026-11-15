@@ -619,11 +619,15 @@ class TelegramConfig(StrictModel):
     recipients: Literal["first", "all"] = "all"
     # Names of recognized people in messages and on the "This is ..." buttons. Off: "known".
     names: bool = False
-    frames: int = Field(default=4, ge=1, le=9)  # key frames in an alert's album
+    frames: int = Field(default=3, ge=1, le=9)  # album frames that show the subject
     max_video_mb: float = Field(default=20, gt=0, le=50)  # bigger clips are linked
     collapse: str = "5m"  # one camera's alerts within this window become one message
-    digest_every: str = "1h"
-    digest_settle: str = "20m"  # events younger than this wait for their verdict
+    # The day's digest, once, silently, at this local time ("HH:MM"), and only when it has
+    # something that needs a look; null: only on request (/status, or asking the bot).
+    digest_at: str | None = "21:00"
+    # Removed (the hourly digest was noise): accepted and ignored, `vidette validate` says so.
+    digest_every: str | None = None
+    digest_settle: str | None = None
     quiet_for: str = "1h"  # /quiet
     labels: bool = True  # answers become reviewed labels in the clip's dataset
     camera_names: dict[str, str] = Field(default_factory=dict)  # camera → name in messages
@@ -668,10 +672,13 @@ class TelegramConfig(StrictModel):
                 raise ValueError(
                     "notifications.telegram.topics names a chat that is not in allowed_chats"
                 )
-        for key in ("collapse", "digest_every", "digest_settle", "quiet_for"):
-            seconds = _duration(getattr(self, key), f"notifications.telegram.{key}")
-            if key == "digest_every" and seconds < 60:
-                raise ValueError("notifications.telegram.digest_every must be at least 1m")
+        for key in ("collapse", "quiet_for"):
+            _duration(getattr(self, key), f"notifications.telegram.{key}")
+        if self.digest_at is not None and self.digest_minutes is None:
+            raise ValueError(
+                "notifications.telegram.digest_at must be a local time like 21:00, or null "
+                "for a digest only on request"
+            )
         _check_http_url(self.api_url, "notifications.telegram.api_url")
         self.api_url = self.api_url.rstrip("/")
         if self.clip_url is not None:
@@ -679,10 +686,14 @@ class TelegramConfig(StrictModel):
             self.clip_url = self.clip_url.rstrip("/")
         return self
 
-    def seconds(
-        self, key: Literal["collapse", "digest_every", "digest_settle", "quiet_for"]
-    ) -> float:
+    def seconds(self, key: Literal["collapse", "quiet_for"]) -> float:
         return _duration(getattr(self, key), key)
+
+    @property
+    def digest_minutes(self) -> int | None:
+        """`digest_at` as minutes after local midnight; None when off or malformed."""
+        match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", (self.digest_at or "").strip())
+        return None if match is None else int(match.group(1)) * 60 + int(match.group(2))
 
     @property
     def recipient_chats(self) -> list[int]:
@@ -723,6 +734,48 @@ class TelemetryConfig(StrictModel):
     enabled: bool = False
 
 
+class CrossCameraConfig(StrictModel):
+    """The other cameras at the moment of an event (ADR-0017): which clips count as "at
+    the same moment", and which cameras' clips can arrive late."""
+
+    before: str = "15s"  # look this long before the moment (when a person was first seen)
+    after: str = "45s"  # ...and this long after it
+    # Cameras whose video reaches the collector late (a battery camera behind a base
+    # station: measured 0 to 100 s, different every wake). Their clips are searched that
+    # much later and shown as approximate in time. camera id → duration.
+    lag_up_to: dict[str, str] = Field(default_factory=dict)
+    max_video_mb: float = Field(default=19, gt=0, le=50)  # a longer mosaic is split
+
+    @model_validator(mode="after")
+    def _check(self) -> CrossCameraConfig:
+        _duration(self.before, "cross_camera.before")
+        _duration(self.after, "cross_camera.after")
+        for camera, lag in self.lag_up_to.items():
+            _duration(lag, f"cross_camera.lag_up_to.{camera}")
+        return self
+
+    def seconds(self, key: Literal["before", "after"]) -> float:
+        return _duration(getattr(self, key), key)
+
+    def lag_s(self, camera: str) -> float:
+        lag = self.lag_up_to.get(camera)
+        return 0.0 if lag is None else _duration(lag, camera)
+
+
+class AssistantConfig(StrictModel):
+    """Questions to the bot in plain words, and the same tools over MCP (ADR-0017).
+
+    The model is one of the judge's endpoints: `local` (understanding.vlm.local, the
+    default: nothing leaves your network) or `cloud` (understanding.vlm.cloud: the question
+    and the facts the tools return go to that vendor, never a name, a face or a frame)."""
+
+    enabled: bool = True
+    backend: Literal["local", "cloud", "none"] = "local"
+    max_calls_per_day: int = Field(default=300, ge=1)
+    max_steps: int = Field(default=3, ge=1, le=6)  # tool rounds before it must answer
+    timeout_s: float = Field(default=300, gt=0)  # one model call; a shared server queues
+
+
 class VidetteConfig(StrictModel):
     server: ServerConfig = ServerConfig()
     storage: StorageConfig = StorageConfig()
@@ -732,6 +785,8 @@ class VidetteConfig(StrictModel):
     policies: list[PolicyConfig] = Field(default_factory=list)
     people: PeopleConfig = Field(default_factory=PeopleConfig)
     notifications: NotificationsConfig = NotificationsConfig()
+    cross_camera: CrossCameraConfig = Field(default_factory=CrossCameraConfig)
+    assistant: AssistantConfig = Field(default_factory=AssistantConfig)
     integrations: IntegrationsConfig = IntegrationsConfig()
     telemetry: TelemetryConfig = TelemetryConfig()
 
@@ -834,6 +889,21 @@ def designed_feature_warnings(config: VidetteConfig) -> list[str]:
             warnings.append(
                 "notifications.telegram.recipients: first, so alerts and digests go to the "
                 "first allowed chat only (a trial run); set all when the others agreed"
+            )
+        if config.assistant.enabled and config.assistant.backend == "cloud":
+            cloud = config.understanding.vlm.cloud
+            where = "the cloud backend" if cloud is None else f"{cloud.vendor}"
+            warnings.append(
+                f"assistant.backend: cloud sends questions asked in Telegram and the facts the "
+                f"tools find (times, cameras, what the judge said, identity numbers; never a "
+                f"name, a face or a frame) to {where}"
+            )
+        removed = [k for k in ("digest_every", "digest_settle") if getattr(telegram, k)]
+        if removed:
+            warnings.append(
+                f"notifications.telegram.{', '.join(removed)}: no longer used (there is no "
+                "hourly digest any more); the day's digest goes out at digest_at (21:00) "
+                "when it has something to say, and on request. Delete the key"
             )
         if telegram.names:
             warnings.append(

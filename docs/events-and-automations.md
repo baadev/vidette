@@ -106,7 +106,7 @@ The reference implementation lives in `server/vidette/notify/signing.py` (tested
 
 ## Push, Telegram and friends
 
-For Telegram with buttons that record feedback (and an hourly digest, `/status`, `/live`,
+For Telegram with buttons that record feedback (and the day's digest, `/status`, `/live`,
 `/quiet`), use the built-in bot: [telegram.md](telegram.md). The Apprise `tgram://`
 channel below only sends text.
 

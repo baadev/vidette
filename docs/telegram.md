@@ -1,11 +1,13 @@
-# Telegram: alerts with buttons that teach, an hourly digest, three commands
+# Telegram: alerts with buttons that teach, the day's digest, three commands
 
-The Telegram bot is how a verdict reaches a phone. An alert is an album (key frames and
-the clip) and a short text: the camera, the time, what the judge saw, who the face check
-recognized, and four buttons. Each tap is recorded as feedback on the event and, for
-clips in a dataset folder, as a reviewed label for `vidette eval`. Everything that did
-not wake anyone arrives once an hour as a digest. Design and guardrails:
-[ADR-0013](architecture/adr/0013-telegram-bot.md).
+The Telegram bot is how a verdict reaches a phone. An alert is an album (the frames that
+show the person or the thing it is about, and the clip) and a short text: the camera, the
+time, what the judge saw, who the face check recognized, and four buttons. Each tap is
+recorded as feedback on the event and, for clips in a dataset folder, as a reviewed label
+for `vidette eval`; a 👎 asks why. In the evening, a short digest of the day when
+something needs a look, and on request any time. Design and guardrails:
+[ADR-0013](architecture/adr/0013-telegram-bot.md),
+[ADR-0017](architecture/adr/0017-subject-frames-other-cameras-and-questions.md).
 
 Status: 🚧 everything below is built and tested against a fake Telegram API (no network);
 run live with clip-folder cameras and a local judge. No accuracy figure exists for any policy; that needs `vidette eval` on labelled
@@ -142,9 +144,13 @@ language (the rest of the prompt stays English).
 [Кто это?] [Не знаю]
 ```
 
-- Above the text, an album: up to `frames` key frames (4) and the clip when it is at most
-  `max_video_mb` (20 MB; Telegram's limit for bots is 50). A bigger clip becomes a link
-  to `clip_url` (default `server.base_url`), which works only where that address does.
+- Above the text, an album: up to `frames` (3) frames that show the subject, and the clip
+  when it is at most `max_video_mb` (20 MB; Telegram's limit for bots is 50). The frames
+  are the best moment of each face the check found (largest first), then the judge's own
+  frames that it said show what its verdict is about; never an empty street. An event
+  judged before this existed shows the judged frames from the first one with a person.
+  A bigger clip becomes a link to `clip_url` (default `server.base_url`), which works
+  only where that address does.
 - The album arrives silently; the text with the buttons is what buzzes.
 - One camera's alerts within `collapse` (5 min) at the same or a lower level edit the
   first message ("Ещё на этой камере: 2" and their times) instead of buzzing again; a
@@ -171,10 +177,14 @@ after the person has gone. With `vidette collect --early 8s`, the collector writ
 first 8 seconds of each recording to `.early/` while it goes on, and the clip folder
 source picks that up within a second:
 
-1. The early window is judged at once. If it is an alert, the alert goes out as usual
-   (routing, quiet hours, collapse, one per event and chat), marked
-   «По первым секундам записи»; its album holds the frames the judge saw and the first
-   seconds as a video. Anything else changes nothing yet.
+1. The early window is judged at once. If it is an alert at a level that wakes for
+   anyone (`wake: always`), the alert goes out as usual (routing, quiet hours, collapse,
+   one per event and chat), marked
+   «По первым секундам записи»; its album holds the frames that show the subject and the
+   first seconds as a video. Anything else, a lower level included, changes nothing yet:
+   in testing, a person who seemed to stop in the first 8 s mostly walked on, and two of
+   the nine alerts marked false in two days were such early alerts that the whole clip
+   then called ordinary ([ADR-0017](architecture/adr/0017-subject-frames-other-cameras-and-questions.md)).
 2. When the clip ends it is judged whole, under the same event, also after an early alert.
    - no early alert: the clip is judged like any other, so an early "nothing" never hides
      a later alert;
@@ -191,6 +201,29 @@ On a shared judge that takes a minute per call it is still a minute; with a mode
 own, the target is 20 to 30 s from the person appearing.
 
 ## The buttons
+
+Under a new alert: **👍 верно**, **👎 ложная**, **Кто это?** (when a face was found) and
+**Не знаю**. After an answer the buttons shrink to one that says what was chosen
+(«👎 прошёл мимо», «👤 знакомый «Соседка»»): tapping it takes that answer back exactly
+(the event's feedback, the dataset label, the face decision) and brings the full buttons
+again. No keyboard of six buttons is left on old alerts.
+
+**Why was it false?** 👎 is recorded at once and the bot offers the reasons, the most
+likely first for this event (a stalled recording offers «Запись зависла» first, a
+verdict about a car «Сел в машину, своя», a person at the house «Прошёл мимо»):
+
+| Reason | Stored as | The clip's label |
+|---|---|---|
+| Прошёл мимо | `passing` | `passer_by` when the policy has it, else `other` |
+| Сел в машину, своя | `car_use` | `car_use` (or `car_passing`) when the policy has it |
+| Свой или знакомый | `ours` | `household_member` |
+| Животное, Проехала машина | `animal`, `vehicle` | `animal`, `car_passing` |
+| Свет, тень, дождь; Запись зависла; Не та камера | `light`, `stalled`, `camera` | `other` |
+| Верно, но неважно | `unimportant` | the judge's own scenario: it saw right, the alert was not worth it |
+| Другое: напишу | `other` | `other`; the bot asks what it was, the reply is the entry's `notes` |
+
+The reason is kept on the event (`intent.review`) and as the entry's `reason` in
+`labels.yaml`; the digest counts the reasons («Ложные чаще всего: прошёл мимо (5)»).
 
 | Button | The event | The clip's dataset (`labels.yaml`) | Known people |
 |---|---|---|---|
@@ -216,21 +249,47 @@ own, the target is 20 to 30 s from the person appearing.
   question; after a restart of the service, tap the button again.
 - `labels: false` keeps the feedback on the event only.
 
+## The other cameras, and questions
+
+Under an alert, when there are other clip-folder cameras, **📹 Другие камеры** sends every
+camera at the moment of the alert as one video, a reply to the alert, with which tile is
+which camera and what each recorded; a camera that recorded nothing is named as such
+(battery cameras record only while awake). Details: [other-cameras.md](other-cameras.md).
+
+Any other text from an allowed chat is a question, answered by a small assistant with the
+local model by default: «где ещё был этот человек?» or «пришли другие камеры» as a reply to
+an alert, «что было у калитки после 9?», «сводка». Details and privacy:
+[assistant.md](assistant.md).
+
 ## The digest and the commands
 
-Once per `digest_every` (1 h, on the hour), silently, into the chat's digest topic:
-everything since the last digest that did not wake that chat, per camera: how many
-events, how many of each ordinary scenario, the confirmed ones that did not wake (known
-people, quiet hours) with their time and description, and the events without a verdict
-with the reason. Events younger than `digest_settle` (20 min) wait for the next digest,
-because their verdict may still come. Nothing happened: nothing is sent.
+There is no hourly digest. Once a day at `digest_at` (21:00, local time), silently, into
+the chat's digest topic, the day in a few plain lines, **only when something needs a
+look**: an event that was confirmed but woke nobody (known people, quiet hours), or alerts
+nobody answered yet. A day of passers-by and answered alerts sends nothing.
+
+```
+🌙 Итог дня, 14 января
+Тревог: 3. По вашим отметкам: ложных 2, без ответа 1.
+Ложные чаще всего: прошёл мимо (2).
+1 тревога ждёт ответа, последняя в 18:40 (Крыльцо). Кнопки под тревогой.
+Без тревоги, но стоит взглянуть:
+• 20:05 Сад: человек у дома, свой: Sam
+Всего за день 410 роликов: прохожие 90, машины 60, животные 4.
+Не проверено судьёй: 150 (не дошла очередь).
+```
+
+The day is written down before the message goes out, so a restart never sends it twice; a
+service that was down at 21:00 sends it when it is back the same day. `/status` answers
+with the same lines for today so far, always, also when nothing happened.
 
 | Command | What it does | Who |
 |---|---|---|
-| `/status` | cameras, events and alerts today, the last alert and where its time went, the judge; then the digest so far | every allowed chat (the digest: recipients) |
+| `/status` | cameras, events and alerts today, the last alert and where its time went, the judge; then today's digest so far | every allowed chat (the digest: recipients) |
 | `/live` | says that live view will be part of the Vidette app itself; no links to a separate restreamer | every allowed chat |
-| `/quiet` | quiet for `quiet_for` (1 h): `always` levels still alert, the rest waits for the digest; `/quiet off` ends it | per chat |
+| `/quiet` | quiet for `quiet_for` (1 h): `always` levels still alert, the rest is in the digest; `/quiet off` ends it | per chat |
 | `/help` | what the bot does | every allowed chat |
+| any other text | a question for the assistant ([assistant.md](assistant.md)) | every allowed chat |
 
 Commands are answered in the topic they were sent in. Commands older than 10 minutes
 (sent while the service was down) are ignored; button presses are not.

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -309,8 +310,11 @@ class TelegramApi:
         reply_to: int,
         thread_id: int | None = None,
         timeout: float = 120.0,
+        caption: str | None = None,
+        size: tuple[int, int] | None = None,
     ) -> dict[str, Any]:
-        """A photo or video answering an earlier message, without a sound."""
+        """A photo or video answering an earlier message, without a sound; `caption` is
+        HTML, `size` (width, height) lets a phone show a video's shape before it loads."""
         method, field = ("sendVideo", "video") if kind == "video" else ("sendPhoto", "photo")
         result: dict[str, Any] = await self.call(
             method,
@@ -321,12 +325,26 @@ class TelegramApi:
                 "supports_streaming": "true" if kind == "video" else None,
                 "disable_notification": "true",
                 "reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": True},
+                "caption": caption,
+                "parse_mode": "HTML" if caption else None,
+                "width": None if size is None else str(size[0]),
+                "height": None if size is None else str(size[1]),
             },
             files={"file": upload},
             timeout=timeout,
             retry_timeouts=False,
         )
         return result
+
+    async def send_chat_action(
+        self, chat_id: int, action: str = "typing", *, thread_id: int | None = None
+    ) -> None:
+        """«печатает…» or «отправляет видео…» while a slow answer is on its way."""
+        with contextlib.suppress(TelegramError):
+            await self.call(
+                "sendChatAction",
+                {"chat_id": chat_id, "action": action, "message_thread_id": thread_id},
+            )
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
         await self.call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})

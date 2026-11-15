@@ -13,6 +13,8 @@ the top; absence of a banner means it describes reality.
 | Measure a policy | [eval.md](eval.md) |
 | Tell the judge who it saw (opt-in face recognition) | [people.md](people.md) |
 | Get alerts in Telegram, with buttons that teach it | [telegram.md](telegram.md) |
+| See what every camera recorded at that moment | [other-cameras.md](other-cameras.md) |
+| Ask the bot in plain words, or connect an assistant over MCP | [assistant.md](assistant.md) |
 | Understand the system | [architecture/overview.md](architecture/overview.md) |
 | Know why it changed course | [ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md) |
 | Configure everything | [configuration.md](configuration.md) + annotated [config.example.yaml](../deploy/config.example.yaml) |

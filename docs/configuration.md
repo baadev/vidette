@@ -247,8 +247,9 @@ notifications:
 
 ### `notifications.telegram`
 
-The Telegram bot: alerts with feedback buttons, an hourly digest, `/status`, `/live`,
-`/quiet` ([telegram.md](telegram.md), [ADR-0013](architecture/adr/0013-telegram-bot.md)).
+The Telegram bot: alerts with feedback buttons, the day's digest, `/status`, `/live`,
+`/quiet` ([telegram.md](telegram.md), [ADR-0013](architecture/adr/0013-telegram-bot.md),
+[ADR-0017](architecture/adr/0017-subject-frames-other-cameras-and-questions.md)).
 
 ```yaml
 notifications:
@@ -259,11 +260,10 @@ notifications:
     topics: ${VIDETTE_TELEGRAM_TOPICS}         # "<chat>:alerts=<thread>,digest=<thread>;…"
     recipients: all               # all | first (a trial: only the first chat gets alerts)
     names: false                  # names of recognized people in messages (privacy)
-    frames: 4                     # key frames in an alert's album (1 to 9)
+    frames: 3                     # frames in an alert's album that show the subject (1 to 9)
     max_video_mb: 20              # bigger clips are linked (clip_url), not sent
     collapse: 5m                  # one camera's alerts within this edit the first one
-    digest_every: 1h              # on the hour; at least 1m
-    digest_settle: 20m            # younger events wait for their verdict
+    digest_at: "21:00"            # the day's digest, local time; null: only on request
     quiet_for: 1h                 # /quiet
     labels: true                  # answers become reviewed labels in the clip's dataset
     camera_names: {}              # camera → name in messages
@@ -271,8 +271,38 @@ notifications:
     api_url: https://api.telegram.org
 ```
 
-`vidette validate` warns when `recipients: first` leaves allowed chats without alerts
-and when `names: true` sends names to Telegram.
+### `cross_camera`
+
+The other cameras at the moment of an event ([other-cameras.md](other-cameras.md)).
+
+```yaml
+cross_camera:
+  before: 15s                     # look this long before the moment a person was first seen
+  after: 45s                      # ...and this long after it
+  lag_up_to: {}                   # camera → how late its video can arrive, e.g. {porch: 2m}
+  max_video_mb: 19                # a longer mosaic is encoded smaller, then cut into parts
+```
+
+### `assistant`
+
+Questions in plain words in Telegram, and the same tools over MCP
+([assistant.md](assistant.md)).
+
+```yaml
+assistant:
+  enabled: true
+  backend: local                  # local | cloud | none: an understanding.vlm endpoint
+  max_calls_per_day: 300
+  max_steps: 3                    # tool rounds before it must answer
+  timeout_s: 300                  # one model call
+```
+
+`backend: cloud` sends questions and what the tools found (never a name, a face or a
+frame) to the cloud vendor; `vidette validate` says so.
+
+`vidette validate` warns when `recipients: first` leaves allowed chats without alerts,
+when `names: true` sends names to Telegram, and when the removed `digest_every` or
+`digest_settle` are still there (they are ignored: there is no hourly digest any more).
 
 ## `integrations`
 

@@ -105,11 +105,24 @@ notifications:
   #   topics: ${VIDETTE_TELEGRAM_TOPICS}                 # "<chat>:alerts=<t>,digest=<t>;…"
   #   recipients: all        # first: a trial, only the first chat gets alerts
   #   names: false           # names of recognized people go to Telegram when true
+  #   digest_at: "21:00"     # the day's digest, only when something needs a look
   rules:
     - when: event.confirmed  # nothing is confirmed until verdicts land (v0.2, week 2)
       channels: [push, telegram, hooks]
     - when: system.*         # Frigate unreachable, broker down: it snitches on itself
       channels: [hooks]
+
+# The other cameras at the moment of an event (docs/other-cameras.md): clip folders only.
+cross_camera:
+  before: 15s
+  after: 45s
+  # lag_up_to: {porch: 2m}   # cameras whose video can reach the collector late
+
+# Questions in plain words to the Telegram bot, and the same tools over MCP
+# (docs/assistant.md). local: the judge's own server; cloud never gets names or faces.
+assistant:
+  enabled: true
+  backend: local
 
 integrations:
   mqtt:                    # Vidette's own outbound MQTT (verdict events, HA discovery)

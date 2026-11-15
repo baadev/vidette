@@ -178,6 +178,36 @@ export type IdentityDetail = Identity & {
   similar: { id: number; label: string; score: number; face: string | null; weak?: boolean }[];
 };
 
+/** One clip of any camera around an event's moment (ADR-0017). */
+export type LinkedClip = {
+  camera: string;
+  started_at: number;
+  ended_at: number;
+  /** The event's own clip. */
+  own: boolean;
+  /** This camera's video can arrive late: its place in time is a guess. */
+  approximate: boolean;
+  /** A face also seen in the event (an identity or an enrolled person). */
+  same_person: boolean;
+  persons: number | null;
+  scenario: string | null;
+  event_id: string | null;
+  clip: string | null;
+};
+
+/** The other cameras at the moment of an event: GET /api/v1/events/{id}/linked. */
+export type Linked = {
+  event_id: string;
+  moment: number;
+  start: number;
+  end: number;
+  clips: LinkedClip[];
+  /** Configured cameras that recorded nothing then (asleep, or nothing moved). */
+  silent_cameras: string[];
+  /** All of them at once as one video, or null with one camera only. */
+  mosaic: string | null;
+};
+
 export type UpstreamFacts = {
   severity: string | null;
   detections: string[];
@@ -363,6 +393,10 @@ export const api = {
     if (opts?.favoriteOnly) query.set("favorite", "true");
     const qs = query.toString();
     return getJson<EventInfo[]>(qs ? `${BASE}/events?${qs}` : `${BASE}/events`);
+  },
+
+  eventLinked(id: string): Promise<Linked> {
+    return getJson<Linked>(`/api/v1/events/${encodeURIComponent(id)}/linked`);
   },
 
   async eventFeedback(id: string, verdict: "up" | "down"): Promise<void> {

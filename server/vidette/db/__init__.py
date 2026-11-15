@@ -531,8 +531,9 @@ class Database:
             )
             await self._db.commit()
 
-    async def set_event_feedback(self, event_id: str, verdict: str) -> bool:
-        """Record 👍/👎 ('up'/'down') on an event; False when the id is unknown."""
+    async def set_event_feedback(self, event_id: str, verdict: str | None) -> bool:
+        """Record 👍/👎 ('up'/'down') on an event, or clear it (None); False when the id
+        is unknown."""
         async with self._write_lock:
             async with self._db.execute(
                 "UPDATE events SET feedback = ? WHERE id = ?", (verdict, event_id)
@@ -726,6 +727,31 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
         return _telegram_message(row) if row is not None else None
+
+    async def telegram_message_at(
+        self, chat_id: int, message_id: int
+    ) -> TelegramMessageRow | None:
+        """The bot's message row a Telegram message belongs to: the message itself (an
+        alert, a collapsed line, an answer), or an alert whose album holds it."""
+        async with self._db.execute(
+            "SELECT * FROM telegram_messages WHERE chat_id = ? AND message_id = ?"
+            " ORDER BY CASE kind WHEN 'alert' THEN 0 ELSE 1 END, id DESC LIMIT 1",
+            (chat_id, message_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is not None:
+            return _telegram_message(row)
+        async with self._db.execute(
+            "SELECT * FROM telegram_messages WHERE chat_id = ? AND kind IN ('alert', 'test')"
+            " ORDER BY id DESC LIMIT 500",
+            (chat_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        for candidate in rows:
+            found = _telegram_message(candidate)
+            if message_id in (found.data.get("album") or []):
+                return found
+        return None
 
     async def telegram_alerts_for_event(self, event_id: str) -> list[TelegramMessageRow]:
         """The alert (or collapsed) messages one event got, one per chat."""

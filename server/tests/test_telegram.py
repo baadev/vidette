@@ -37,9 +37,9 @@ from vidette.people.check import build_report, crop_writer
 from vidette.telegram.api import TelegramApi, TelegramError
 from vidette.telegram.routing import decide, known_only
 from vidette.telegram.service import TelegramService, unjudged_reason
-from vidette.verdicts.base import Case, Verdict, policy_text
+from vidette.verdicts.base import Case, FrameSet, Verdict, policy_text
 from vidette.verdicts.vlm import VlmJudge
-from vidette.verdicts.worker import VerdictWorker
+from vidette.verdicts.worker import VerdictWorker, album_frames, early_may_alert
 from vidette.vlm.budget import MemoryLedger
 from vidette.vlm.client import VlmClient
 from vidette.vlm.endpoint import endpoint_for
@@ -233,7 +233,7 @@ def test_config_reads_chats_and_topics_from_one_line_each(tmp_path: Path) -> Non
         ({"topics": "1001 alerts 11"}, "entry 1 is not"),
         ({"topics": "5555:alerts=1"}, "not in allowed_chats"),
         ({"live": {"url": "http://192.0.2.10:1984"}}, "live view will be part of the Vidette app"),
-        ({"digest_every": "10s"}, "at least 1m"),
+        ({"digest_at": "25:00"}, "digest_at must be a local time"),
     ],
 )
 def test_config_mistakes_name_the_key_and_never_echo_the_token(
@@ -315,6 +315,10 @@ async def test_a_policy_with_levels_asks_for_a_scenario_and_derives_the_alert(
             {"scenario": "passer_by", "description": "Мимо.", "persons": 2, "confidence": 0.9},
             {"scenario": "other", "description": "Пусто.", "persons": 0, "confidence": 0.9},
             {"scenario": "unsure", "description": "Темно.", "persons": 0, "confidence": 0.1},
+            {"scenario": "touching_equipment", "description": "Наверное, щиток.", "persons": 1,
+             "subject_frames": [], "confidence": 0.7},
+            {"scenario": "touching_equipment", "description": "Щиток.", "persons": 1,
+             "subject_frames": [1, 7], "confidence": 0.9},
         ]
     )  # fmt: skip
     fake = FakeVlmApi(answer=lambda _t, _i, _b: next(answers))
@@ -335,12 +339,44 @@ async def test_a_policy_with_levels_asks_for_a_scenario_and_derives_the_alert(
     assert not other.alert and other.level is None and other.label == "other"
     unsure = await judge.judge(case, text)
     assert unsure.abstained and not unsure.alert
+    assumed = await judge.judge(case, text)
+    assert assumed.abstained and not assumed.alert, "an alert no frame shows is not one"
+    assert assumed.rationale is not None and "pointed at no frame" in assumed.rationale
+    shown = await judge.judge(case, text)
+    assert shown.alert and shown.subject_at_s == [], "frame 1 has no known time here"
     body = fake.requests[0]["body"]
     schema = body["response_format"]["json_schema"]["schema"]
     assert "touching_equipment" in schema["properties"]["scenario"]["enum"]
     prompt = json.dumps(body["messages"], ensure_ascii=False)
     assert "Level critical (an alert)" in prompt and "in Russian" in prompt
+    assert "subject_frames" in schema["required"] and "not a guessed gender" in prompt
     await http.aclose()
+
+
+def test_early_windows_alert_only_for_levels_that_wake_for_anyone(tmp_path: Path) -> None:
+    [policy] = make_config(tmp_path).policies
+    critical = Verdict(alert=True, label="touching_equipment", level="critical")
+    elevated = Verdict(alert=True, label="person_at_house", level="elevated")
+    assert early_may_alert(policy, critical) and not early_may_alert(policy, elevated)
+    plain = policy.model_copy(update={"levels": {}})
+    assert early_may_alert(plain, Verdict(alert=True)), "a policy without levels: as before"
+
+
+async def test_the_album_is_the_faces_best_moments_then_what_the_judge_pointed_at(
+    tmp_path: Path,
+) -> None:
+    frames = []
+    for n in (1, 2, 3):
+        frame = tmp_path / "chosen" / f"{n}.jpg"
+        frame.parent.mkdir(exist_ok=True)
+        frame.write_bytes(b"\xff\xd8\xff\xd9")
+        frames.append(frame)
+    chosen = FrameSet(frames, [0.5, 2.0, 4.0], "activity", 6.0)
+    verdict = Verdict(alert=True, label="person_at_house", subject_at_s=[4.0, 2.0])
+    case = Case(Incident(source="t", source_id="1", camera="c", started_at=0), frames=chosen)
+    album = await album_frames(case, chosen, verdict, None, tmp_path / "album")
+    assert [(a["t"], a["why"]) for a in album] == [(4.0, "subject"), (2.0, "subject")]
+    assert await album_frames(case, chosen, Verdict(alert=False), None, tmp_path) == []
 
 
 async def test_the_worker_judges_the_newest_incident_first(tmp_path: Path) -> None:
@@ -380,8 +416,8 @@ async def test_an_alert_is_an_album_and_a_text_with_buttons_once(tmp_path: Path)
     assert album.params["chat_id"] == str(OWNER)
     assert album.params["message_thread_id"] == str(ALERTS)
     media = json.loads(album.params["media"])
-    assert [m["type"] for m in media] == ["photo"] * 4 + ["video"]
-    assert set(album.files) == {"frame0", "frame1", "frame2", "frame3", "clip"}
+    assert [m["type"] for m in media] == ["photo"] * 3 + ["video"]
+    assert set(album.files) == {"frame0", "frame1", "frame2", "clip"}
     message = b.fake.last("sendMessage").params
     assert message["chat_id"] == OWNER and message["message_thread_id"] == ALERTS
     text = message["text"]
@@ -414,11 +450,39 @@ async def test_an_interrupted_recording_is_said_and_the_album_shows_what_the_jud
     media = json.loads(b.fake.last("sendMediaGroup").params["media"])
     assert [m["type"] for m in media] == ["photo", "photo", "video"]
     assert "📼 Запись прерывалась: 38 пауз, до 13 с" in b.fake.last("sendMessage").params["text"]
-    b.clock[0] += 3600
-    await event(b, "20261114-170300", state="dismissed", scenario="passer_by", level="none",
-                started=b.clock[0] - 1800, extra={"stream": stream})  # fmt: skip
-    await b.service.send_digest(OWNER, thread=DIGEST)
-    assert "запись прерывалась 1" in b.fake.last("sendMessage").params["text"]
+    await b.db.close()
+
+
+async def test_the_album_shows_the_subject_not_an_empty_street(tmp_path: Path) -> None:
+    """Frames the worker chose because they show the subject (`intent.album`) come first
+    and alone; without them, the judged frames from the first one with a person."""
+    b = await bot(tmp_path, frames=3)
+    judged, album = [], []
+    for n in (1, 2, 3, 4):
+        frame = tmp_path / "judge-frames" / f"{n}.jpg"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(b"\xff\xd8\xff\xd9")
+        judged.append({"path": str(frame), "t": float(n)})
+    face = tmp_path / "judge-frames" / "face-1.jpg"
+    face.write_bytes(b"\xff\xd8\xff\xd9")
+    album = [{"path": str(face), "t": 2.6, "why": "face"},
+             {"path": judged[2]["path"], "t": 3.0, "why": "subject"}]  # fmt: skip
+    with_album = await event(b, "20260115-101500", extra={"frames": judged, "album": album})
+    await alert(b, with_album)
+    media = json.loads(b.fake.last("sendMediaGroup").params["media"])
+    assert [m["type"] for m in media] == ["photo", "photo", "video"]
+    sent = b.fake.last("sendMediaGroup").files
+    assert sent["frame0"][0] == "face-1.jpg" and sent["frame1"][0] == "3.jpg"
+
+    b.clock[0] += 600  # past `collapse`: a new alert, not a line in the first one
+    older = await event(b, "20260115-101600", extra={"frames": judged})
+    row = await b.db.get_event(older)
+    assert row is not None and row.intent is not None
+    row.intent["verdicts"][0]["person_at_s"] = 3.0
+    await b.db.update_event(older, intent=row.intent)
+    await alert(b, older)
+    sent = b.fake.last("sendMediaGroup").files
+    assert [sent[k][0] for k in sorted(sent) if k.startswith("frame")] == ["3.jpg", "4.jpg"]
     await b.db.close()
 
 
@@ -563,27 +627,68 @@ async def test_buttons_become_reviewed_labels_and_edit_the_alert(tmp_path: Path)
     event_id = await event(b, "20260115-101500")
     [row] = await alert(b, event_id)
 
+    def keyboard() -> list[list[str]]:
+        markup = b.fake.last("editMessageText").params["reply_markup"]["inline_keyboard"]
+        return [[button["text"] for button in line] for line in markup]
+
+    def entry() -> dict[str, Any]:
+        [found] = yaml.safe_load((b.root / "labels.yaml").read_text())["entries"]
+        return dict(found)
+
     await b.service.handle_update(callback(b, row, "ok"))
     labels = yaml.safe_load((b.root / "labels.yaml").read_text())
     assert "touching_equipment" in labels["scenarios"] and "other" in labels["scenarios"]
-    [entry] = labels["entries"]
-    assert entry["id"] == "20260115-101500" and entry["status"] == "reviewed"
-    assert entry["scenario"] == "touching_equipment" and entry["number"] == 1
-    assert entry["draft"]["by"].startswith("vlm-local fake-vlm (live)")
-    assert "✅ Отмечено: верно" in b.fake.last("editMessageText").params["text"]
-    assert b.fake.last("answerCallbackQuery").params["text"] == "Отмечено: верно"
+    assert entry()["id"] == "20260115-101500" and entry()["status"] == "reviewed"
+    assert entry()["scenario"] == "touching_equipment" and entry()["number"] == 1
+    assert entry()["draft"]["by"].startswith("vlm-local fake-vlm (live)")
+    assert keyboard() == [["👍 верно"]], "one button says what was chosen"
+    assert b.fake.last("answerCallbackQuery").params["text"] == "Отмечено: 👍 верно"
     feedback = await b.db.get_event(event_id)
     assert feedback is not None and feedback.feedback == "up"
 
-    await b.service.handle_update(callback(b, row, "no", update_id=2))
-    labels = yaml.safe_load((b.root / "labels.yaml").read_text())
-    assert labels["entries"][0]["scenario"] == "other", "a correction replaces the label"
-    assert "Отмечено: ложная" in b.fake.last("editMessageText").params["text"]
+    await b.service.handle_update(callback(b, row, "undo", update_id=2))
+    assert keyboard()[0] == ["👍 верно", "👎 ложная"], "tapping it brings the buttons back"
+    assert entry()["status"] == "draft" and "reason" not in entry(), "and takes the label back"
+    undone = await b.db.get_event(event_id)
+    assert undone is not None and undone.feedback is None
+    assert "review" not in (undone.intent or {})
 
-    await b.service.handle_update(callback(b, row, "unk", update_id=3))
-    labels = yaml.safe_load((b.root / "labels.yaml").read_text())
-    assert labels["entries"][0]["scenario"] == "unlabelled"
-    assert labels["entries"][0]["status"] == "reviewed"
+    await b.service.handle_update(callback(b, row, "no", update_id=3))
+    assert entry()["scenario"] == "other" and entry()["status"] == "reviewed"
+    reasons = [text for line in keyboard() for text in line]
+    assert "Прошёл мимо" in reasons and reasons[-1] == "Без причины"
+    assert reasons[-2] == "Другое: напишу"
+    await b.service.handle_update(callback(b, row, "r:passing", update_id=4))
+    assert keyboard() == [["👎 прошёл мимо"]]
+    assert entry()["scenario"] == "passer_by" and entry()["reason"] == "passing"
+    reviewed = await b.db.get_event(event_id)
+    assert reviewed is not None and reviewed.feedback == "down"
+    assert (reviewed.intent or {})["review"]["reason"] == "passing"
+
+    await b.service.handle_update(callback(b, row, "r:unimportant", update_id=5))
+    assert entry()["scenario"] == "touching_equipment", "right, just not worth an alert"
+    assert entry()["reason"] == "unimportant"
+
+    await b.service.handle_update(callback(b, row, "r:other", update_id=6))
+    question = b.fake.last("sendMessage")
+    assert question.params["reply_markup"]["force_reply"] is True
+    [(_chat, asked)] = list(b.service._prompts)
+    reply = {
+        "update_id": 7,
+        "message": {
+            "message_id": 999, "date": int(b.clock[0]), "chat": {"id": OWNER},
+            "text": "соседи   паркуются", "reply_to_message": {"message_id": asked},
+        },
+    }  # fmt: skip
+    await b.service.handle_update(reply)
+    assert entry()["reason"] == "other" and entry()["notes"] == "соседи паркуются"
+    assert keyboard() == [["👎 другое"]]
+
+    await b.service.handle_update(callback(b, row, "undo", update_id=8))
+    await b.service.handle_update(callback(b, row, "unk", update_id=9))
+    assert entry()["scenario"] == "unlabelled" and entry()["status"] == "reviewed"
+    assert "notes" not in entry(), "the earlier answer was taken back exactly"
+    assert keyboard() == [["🤷 не знаю"]]
     await b.db.close()
 
 
@@ -620,13 +725,21 @@ async def test_this_is_one_of_us_confirms_the_face(tmp_path: Path) -> None:
     picker = b.fake.last("editMessageText").params["reply_markup"]["inline_keyboard"]
     assert picker[0][0]["text"] == "Свой: Sam" and picker[-1][0]["text"] == "← Назад"
     await b.service.handle_update(callback(b, row, "p:1:0", update_id=2))
-    assert "свой (Sam)" in b.fake.last("editMessageText").params["text"]
+    markup = b.fake.last("editMessageText").params["reply_markup"]["inline_keyboard"]
+    assert [button["text"] for button in markup[0]] == ["👍", "👎", "👤 свой: Sam"]
     assert store.view(store.require("sam")).confirmed == 1
     updated = await b.db.get_event(event_id)
     assert updated is not None and updated.intent is not None
     assert updated.intent["people"]["seen"][0]["confirmed"] == "sam"
     labels = yaml.safe_load((b.root / "labels.yaml").read_text())
     assert labels["entries"][0]["scenario"] == "household_member"
+
+    await b.service.handle_update(callback(b, row, "u:1", update_id=3))  # tap «👤 свой: Sam»
+    markup = b.fake.last("editMessageText").params["reply_markup"]["inline_keyboard"]
+    assert markup[0][0]["text"] == "👍 верно", "taken back: the full buttons again"
+    assert store.view(store.require("sam")).confirmed == 0
+    labels = yaml.safe_load((b.root / "labels.yaml").read_text())
+    assert labels["entries"][0]["status"] == "draft"
     await b.db.close()
 
 
@@ -651,8 +764,8 @@ async def test_commands_answer_allowed_chats_where_they_were_asked(tmp_path: Pat
 async def test_status_and_the_digest(tmp_path: Path) -> None:
     b = await bot(tmp_path)
     now = b.clock[0]
-    old = now - 1800  # older than digest_settle (20 min)
-    await alert(b, await event(b, "20261114-170000", started=old))
+    old = now - 1800
+    [first] = await alert(b, await event(b, "20261114-170000", started=old))
     await event(b, "20261114-170100", state="dismissed", scenario="passer_by", level="none",
                 started=old + 60)  # fmt: skip
     await event(b, "20261114-170200", state="dismissed", scenario="passer_by", level="none",
@@ -661,22 +774,51 @@ async def test_status_and_the_digest(tmp_path: Path) -> None:
                 started=old + 180, summary="no verdict: timeout: no answer")  # fmt: skip
     await event(b, "20261114-170400", level="elevated", scenario="person_at_house",
                 people=known_people("known"), started=old + 240)  # fmt: skip
-    await event(b, "20261114-175900", state="dismissed", scenario="passer_by", level="none",
-                started=now - 60)  # fmt: skip
+    b.clock[0] += 600  # past `collapse`: its own alert
+    [second] = await alert(b, await event(b, "20260115-111500", started=now - 60))
 
-    await b.service.handle_update(command("/status", thread=ALERTS))
+    await b.service.handle_update(command("/status", thread=ALERTS, age=-600))
     status, digest = (c.params for c in b.fake.all("sendMessage")[-2:])
-    assert "Дверь: 6 событий, тревог 2" in status["text"]
+    assert "Дверь: 6 событий, тревог 3" in status["text"]
     assert "Последняя тревога" in status["text"] and "критично" in status["text"]
     text = digest["text"]
-    assert digest["message_thread_id"] == ALERTS and digest["disable_notification"] is True
-    assert "Дверь</b>: 4 события · прохожие 2 · без вердикта 1" in text
-    assert "внимание, свой: Sam" in text and "судья не успел ×1" in text
+    assert digest["message_thread_id"] == ALERTS and "Сегодня к" in text
+    assert "Тревог: 2. По вашим отметкам: без ответа 2." in text
+    assert "2 тревоги ждут ответа" in text
+    assert "Дверь: внимание, свой: Sam" in text, "confirmed but woke nobody: worth a look"
+    assert "Всего за день 6 роликов: прохожие 2." in text
+    assert "Не проверено судьёй: 1 (судья не успел)." in text
+    assert "×" not in text, "plain words, no codes"
 
-    assert await b.service.send_digest(OWNER, thread=DIGEST) is False, "nothing new"
-    b.clock[0] += 3600
-    assert await b.service.send_digest(OWNER, thread=DIGEST) is True, "the young one, settled"
-    assert "прохожие 1" in b.fake.last("sendMessage").params["text"]
+    await b.service.handle_update(callback(b, first, "no"))
+    await b.service.handle_update(callback(b, first, "r:passing", update_id=2))
+    await b.service.handle_update(callback(b, second, "ok", update_id=3))
+    day = await b.service.day(OWNER)
+    assert (day.alerts, day.wrong, day.right, day.unanswered) == (2, 1, 1, 0)
+    assert day.reasons["прошёл мимо"] == 1
+
+    sent = len(b.fake.all("sendMessage"))
+    assert await b.service.evening_digest(OWNER) is True, "something worth a look"
+    evening = b.fake.last("sendMessage").params
+    assert evening["message_thread_id"] == DIGEST and evening["disable_notification"] is True
+    assert "Итог дня" in evening["text"]
+    assert "Ложные чаще всего: прошёл мимо (1)." in evening["text"]
+    assert await b.service.evening_digest(OWNER) is False, "once a day, also after a restart"
+    restarted = await bot(tmp_path)
+    assert await restarted.service.evening_digest(OWNER) is False
+    assert len(b.fake.all("sendMessage")) == sent + 1
+    await restarted.db.close()
+    await b.db.close()
+
+
+async def test_an_evening_with_nothing_to_look_at_sends_nothing(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+    await event(b, "20261114-170100", state="dismissed", scenario="passer_by", level="none")
+    [row] = await alert(b, await event(b, "20261114-170000"))
+    await b.service.handle_update(callback(b, row, "ok"))
+    sent = len(b.fake.all("sendMessage"))
+    assert await b.service.evening_digest(OWNER) is False
+    assert len(b.fake.all("sendMessage")) == sent
     await b.db.close()
 
 

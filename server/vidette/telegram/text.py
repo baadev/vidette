@@ -9,7 +9,7 @@ allows them (`names`), otherwise "свой".
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
@@ -18,6 +18,7 @@ from typing import Any, Literal
 from pydantic import ValidationError
 
 from vidette.people.report import IdentityBrief
+from vidette.telegram import reasons
 
 MAX_TEXT = 4096  # Telegram's limit for a message
 LEVEL_ICONS = {0: "🚨", 1: "⚠️"}
@@ -297,6 +298,54 @@ def mark_line(answer: Answer, *, person: str | None = None, problem: str | None 
     return line
 
 
+def answer_button(data: Mapping[str, Any]) -> str:
+    """The one button left under an alert after an answer about its verdict."""
+    answer = data.get("answer")
+    if answer == "right":
+        return "👍 верно"
+    if answer == "unsure":
+        return "🤷 не знаю"
+    reason = reasons.BY_CODE.get(str(data.get("reason") or ""))
+    if answer == "wrong":
+        return f"👎 {reason.short}" if reason else "👎 ложная"
+    return "✅ " + ANSWER_WORDS.get(str(answer), "отмечено")
+
+
+_ACROSS = {"left": "слева", "right": "справа", "middle": ""}
+_DOWN = {"top": "сверху", "bottom": "снизу", "full": ""}
+
+
+def mosaic_caption(
+    start: float,
+    end: float,
+    tiles: list[tuple[str, tuple[str, str]]],
+    lines: list[str],
+    approximate: set[str],
+) -> str:
+    """The message under a mosaic: which tile is which camera, then what each recorded."""
+    head = [f"📹 <b>Все камеры, {clock(start, seconds=True)}–{clock(end, seconds=True)}</b>"]
+    if len(tiles) > 1:
+        where = []
+        for name, (across, down) in tiles:
+            place = " ".join(w for w in (_ACROSS[across], _DOWN[down]) if w) or "по центру"
+            where.append(f"{place}: {escape(name)}")
+        legend = "; ".join(where)
+        head.append(legend[:1].upper() + legend[1:])
+    body = [f"• {escape(line)}" for line in lines]
+    if approximate:
+        names = ", ".join(sorted(approximate))
+        body.append(
+            f"<i>{escape(names)}: время примерное, эта камера отдаёт запись с задержкой, "
+            "её картинка может отставать от остальных</i>"
+        )
+    return truncate("\n".join(head + body), 1024)
+
+
+def no_mosaic_text(moment: float, lines: list[str]) -> str:
+    head = f"📹 Около {clock(moment, seconds=True)} другие камеры ничего не записали."
+    return truncate("\n".join([head, *(f"• {escape(line)}" for line in lines)]))
+
+
 def face_mark_line(seen: Mapping[str, Any] | None, *, names: bool) -> str:
     """What was decided about one face (ADR-0016): «✅ Отмечено: знакомый «Соседка»
     (№5)», «✅ Отмечено: чужой (№12)», or that the decision was taken back."""
@@ -331,80 +380,90 @@ def truncate(text: str, limit: int = MAX_TEXT) -> str:
 
 # --- digest -------------------------------------------------------------------------------
 
+MONTHS = (
+    "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
+    "октября", "ноября", "декабря",
+)  # fmt: skip
+
 
 @dataclass
 class DigestItem:
     camera: str  # display name
     started_at: float
-    kind: Literal["notable", "ordinary", "unjudged"]
-    title: str  # scenario title (ordinary), reason (notable), why (unjudged)
+    title: str  # the level, and who it was when only known people were seen
     description: str | None = None
-    interrupted: bool = False  # the recording paused (stream health)
 
 
 @dataclass
-class DigestCamera:
-    name: str
-    items: list[DigestItem] = field(default_factory=list)
+class DayDigest:
+    """One chat's day in numbers a person reads in ten seconds (`day_digest_text`)."""
+
+    since: float
+    events: int = 0
+    alerts: int = 0  # alerts this chat got
+    right: int = 0  # of those, answered 👍 (by anyone)
+    wrong: int = 0  # answered 👎
+    unanswered: int = 0
+    last_unanswered: tuple[float, str] | None = None  # (time, camera name)
+    reasons: Counter[str] = field(default_factory=Counter)  # the reasons' short words
+    notable: list[DigestItem] = field(default_factory=list)  # confirmed, did not wake here
+    ordinary: Counter[str] = field(default_factory=Counter)  # titles of ordinary scenarios
+    unjudged: int = 0
+    unjudged_why: Counter[str] = field(default_factory=Counter)
+
+    @property
+    def substance(self) -> bool:
+        """Worth a message on its own: something did not wake anyone but was confirmed, or
+        an alert still waits for an answer."""
+        return bool(self.notable) or self.unanswered > 0
 
 
-def _collapse(items: list[DigestItem], window_s: float) -> list[tuple[DigestItem, DigestItem, int]]:
-    """Notable items of one camera close together → (first, last, count)."""
-    groups: list[tuple[DigestItem, DigestItem, int]] = []
-    for item in sorted(items, key=lambda i: i.started_at):
-        if groups:
-            first, last, count = groups[-1]
-            if item.title == last.title and item.started_at - last.started_at <= window_s:
-                groups[-1] = (first, item, count + 1)
-                continue
-        groups.append((item, item, 1))
-    return groups
-
-
-def digest_text(
-    cameras: Iterable[DigestCamera],
-    *,
-    since: float,
-    until: float,
-    now: float,
-    collapse_s: float,
-    title: str = "Сводка",
-) -> str | None:
-    """None when nothing happened: an empty digest is not sent."""
-    cams = [cam for cam in cameras if cam.items]
-    if not cams:
-        return None
-    lines = [f"📋 <b>{escape(title)} {clock(since, now=now)}–{clock(until, now=now)}</b>"]
-    reasons: Counter[str] = Counter()
-    for cam in cams:
-        ordinary = Counter(i.title for i in cam.items if i.kind == "ordinary")
-        unjudged = [i for i in cam.items if i.kind == "unjudged"]
-        notable = [i for i in cam.items if i.kind == "notable"]
-        parts = [plural(len(cam.items), "событие", "события", "событий")]
-        parts += [f"{escape(name)} {count}" for name, count in ordinary.most_common(6)]
-        rest = sum(ordinary.values()) - sum(c for _n, c in ordinary.most_common(6))
-        if rest:
-            parts.append(f"другое {rest}")
-        if unjudged:
-            parts.append(f"без вердикта {len(unjudged)}")
-            reasons.update(i.title for i in unjudged)
-        broken = sum(1 for i in cam.items if i.interrupted)
-        if broken:
-            parts.append(f"запись прерывалась {broken}")
-        lines.append(f"<b>{escape(cam.name)}</b>: " + " · ".join(parts))
-        for first, last, count in _collapse(notable, collapse_s)[:8]:
-            span = clock(first.started_at, now=now)
-            if count > 1:
-                span += f"–{clock(last.started_at, now=now)} ×{count}"
-            text = f"• {span} {escape(first.title)}"
-            if last.description:
-                text += f": {escape(last.description)}"
-            if last.interrupted:
-                text += " (запись прерывалась)"
+def day_digest_text(day: DayDigest, *, now: float, evening: bool) -> str:
+    """Plain short Russian lines, no codes: what happened, what was wrong, what waits."""
+    date = datetime.fromtimestamp(now)
+    if evening:
+        lines = [f"🌙 <b>Итог дня, {date.day} {MONTHS[date.month - 1]}</b>"]
+    else:
+        lines = [f"📋 <b>Сегодня к {clock(now, now=now)}</b>"]
+    if day.alerts:
+        answers = []
+        if day.wrong:
+            answers.append(f"ложных {day.wrong}")
+        if day.right:
+            answers.append(f"верных {day.right}")
+        if day.unanswered:
+            answers.append(f"без ответа {day.unanswered}")
+        said = f" По вашим отметкам: {', '.join(answers)}." if answers else ""
+        lines.append(f"Тревог: {day.alerts}.{said}")
+    else:
+        lines.append("Тревог не было.")
+    if day.reasons:
+        common = ", ".join(f"{escape(word)} ({n})" for word, n in day.reasons.most_common(3))
+        lines.append(f"Ложные чаще всего: {common}.")
+    if day.unanswered and day.last_unanswered is not None:
+        at, camera = day.last_unanswered
+        waiting = plural(day.unanswered, "тревога ждёт", "тревоги ждут", "тревог ждут")
+        lines.append(
+            f"{waiting} ответа, последняя в {clock(at, now=now)} ({escape(camera)}). "
+            "Кнопки под тревогой."
+        )
+    if day.notable:
+        lines.append("Без тревоги, но стоит взглянуть:")
+        for item in day.notable[-6:]:
+            stamp = clock(item.started_at, now=now)
+            text = f"• {stamp} {escape(item.camera)}: {escape(item.title)}"
+            if item.description:
+                text += f". {escape(item.description)}"
             lines.append(text)
-    if reasons:
-        listed = ", ".join(f"{escape(r)} ×{n}" for r, n in reasons.most_common(3))
-        lines.append(f"<i>Без вердикта: {listed}</i>")
+        if len(day.notable) > 6:
+            lines.append(f"…и ещё {len(day.notable) - 6}")
+    if day.events:
+        clips = plural(day.events, "ролик", "ролика", "роликов")
+        common = ", ".join(f"{escape(t)} {n}" for t, n in day.ordinary.most_common(4))
+        lines.append(f"Всего за день {clips}" + (f": {common}." if common else "."))
+    if day.unjudged:
+        why = day.unjudged_why.most_common(1)[0][0] if day.unjudged_why else "не дошла очередь"
+        lines.append(f"Не проверено судьёй: {day.unjudged} ({escape(why)}).")
     return truncate("\n".join(lines))
 
 
@@ -463,9 +522,12 @@ def quiet_text(until: float | None, *, now: float) -> str:
 
 
 HELP_TEXT = (
-    "Я присылаю тревоги с камер и раз в час сводку.\n"
-    "/status: камеры, события за сегодня, последняя тревога и накопившаяся сводка\n"
+    "Я присылаю тревоги с камер и вечером итог дня, если есть что посмотреть.\n"
+    "/status: камеры, события за сегодня, последняя тревога и сводка\n"
     "/live: живое видео (будет в приложении Vidette)\n"
     "/quiet: тишина на час (критичное всё равно придёт), /quiet off: снять\n"
-    "Под тревогой кнопки: 👍 верно, 👎 ложная, Это свой, Не знаю. Ответы учат систему."
+    "Под тревогой: 👍 верно, 👎 ложная (спрошу почему), Кто это?, Не знаю, 📹 Другие камеры. "
+    "Ответ можно отменить, нажав на него.\n"
+    "Можно просто спросить: «где ещё был этот человек?» или «пришли другие камеры» в ответ "
+    "на тревогу, «что было у калитки после 9?», «сводка»."
 )

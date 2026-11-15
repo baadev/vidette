@@ -9,6 +9,7 @@ import {
   type EventPeople,
   type Identity,
   type SeenPerson,
+  type Linked,
 } from "../api";
 import "./pages.css";
 
@@ -456,9 +457,95 @@ function EventCard({
               onError={() => setClipFailed(true)}
             />
           )}
+          <OtherCameras eventId={event.id} />
         </div>
       )}
     </li>
+  );
+}
+
+function clockOf(ts: number): string {
+  return new Date(ts * 1000).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+/**
+ * The other cameras at the event's moment (ADR-0017): every clip around it, the same
+ * person only when a face says so, and all of them at once as one mosaic video.
+ * Loaded when the card opens; nothing is stored.
+ */
+function OtherCameras({ eventId }: { eventId: string }) {
+  const [linked, setLinked] = useState<Linked | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .eventLinked(eventId)
+      .then((found) => alive && setLinked(found))
+      .catch((err: unknown) => alive && setError(err instanceof Error ? err.message : String(err)));
+    return () => {
+      alive = false;
+    };
+  }, [eventId]);
+  if (error !== null) return <p className="muted">other cameras: {error}</p>;
+  if (linked === null) return <p className="muted">looking at the other cameras…</p>;
+  const others = linked.clips.filter((clip) => !clip.own);
+  return (
+    <section className="linked" aria-label="Other cameras at this moment">
+      <h4 className="linked-title">
+        Other cameras, {clockOf(linked.start)}–{clockOf(linked.end)}
+      </h4>
+      {others.length === 0 ? (
+        <p className="muted">
+          no other camera recorded anything then (battery cameras record only while awake)
+        </p>
+      ) : (
+        <ul className="linked-list">
+          {others.map((clip) => {
+            const key = `${clip.camera}-${clip.started_at}`;
+            return (
+              <li key={key} className="linked-item">
+                <button
+                  type="button"
+                  className="linked-play"
+                  disabled={clip.clip === null}
+                  onClick={() => setPlaying(playing === key ? null : key)}
+                >
+                  {clip.camera} {clip.approximate ? "≈ " : ""}
+                  {clockOf(clip.started_at)}–{clockOf(clip.ended_at)}
+                </button>
+                {clip.same_person ? (
+                  <span className="linked-tag">same person (face)</span>
+                ) : clip.persons ? (
+                  <span className="linked-tag muted">a person, face not compared</span>
+                ) : null}
+                {clip.approximate && (
+                  <span className="linked-tag muted" title="this camera's video can arrive late">
+                    time approximate
+                  </span>
+                )}
+                {playing === key && clip.clip !== null && (
+                  <video className="event-clip" controls autoPlay playsInline src={clip.clip} />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {linked.silent_cameras.length > 0 && (
+        <p className="muted">nothing recorded then: {linked.silent_cameras.join(", ")}</p>
+      )}
+      {linked.mosaic !== null && (
+        <details className="linked-mosaic">
+          <summary>All cameras at once (one video)</summary>
+          <video className="event-clip" controls preload="none" playsInline src={linked.mosaic} />
+        </details>
+      )}
+    </section>
   );
 }
 

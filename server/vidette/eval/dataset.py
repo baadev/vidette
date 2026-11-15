@@ -97,6 +97,9 @@ class Entry(_Strict):
     media: list[str] = Field(default_factory=list)  # paths relative to the dataset dir
     upstream: UpstreamFacts | None = None
     notes: str | None = None
+    # why a person said an alert was wrong or not worth it (a code from the bot's list,
+    # e.g. passing, light, stalled, unimportant); not scored, read by the analysis
+    reason: str | None = Field(default=None, pattern=r"^[a-z][a-z_]{0,30}$")
 
 
 class Labels(_Strict):
