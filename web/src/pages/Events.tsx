@@ -464,14 +464,6 @@ function EventCard({
   );
 }
 
-function clockOf(ts: number): string {
-  return new Date(ts * 1000).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
 /**
  * The other cameras at the event's moment (ADR-0017): every clip around it, the same
  * person only when a face says so, and all of them at once as one mosaic video.
@@ -497,7 +489,7 @@ function OtherCameras({ eventId }: { eventId: string }) {
   return (
     <section className="linked" aria-label="Other cameras at this moment">
       <h4 className="linked-title">
-        Other cameras, {clockOf(linked.start)}–{clockOf(linked.end)}
+        Other cameras, {formatLocalClock(linked.start)}–{formatLocalClock(linked.end)}
       </h4>
       {others.length === 0 ? (
         <p className="muted">
@@ -516,7 +508,7 @@ function OtherCameras({ eventId }: { eventId: string }) {
                   onClick={() => setPlaying(playing === key ? null : key)}
                 >
                   {clip.camera} {clip.approximate ? "≈ " : ""}
-                  {clockOf(clip.started_at)}–{clockOf(clip.ended_at)}
+                  {formatLocalClock(clip.started_at)}–{formatLocalClock(clip.ended_at)}
                 </button>
                 {clip.same_person ? (
                   <span className="linked-tag">same person (face)</span>
