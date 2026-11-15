@@ -84,10 +84,13 @@ def test_a_collected_clip_carries_its_sidecar_facts(tmp_path: Path) -> None:
     clip = collected_clip(tmp_path, "20261114-210304")
     folder = ClipFolderConfig(path=tmp_path, camera="fallback")
     incident = clip_incident(folder, clip)
-    assert incident.source == SOURCE and incident.source_id == "clips/20261114-210304.mp4"
+    assert incident.source == SOURCE and incident.source_id == str(clip)
     assert incident.camera == "front_door"
     assert incident.ended_at is not None and incident.ended_at - incident.started_at == 8
     assert incident.media[0] == str(clip) and len(incident.media) == 5
+    # an older sidecar without stages: the first frame and when the clip closed
+    assert incident.timeline["first_frame"] == incident.started_at
+    assert incident.timeline["closed"] == clip.with_suffix(".json").stat().st_mtime
 
 
 def test_a_bare_uploaded_clip_uses_its_name_and_the_folder_camera(tmp_path: Path) -> None:
@@ -118,7 +121,7 @@ async def test_scan_publishes_new_settled_clips_once(tmp_path: Path) -> None:
     (tmp_path / ".partial" / "x.mp4").write_bytes(b"x")  # hidden: never an incident
     source._clock = lambda: time.time() + 10  # type: ignore[method-assign]
     published = await source.scan(folder)
-    assert [incident.source_id for incident in published] == ["clips/20261114-210304.mp4"]
+    assert [incident.source_id for incident in published] == [str(fresh)]
     topics = [(await asyncio.wait_for(subscription.get(), 1))[0] for _ in range(2)]
     assert topics == ["incident.opened", "incident.closed"]
     assert await source.scan(folder) == [], "the watermark remembers what was published"
@@ -129,11 +132,97 @@ async def test_scan_publishes_new_settled_clips_once(tmp_path: Path) -> None:
     assert fresh.is_file()  # Vidette never moves or deletes anything in the folder
 
 
+async def test_two_folders_with_the_same_clip_name_give_two_incidents(tmp_path: Path) -> None:
+    """Two cameras cut clips in the same second all the time: same file name, two events."""
+    door, street = tmp_path / "front-door", tmp_path / "street"
+    collected_clip(door, "20261114-210304", camera="front_door")
+    collected_clip(street, "20261114-210304", camera="street")
+    folders = [
+        ClipFolderConfig(path=door, backfill=True, settle="0s"),
+        ClipFolderConfig(path=street, backfill=True, settle="0s"),
+    ]
+    source = ClipFolderSource(folders, InProcessEventBus(), MemoryStore(), emit=_no_emit)
+    found = [i for folder in folders for i in await source.scan(folder)]
+    assert {i.camera for i in found} == {"front_door", "street"}
+    assert len({i.key for i in found}) == 2
+
+
+async def test_a_collect_dataset_reads_clips_only_never_the_ring(tmp_path: Path) -> None:
+    collected_clip(tmp_path, "20261114-210304")
+    (tmp_path / ".vidette").mkdir()  # what `vidette collect` keeps its state in
+    ring = tmp_path / "ring" / "20261114T210304+0200.mkv"
+    ring.parent.mkdir()
+    ring.write_bytes(b"x")
+    folder = ClipFolderConfig(path=tmp_path, backfill=True, settle="0s")
+    source = ClipFolderSource([folder], InProcessEventBus(), MemoryStore(), emit=_no_emit)
+    published = await source.scan(folder)
+    assert [Path(i.source_id).name for i in published] == ["20261114-210304.mp4"]
+
+
+async def test_a_collected_clip_with_its_sidecar_needs_no_settling(tmp_path: Path) -> None:
+    (tmp_path / ".vidette").mkdir()  # a `vidette collect` dataset
+    folder = ClipFolderConfig(path=tmp_path, settle="1m")
+    source = ClipFolderSource([folder], InProcessEventBus(), MemoryStore(), emit=_no_emit)
+    assert await source.scan(folder) == []
+    await asyncio.sleep(0.05)
+    clip = collected_clip(tmp_path, "20261114-210304")
+    source._clock = lambda: time.time() + 1  # type: ignore[method-assign]
+    assert [i.source_id for i in await source.scan(folder)] == [str(clip)]
+    bare = tmp_path / "clips" / "20261114-210500.mp4"
+    bare.write_bytes(b"x")  # being finalized: no sidecar yet
+    assert await source.scan(folder) == []
+
+
 async def test_backfill_takes_what_is_already_there(tmp_path: Path) -> None:
     age(collected_clip(tmp_path, "20261101-090000"), 3600)
     folder = ClipFolderConfig(path=tmp_path, backfill=True, settle="0s")
     source = ClipFolderSource([folder], InProcessEventBus(), MemoryStore(), emit=_no_emit)
     assert len(await source.scan(folder)) == 1
+
+
+def early_window(root: Path, clip_id: str, *, started: datetime) -> Path:
+    """What `vidette collect --early` leaves while a recording goes on."""
+    early = root / ".early"
+    early.mkdir(parents=True, exist_ok=True)
+    (early / f"{clip_id}.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    sidecar = early / f"{clip_id}.json"
+    sidecar.write_text(json.dumps({
+        "version": 1, "id": clip_id, "camera": "front_door", "clip": f".early/{clip_id}.mp4",
+        "started_at": started.isoformat(), "window_s": 8.0,
+        "timeline": {"requested": started.timestamp() - 2, "early": started.timestamp() + 9},
+    }))  # fmt: skip
+    return sidecar
+
+
+async def test_an_early_window_becomes_a_partial_incident_of_the_clip_to_come(
+    tmp_path: Path,
+) -> None:
+    bus = InProcessEventBus()
+    subscription = bus.subscribe("incident.*")
+    folder = ClipFolderConfig(path=tmp_path, camera="porch")
+    source = ClipFolderSource([folder], bus, MemoryStore(), emit=_no_emit)
+    old = early_window(tmp_path, "20261114-200000", started=datetime.now().astimezone())
+    age(old, 3600)
+    assert await source.scan_early(folder) == [], "older than the source: not judged"
+    started = datetime.now().astimezone()
+    early_window(tmp_path, "20261114-210304", started=started)
+    (incident,) = await source.scan_early(folder)
+    assert incident.partial and incident.camera == "front_door"
+    assert incident.source_id == str(tmp_path / "clips" / "20261114-210304.mp4")
+    assert incident.media == [str(tmp_path / ".early" / "20261114-210304.mp4")]
+    assert incident.ended_at == pytest.approx(started.timestamp() + 8)
+    assert {"requested", "early", "picked_up"} <= set(incident.timeline)
+    topic, _payload = await asyncio.wait_for(subscription.get(), 1)
+    assert topic == "incident.updated"
+    assert await source.scan_early(folder) == [], "once"
+
+    early_window(tmp_path, "20261114-210500", started=started)
+    collected_clip(tmp_path, "20261114-210500")  # the clip is already here
+    assert await source.scan_early(folder) == []
+    # the clip that follows is the same incident: one event for both
+    collected_clip(tmp_path, "20261114-210304")
+    whole = clip_incident(folder, tmp_path / "clips" / "20261114-210304.mp4")
+    assert whole.key == incident.key and not whole.partial
 
 
 def test_config_accepts_clip_folders_instead_of_frigate(tmp_path: Path) -> None:

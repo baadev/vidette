@@ -94,6 +94,7 @@ understanding:
   vlm:                            # the VLM judge: docs/vlm.md
     backend: none                 # none | local | cloud; the System page can switch it
     frames_per_call: 4            # 1 to 8
+    language: null                # e.g. Russian: the language of the one-line description
     local:                        # an OpenAI-compatible server you run (Ollama default)
       base_url: http://localhost:11434/v1
       model: qwen2.5vl:7b
@@ -139,6 +140,54 @@ policies:
 known never need an alert by themselves; anyone else is judged as usual. `vidette
 validate` warns when it is set while `people.enabled` is false.
 
+### Levels
+
+A policy can grade what it cares about. The judge then names the one scenario that fits
+(or `other`), and the scenario's level decides whether the event is an alert and who is
+woken ([telegram.md](telegram.md#levels-who-wakes-for-what),
+[ADR-0013](architecture/adr/0013-telegram-bot.md)):
+
+```yaml
+policies:
+  - name: home
+    description: A private house with a few cameras around it.
+    levels:                       # highest first
+      critical:
+        title: critical           # shown in notifications (optional)
+        wake: always              # always | unless_quiet | unless_known | never
+        scenarios:                # snake_case id: what it means (told to the judge)
+          touching_equipment: someone touches or opens the electrical panel or a camera
+      elevated:
+        wake: unless_known        # not when only known people are seen (people.enabled)
+        scenarios:
+          person_at_house: {title: person at the house, description: a person who stops at the gate}
+      none:
+        wake: never               # not an alert; the vocabulary for the digest
+        scenarios:
+          passer_by: walks past without stopping or touching anything, even close to the house
+```
+
+Scenario ids are unique across levels; `other`, `unsure`, `unclear` and `unlabelled` are
+reserved (`other` is always there: none of the scenarios). `vidette validate` warns when
+`unless_known` is used while `people.enabled` is false.
+
+A policy with levels may raise a verdict when the same unknown face keeps coming back
+(needs `people.track_unknown`; [people.md](people.md#strangers-who-come-back),
+[ADR-0014](architecture/adr/0014-anonymous-identities.md)):
+
+```yaml
+    recurrence:
+      raise_to: elevated          # a level of this policy
+      sightings: 3                # the same anonymous identity this many times...
+      within: 24h                 # ...within this window, this time included
+      cameras: 2                  # or on this many cameras... (null: off)
+      cameras_within: 10m         # ...within this window
+      suspicious: true            # an identity marked suspicious raises on any sighting
+```
+
+Only a verdict that named a scenario of a lower level is raised; `other`, an abstention
+and anything at or above `raise_to` stay as the judge said.
+
 ## `people`
 
 Known people: local face recognition for people who agreed to be enrolled
@@ -156,10 +205,19 @@ people:
   frames_per_second: 2            # sampled from each clip at full resolution
   max_frames: 24
   max_faces_per_person: 60
+  track_unknown: false            # anonymous identities of faces nobody enrolled (ADR-0014):
+                                  # biometric data of passers-by, read people.md first
+  identities:
+    dir: ~/vidette-data/identities  # default $VIDETTE_DATA/identities; never in a git tree
+    match: 0.5                    # SFace cosine for a sighting to join an identity
+    margin: 0.06                  # ...when no other identity is this close
+    min_face_px: 64               # smaller faces never start or join one
+    near_known: 0.3               # an unknown face this close to someone enrolled: skipped
+    retention_days: 30            # unnamed, unflagged identities go after this long
 ```
 
-Policies are stored and validated today but **not evaluated**: incidents become
-`observed` events and nothing is notified until the verdict worker lands (week 2). Measure
+Policies are judged live by the verdict worker once a VLM backend is selected
+([vlm.md](vlm.md)); without one, incidents stay `observed` and nothing is notified. Measure
 a policy offline before trusting it: [eval.md](eval.md).
 
 ## `notifications`
@@ -185,6 +243,35 @@ notifications:
 `when: event.*`. Delivery contract and signature verification:
 [events-and-automations.md](events-and-automations.md).
 
+### `notifications.telegram`
+
+The Telegram bot: alerts with feedback buttons, an hourly digest, `/status`, `/live`,
+`/quiet` ([telegram.md](telegram.md), [ADR-0013](architecture/adr/0013-telegram-bot.md)).
+
+```yaml
+notifications:
+  telegram:
+    enabled: true
+    token: ${VIDETTE_TELEGRAM_BOT_TOKEN}       # required, always a ${VAR}
+    allowed_chats: ${VIDETTE_TELEGRAM_ALLOWED_CHATS}   # "id,id" or a list; nobody else
+    topics: ${VIDETTE_TELEGRAM_TOPICS}         # "<chat>:alerts=<thread>,digest=<thread>;…"
+    recipients: all               # all | first (a trial: only the first chat gets alerts)
+    names: false                  # names of recognized people in messages (privacy)
+    frames: 4                     # key frames in an alert's album (1 to 9)
+    max_video_mb: 20              # bigger clips are linked (clip_url), not sent
+    collapse: 5m                  # one camera's alerts within this edit the first one
+    digest_every: 1h              # on the hour; at least 1m
+    digest_settle: 20m            # younger events wait for their verdict
+    quiet_for: 1h                 # /quiet
+    labels: true                  # answers become reviewed labels in the clip's dataset
+    camera_names: {}              # camera → name in messages
+    clip_url: null                # default server.base_url
+    api_url: https://api.telegram.org
+```
+
+`vidette validate` warns when `recipients: first` leaves allowed chats without alerts
+and when `names: true` sends names to Telegram.
+
 ## `integrations`
 
 ```yaml
@@ -209,6 +296,11 @@ camera is announced the first time an event for it arrives.
 |---|---|---|
 | `VIDETTE_CONFIG` | `/config/vidette.yaml` | config file path (missing file: starts with defaults and a warning) |
 | `VIDETTE_WEB_DIST` | `/app/web-dist` | built web app directory |
+
+`vidette serve --env-file PATH` (repeatable) reads `KEY=VALUE` lines before the config
+is loaded, for `${VAR}`s such as a bot token: plain assignments, not shell (`;` and `$`
+stay as they are), variables already set win, values are never printed, and a file
+readable by others is reported.
 
 ## `telemetry`
 

@@ -6,6 +6,8 @@ Layout inside the dataset folder (the `vidette eval` format, docs/eval.md):
     clips/20261114-210304.json     ClipMeta: when, how long, codec, why it stopped
     frames/20261114-210304/1.jpg   4 to 8 key frames spread over the clip (≤ 1280 px)
     .partial/<epoch>.mkv.part      a recording in progress (or left by a crash)
+    .early/20261114-210304.mp4     with --early: the first seconds while it still records,
+    .early/20261114-210304.json    EarlyMeta; the clip that follows gets the same id
 
 With `--rotate`, the key frames are turned upright and the MP4 carries the rotation as
 display metadata (players show it upright, the pixels are untouched).
@@ -20,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -27,13 +30,23 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from vidette import __version__
-from vidette.ffmpeg import MediaToolError, extract_frames, frame_times, probe, remux_mp4
+from vidette.ffmpeg import (
+    MediaToolError,
+    cut_head,
+    extract_frames,
+    frame_times,
+    probe,
+    remux_mp4,
+)
+from vidette.streamhealth import measure_file
 
 logger = logging.getLogger(__name__)
 
 CLIPS_DIR = "clips"
 FRAMES_DIR = "frames"
 PARTIAL_DIR = ".partial"
+EARLY_DIR = ".early"
+EARLY_KEEP_S = 3600.0  # early windows are pruned after an hour: the clip supersedes them
 PART_SUFFIX = ".mkv.part"
 MIN_FRAMES, MAX_FRAMES = 4, 8
 
@@ -75,6 +88,26 @@ class ClipMeta(BaseModel):
     # The face check, added later (docs/people.md). Plain data here: a report this version
     # cannot read must never make the clip itself unreadable.
     people: dict[str, Any] | None = None
+    # How the video arrived (vidette.streamhealth): pauses, bursts. Plain data, as above.
+    health: dict[str, Any] | None = None
+    # When each stage happened (epoch seconds): requested (the session was opened: the
+    # camera woke) or motion (the gate opened), first_frame, early (the early window was
+    # written), closed (this sidecar). Where an alert's latency goes (docs/telegram.md).
+    timeline: dict[str, float] = Field(default_factory=dict)
+
+
+class EarlyMeta(BaseModel):
+    """The sidecar of an early window: the first seconds of a recording still in
+    progress, for an alert that does not wait for the clip (`vidette collect --early`)."""
+
+    version: Literal[1] = 1
+    id: str  # the clip that follows has the same id
+    camera: str
+    clip: str  # the early MP4, relative to the dataset root
+    started_at: datetime
+    window_s: float
+    rotation: int = 0
+    timeline: dict[str, float] = Field(default_factory=dict)
 
 
 def frame_count(duration_s: float) -> int:
@@ -91,6 +124,75 @@ def _free_id(dataset: Path, base: str) -> str:
     while any((dataset / CLIPS_DIR / f"{candidate}{ext}").exists() for ext in (".mp4", ".mkv")):
         candidate, n = f"{base}-{n}", n + 1
     return candidate
+
+
+def reserve_id(dataset: Path, started_at: float) -> str:
+    """The id a recording that started at `started_at` will have (free in clips/ and in
+    .early/), decided early so the early window and the clip share it."""
+    base = clip_id(started_at)
+    candidate, n = base, 2
+    while (dataset / EARLY_DIR / f"{candidate}.json").exists() or any(
+        (dataset / CLIPS_DIR / f"{candidate}{ext}").exists() for ext in (".mp4", ".mkv")
+    ):
+        candidate, n = f"{base}-{n}", n + 1
+    return candidate
+
+
+async def write_early(
+    part: Path,
+    dataset: Path,
+    *,
+    entry_id: str,
+    camera: str,
+    started_at: float,
+    window_s: float,
+    rotation: int = 0,
+    timeline: dict[str, float] | None = None,
+) -> EarlyMeta | None:
+    """The first `window_s` of a recording in progress as `.early/<id>.mp4` and its
+    sidecar (written last, atomically: a reader that sees the sidecar sees the MP4).
+    None when it cannot be cut; the recording itself is never touched."""
+    early = dataset / EARLY_DIR
+    early.mkdir(parents=True, exist_ok=True)
+    _prune_early(early)
+    video = early / f"{entry_id}.mp4"
+    try:
+        info = await probe(part)
+        await cut_head(
+            part, video, window_s, hevc=info.codec in ("hevc", "h265"), rotation=rotation
+        )
+    except MediaToolError as exc:
+        logger.warning("no early window for %s: %s", entry_id, exc)
+        return None
+    stages = {**(timeline or {}), "early": time.time()}
+    meta = EarlyMeta(
+        id=entry_id,
+        camera=camera,
+        clip=video.relative_to(dataset).as_posix(),
+        started_at=datetime.fromtimestamp(started_at).astimezone(),
+        window_s=window_s,
+        rotation=rotation,
+        timeline={key: round(value, 3) for key, value in stages.items()},
+    )
+    _write_json(early / f"{entry_id}.json", meta.model_dump_json(indent=2) + "\n")
+    return meta
+
+
+def _prune_early(early: Path) -> None:
+    cutoff = time.time() - EARLY_KEEP_S
+    for path in early.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            continue
+
+
+def load_early(path: Path) -> EarlyMeta | None:
+    try:
+        return EarlyMeta.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
 
 
 def partial_path(dataset: Path, started: float) -> Path:
@@ -116,6 +218,8 @@ async def finalize(
     ended_at: float | None = None,
     trigger: Literal["wake", "motion"] = "wake",
     motion: MotionInfo | None = None,
+    entry_id: str | None = None,
+    timeline: dict[str, float] | None = None,
 ) -> ClipMeta | None:
     """Promote `part` to a clip; None (and the part deleted) when it is too short or
     unreadable. Never raises for a bad recording: it is logged and dropped.
@@ -137,7 +241,10 @@ async def finalize(
 
     if ended_at is not None:
         started_at = ended_at - info.duration_s
-    entry_id = _free_id(dataset, clip_id(started_at))
+    if entry_id is None or any(
+        (dataset / CLIPS_DIR / f"{entry_id}{ext}").exists() for ext in (".mp4", ".mkv")
+    ):
+        entry_id = _free_id(dataset, clip_id(started_at))
     clips = dataset / CLIPS_DIR
     clips.mkdir(parents=True, exist_ok=True)
     clip = clips / f"{entry_id}.mp4"
@@ -164,6 +271,13 @@ async def finalize(
         logger.warning("key frames for %s incomplete: %s", entry_id, exc)
         frames = sorted((dataset / FRAMES_DIR / entry_id).glob("*.jpg"))
 
+    health: dict[str, Any] | None = None
+    try:
+        measured = await measure_file(clip, info.fps)
+        health = measured.model_dump(mode="json")
+    except MediaToolError as exc:
+        logger.warning("stream health for %s not measured: %s", entry_id, exc)
+
     started = datetime.fromtimestamp(started_at).astimezone()
     meta = ClipMeta(
         id=entry_id,
@@ -184,6 +298,15 @@ async def finalize(
         rotation=rotation,
         motion=motion,
         adopted=adopted,
+        health=health,
+        timeline={
+            key: round(value, 3)
+            for key, value in {
+                **(timeline or {}),
+                "first_frame": started_at,
+                "closed": time.time(),
+            }.items()
+        },
     )
     _write_json(clips / f"{entry_id}.json", meta.model_dump_json(indent=2) + "\n")
     return meta

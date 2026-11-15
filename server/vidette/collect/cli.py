@@ -96,8 +96,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--wallclock-timestamps",
         action="store_true",
-        help="stamp packets with their arrival time: for a restreamer such as go2rtc, "
-        "which splices a camera's reconnect into the same session (its clock jumps)",
+        help="stamp packets with their arrival time instead of the camera's clock. Not "
+        "recommended: delivery jitter becomes freezes in the clip. A restreamer's splices "
+        "(go2rtc) are repaired without it",
+    )
+    parser.add_argument(
+        "--early",
+        default="0s",
+        help="also write the first N seconds of each recording (or motion event, with "
+        "--continuous) to .early/ while it goes on, so `vidette serve` can judge and alert "
+        "before the clip ends (e.g. 8s; default 0s: off)",
     )
     parser.add_argument("--once", action="store_true", help="exit after the first clip kept")
     parser.add_argument(
@@ -205,6 +213,7 @@ def settings_from_args(args: argparse.Namespace) -> CollectSettings:
         rotation=args.rotate,
         base_station=args.base_station,
         wallclock_timestamps=args.wallclock_timestamps,
+        early_s=parse_duration(args.early),
     )
 
 

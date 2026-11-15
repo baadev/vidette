@@ -14,7 +14,11 @@ What a clip says about itself:
   the start, the file's modification time the end, and the folder's `camera` the camera.
 
 Rules: a file must be unchanged for `settle` before it is read (uploads in progress);
-hidden folders (`.partial`, `.vidette`) are skipped; on the very first start only clips
+hidden folders (`.partial`, `.vidette`) are skipped, and in a `vidette collect` dataset
+(it has a `.vidette` folder) only `clips/` is read, so the continuous mode's lookback ring
+(`ring/*.mkv`) never becomes an incident. An incident's `source_id` is the clip's path
+as configured (folder + relative path), so two folders that both hold
+`clips/20261114-210304.mp4` give two events, not one. On the very first start only clips
 newer than that moment count, unless `backfill: true`, so pointing Vidette at a folder of
 600 old clips does not produce 600 events. Progress (an arrival-time watermark per folder)
 is kept in the database, so clips that arrive while Vidette is down are picked up
@@ -34,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from vidette.collect.clips import ClipMeta, load_meta
+from vidette.collect.clips import CLIPS_DIR, EARLY_DIR, ClipMeta, load_early, load_meta
 from vidette.core.config import ClipFolderConfig
 from vidette.core.events import InProcessEventBus
 from vidette.core.incidents import Incident, Phase, as_payload, incident_topic
@@ -111,11 +115,48 @@ def clip_incident(folder: ClipFolderConfig, clip: Path) -> Incident:
             )
     return Incident(
         source=SOURCE,
-        source_id=clip.relative_to(root).as_posix(),
+        # Unique across folders: two cameras often cut clips in the same second.
+        source_id=(root / clip.relative_to(root)).as_posix(),
         camera=camera,
         started_at=started,
         ended_at=max(started, ended),
         media=[str(clip), *(str(frame) for frame in frames if frame.is_file())],
+        timeline=clip_timeline(meta, clip),
+    )
+
+
+def clip_timeline(meta: ClipMeta | None, clip: Path) -> dict[str, float]:
+    """The sidecar's stages; for a sidecar without them (an older collector), the first
+    frame from its start and the clip closing from when the sidecar was written."""
+    if meta is None:
+        return {}
+    timeline = dict(meta.timeline)
+    timeline.setdefault("first_frame", meta.started_at.timestamp())
+    with contextlib.suppress(OSError):
+        timeline.setdefault("closed", clip.with_suffix(".json").stat().st_mtime)
+    return timeline
+
+
+def early_incident(folder: ClipFolderConfig, sidecar: Path) -> Incident | None:
+    """The incident an early window stands for: the same id as the clip that will follow
+    (`clips/<id>.mp4`), `partial`, its media the early MP4. None when unreadable."""
+    root = folder.path
+    meta = load_early(sidecar)
+    if meta is None:
+        return None
+    video = root / meta.clip
+    if not video.is_file():
+        return None
+    started = meta.started_at.timestamp()
+    return Incident(
+        source=SOURCE,
+        source_id=(root / CLIPS_DIR / f"{meta.id}.mp4").as_posix(),
+        camera=meta.camera,
+        started_at=started,
+        ended_at=started + meta.window_s,
+        media=[str(video)],
+        partial=True,
+        timeline=dict(meta.timeline),
     )
 
 
@@ -123,10 +164,22 @@ def _watermark_key(folder: ClipFolderConfig) -> str:
     return f"clip_folder.watermark:{folder.path.resolve()}"
 
 
+EARLY_POLL_S = 1.0  # early windows are looked for this often: they exist to save seconds
+COLLECT_POLL_S = 2.0  # a `vidette collect` dataset's clips/ is listed at least this often
+EARLY_MAX_AGE_S = 120.0  # an early window older than this is not worth an early verdict
+
+
+COLLECT_STATE_DIR = ".vidette"  # `vidette collect` keeps its state here (collector.STATE_DIR)
+
+
 def find_clips(root: Path) -> list[Path]:
-    """Video files under `root`, skipping hidden folders and files."""
+    """Video files under `root`, skipping hidden folders and files. In a `vidette
+    collect` dataset only `clips/` counts: its `ring/` holds lookback segments, not clips."""
     found: list[Path] = []
-    for path in root.rglob("*"):
+    scan = root / "clips" if (root / COLLECT_STATE_DIR).is_dir() else root
+    if not scan.is_dir():
+        return found
+    for path in scan.rglob("*"):
         relative = path.relative_to(root)
         if any(part.startswith(".") for part in relative.parts):
             continue
@@ -157,6 +210,8 @@ class ClipFolderSource:
             for folder in folders
         }
         self._tasks: list[asyncio.Task[None]] = []
+        self._early_seen: set[str] = set()
+        self._started = clock()  # early windows from before this start are not judged
 
     def status(self) -> list[FolderStatus]:
         return list(self._status.values())
@@ -178,13 +233,57 @@ class ClipFolderSource:
                 await task
 
     async def _poll(self, folder: ClipFolderConfig) -> None:
+        next_scan = 0.0
         while True:
             try:
-                await self.scan(folder)
+                if (folder.path / EARLY_DIR).is_dir():
+                    await self.scan_early(folder)
+                if time.monotonic() >= next_scan:
+                    every = folder.poll_every_s
+                    if (folder.path / COLLECT_STATE_DIR).is_dir():
+                        every = min(every, COLLECT_POLL_S)  # its sidecar says "done"
+                    next_scan = time.monotonic() + every
+                    await self.scan(folder)
             except Exception as exc:  # crash containment: a bad scan never stops the loop
                 logger.exception("clip folder %s: scan failed", folder.path)
                 await self._report_error(folder, f"scan failed: {exc}")
-            await asyncio.sleep(folder.poll_every_s)
+            await asyncio.sleep(min(EARLY_POLL_S, folder.poll_every_s))
+
+    async def scan_early(self, folder: ClipFolderConfig) -> list[Incident]:
+        """Publish each new early window (`.early/<id>.json`, written last and atomically
+        by `vidette collect --early`) as a partial incident, unless its clip is already
+        there or it is too old. Public for tests."""
+        now = self._clock()
+        published: list[Incident] = []
+        early = folder.path / EARLY_DIR
+        try:
+            sidecars = sorted(early.glob("*.json"))
+        except OSError:
+            return published
+        for sidecar in sidecars:
+            key = str(sidecar)
+            if key in self._early_seen:
+                continue
+            try:
+                arrived = sidecar.stat().st_mtime
+            except OSError:
+                continue
+            self._early_seen.add(key)
+            if now - arrived > EARLY_MAX_AGE_S or arrived < self._started:
+                continue
+            if (folder.path / CLIPS_DIR / f"{sidecar.stem}.mp4").exists():
+                continue  # the clip is already here: it will be judged whole
+            incident = early_incident(folder, sidecar)
+            if incident is None:
+                continue
+            incident = incident.model_copy(
+                update={"timeline": {**incident.timeline, "picked_up": now}}
+            )
+            await self._bus.publish(incident_topic(Phase.updated), as_payload(incident))
+            published.append(incident)
+        if len(self._early_seen) > 2000:
+            self._early_seen = {k for k in self._early_seen if Path(k).exists()}
+        return published
 
     async def _report_error(self, folder: ClipFolderConfig, error: str) -> None:
         status = self._status[str(folder.path)]
@@ -212,6 +311,7 @@ class ClipFolderSource:
             watermark = float(raw)
 
         candidates = await asyncio.to_thread(find_clips, folder.path)
+        collected = (folder.path / COLLECT_STATE_DIR).is_dir()
         fresh: list[tuple[float, Path]] = []
         for clip in candidates:
             try:
@@ -221,7 +321,10 @@ class ClipFolderSource:
             # Arrival, not recording time: a synced file can keep an old mtime, but its
             # inode change time is when it landed here.
             arrived = max(st.st_mtime, st.st_ctime)
-            if arrived > watermark and now - arrived >= folder.settle_s:
+            # `vidette collect` writes the sidecar last, atomically: with it, the clip is
+            # complete, and waiting for `settle` would only delay the alert.
+            done = collected and clip.with_suffix(".json").is_file()
+            if arrived > watermark and (done or now - arrived >= folder.settle_s):
                 fresh.append((arrived, clip))
 
         published: list[Incident] = []
@@ -231,6 +334,9 @@ class ClipFolderSource:
             except (OSError, ValueError) as exc:
                 await self._report_error(folder, f"{clip.name}: {exc}")
                 continue
+            incident = incident.model_copy(
+                update={"timeline": {**incident.timeline, "picked_up": self._clock()}}
+            )
             for phase in (Phase.opened, Phase.closed):
                 await self._bus.publish(incident_topic(phase), as_payload(incident))
             published.append(incident)

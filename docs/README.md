@@ -12,6 +12,7 @@ the top; absence of a banner means it describes reality.
 | Connect it to Frigate | [frigate.md](frigate.md) |
 | Measure a policy | [eval.md](eval.md) |
 | Tell the judge who it saw (opt-in face recognition) | [people.md](people.md) |
+| Get alerts in Telegram, with buttons that teach it | [telegram.md](telegram.md) |
 | Understand the system | [architecture/overview.md](architecture/overview.md) |
 | Know why it changed course | [ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md) |
 | Configure everything | [configuration.md](configuration.md) + annotated [config.example.yaml](../deploy/config.example.yaml) |

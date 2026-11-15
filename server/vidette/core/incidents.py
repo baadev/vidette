@@ -59,6 +59,12 @@ class Incident(BaseModel):
     # Local files the source already has (absolute paths): a clip folder's clip and key
     # frames. Empty for Frigate, whose media is fetched over its API.
     media: list[str] = Field(default_factory=list)
+    # The early window of a recording still in progress (a clip folder's `.early/`): judged
+    # at once so an alert need not wait; the whole clip follows under the same id.
+    partial: bool = False
+    # When each stage happened upstream (epoch seconds): the camera woke or the motion gate
+    # opened, the first frame, the early window, the clip closed, the source picked it up.
+    timeline: dict[str, float] = Field(default_factory=dict)
 
     @property
     def key(self) -> str:

@@ -4,6 +4,7 @@ dismissed events, only with a selected backend, only once, never from stale inci
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -229,3 +230,124 @@ def test_the_switch_turns_judging_on_and_a_clip_becomes_a_confirmed_event(
         assert local["usage_today"]["calls"] == 1 and usage["worker"]["confirmed"] == 1
     body = api.requests[0]["body"]
     assert len([p for p in body["messages"][1]["content"] if p["type"] == "image_url"]) == 4
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+async def test_frames_are_chosen_once_from_the_clip_and_kept_with_its_health(
+    tmp_path: Path,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+        "-i", "testsrc2=size=320x180:rate=15", "-t", "6", "-g", "15", "-pix_fmt", "yuv420p",
+        str(clip),
+    )  # fmt: skip
+    assert await proc.wait() == 0
+    worker, judge, db, _bus, intake = await setup(
+        tmp_path,
+        ALERT,
+        policies=[
+            {"name": "entry", "description": "door", "cameras": ["porch"]},
+            {"name": "yard", "description": "yard", "cameras": ["porch"]},
+        ],
+    )
+    item = incident().model_copy(update={"media": [str(clip)]})
+    await observed(intake, item)
+    row = await worker.handle(item)
+    assert row is not None and row.intent is not None
+    cases = [case for case, _policy in judge.seen]
+    assert len(cases) == 2 and cases[0].frames is cases[1].frames  # chosen once
+    chosen = cases[0].frames
+    assert chosen is not None and len(chosen.paths) == 4 and chosen.method == "activity"
+    listed = row.intent["frames"]
+    assert [f["path"] for f in listed] == [str(p) for p in chosen.paths]
+    assert all(Path(f["path"]).is_file() and f["t"] is not None for f in listed)
+    assert str(tmp_path / "media" / "judge-frames" / row.id) in listed[0]["path"]
+    stream = row.intent["stream"]
+    assert stream["frames"] == 90 and stream["interrupted"] is False
+    await db.close()
+
+
+async def verdict_topic(subscription: Any) -> str:
+    """The next event topic other than the intake's event.observed."""
+    while True:
+        topic, _payload = await asyncio.wait_for(subscription.get(), 1)
+        if topic != "event.observed":
+            return str(topic)
+
+
+async def test_an_early_alert_comes_first_and_the_whole_clip_corrects_it(tmp_path: Path) -> None:
+    worker, judge, db, bus, intake = await setup(tmp_path, ALERT)
+    events = bus.subscribe("event.*")
+    whole = incident().model_copy(update={"timeline": {"requested": 1.0, "closed": 2.0}})
+    early = whole.model_copy(
+        update={"partial": True, "timeline": {"requested": 1.0, "early": 1.5, "picked_up": 1.6}}
+    )
+    await intake.handle("incident.updated", early.model_dump(mode="json"))
+    row = await worker.handle(early)
+    assert row is not None and row.state == "confirmed" and row.intent is not None
+    assert row.intent["phase"] == "early"
+    assert await verdict_topic(events) == "event.confirmed"  # the alert goes out now
+    assert await worker.handle(early) is None, "one early verdict per event"
+
+    judge.verdict = SILENT  # the whole clip: a courier, not an alert
+    await observed(intake, whole)
+    row = await worker.handle(whole)
+    assert row is not None and row.state == "dismissed" and row.intent is not None
+    assert row.intent["phase"] == "final" and row.intent["early"]["verdicts"][0]["alert"]
+    assert await verdict_topic(events) == "event.dismissed"  # the bot edits its alert
+    timeline = row.intent["timeline"]
+    assert {"requested", "early", "early_picked_up", "early_judge_started", "closed",
+            "judge_started", "judge_finished"} <= set(timeline)  # fmt: skip
+    assert await worker.handle(whole) is None, "judged whole once"
+    await db.close()
+
+
+async def test_an_early_nothing_never_hides_a_later_alert(tmp_path: Path) -> None:
+    worker, judge, db, bus, intake = await setup(tmp_path, SILENT)
+    confirmed = bus.subscribe("event.confirmed")
+    whole = incident()
+    early = whole.model_copy(update={"partial": True})
+    await intake.handle("incident.updated", early.model_dump(mode="json"))
+    row = await worker.handle(early)
+    assert row is not None and row.state == "observed" and row.intent is not None
+    assert row.intent["phase"] == "early"
+    judge.verdict = ALERT
+    await observed(intake, whole)
+    row = await worker.handle(whole)
+    assert row is not None and row.state == "confirmed"
+    topic, _ = await asyncio.wait_for(confirmed.get(), 1)
+    assert topic == "event.confirmed"
+    await db.close()
+
+
+async def test_an_early_alert_stands_when_the_clip_gets_no_verdict(tmp_path: Path) -> None:
+    worker, judge, db, bus, intake = await setup(tmp_path, ALERT)
+    updated = bus.subscribe("event.updated")
+    whole = incident()
+    early = whole.model_copy(update={"partial": True})
+    await intake.handle("incident.updated", early.model_dump(mode="json"))
+    await worker.handle(early)
+    judge.verdict = UNSURE
+    await observed(intake, whole)
+    row = await worker.handle(whole)
+    assert row is not None and row.state == "confirmed" and row.intent is not None
+    assert row.intent["verdicts"][0]["alert"] and row.intent["final"]["verdicts"][0]["abstained"]
+    topic, _ = await asyncio.wait_for(updated.get(), 1)
+    assert topic == "event.updated"
+    await db.close()
+
+
+async def test_the_whole_clip_waiting_is_never_replaced_by_its_early_window(
+    tmp_path: Path,
+) -> None:
+    worker, _judge, db, _bus, _intake = await setup(tmp_path, ALERT)
+    pending: dict[str, Incident] = {}
+    whole = incident()
+    worker._take(pending, ("incident.closed", whole.model_dump(mode="json")))
+    early = whole.model_copy(update={"partial": True})
+    worker._take(pending, ("incident.updated", early.model_dump(mode="json")))
+    assert not pending[whole.key].partial
+    worker._take(pending, ("incident.updated", incident().model_dump(mode="json")))
+    assert len(pending) == 1, "an update that is not an early window is not judged"
+    await db.close()

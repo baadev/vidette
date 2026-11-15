@@ -1,4 +1,4 @@
-"""CLI: `vidette serve | validate | frigate | eval | collect | label | people`."""
+"""CLI: `vidette serve | validate | frigate | eval | collect | label | people | telegram`."""
 
 from __future__ import annotations
 
@@ -29,13 +29,21 @@ def _cmd_validate(path: Path) -> int:
     return 0
 
 
-def _cmd_serve(host: str, port: int, config: Path | None) -> int:
+def _cmd_serve(host: str, port: int, config: Path | None, env_files: list[Path]) -> int:
     import os
 
     import uvicorn
 
+    from vidette.envfile import EnvFileError
+    from vidette.telegram.cli import load_env_files
+
+    try:
+        load_env_files(env_files)
+    except EnvFileError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if config is not None:
-        os.environ["VIDETTE_CONFIG"] = str(config)
+        os.environ["VIDETTE_CONFIG"] = str(config.expanduser())
     config_path = os.environ.get("VIDETTE_CONFIG", "/config/vidette.yaml")
     print(f"vidette v{__version__} · http://{host}:{port} · config: {config_path}")
     uvicorn.run("vidette.api.app:create_app", factory=True, host=host, port=port)
@@ -54,6 +62,14 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--host", default="0.0.0.0")  # container default
     serve.add_argument("--port", type=int, default=8642)
     serve.add_argument("--config", type=Path, default=None, help="config file path")
+    serve.add_argument(
+        "--env-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="KEY=VALUE file for ${VAR}s in the config, such as a bot token (repeatable; "
+        "variables already set win)",
+    )
 
     validate = subparsers.add_parser("validate", help="validate a config file")
     validate.add_argument("config", type=Path)
@@ -154,7 +170,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     people_cli.add_arguments(people)
 
+    from vidette.telegram import cli as telegram_cli
+
+    telegram = subparsers.add_parser(
+        "telegram",
+        help="the Telegram bot: check the setup, send a test alert (docs/telegram.md)",
+    )
+    telegram_cli.add_arguments(telegram)
+
     args = parser.parse_args(argv)
+    if args.command == "telegram":
+        return telegram_cli.run(args)
     if args.command == "collect":
         return collect_cli.run(args)
     if args.command == "label":
@@ -192,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.frigate_command == "tail":
             return frigate_cli.cmd_tail(args.config, args.record)
         return frigate_cli.cmd_replay(args.recording, args.config, args.prefix)
-    return _cmd_serve(args.host, args.port, args.config)
+    return _cmd_serve(args.host, args.port, args.config, args.env_file)
 
 
 if __name__ == "__main__":

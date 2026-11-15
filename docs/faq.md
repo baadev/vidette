@@ -60,6 +60,11 @@ The guardrails are product promises, not implementation details:
 
 - **Suppression-only.** A match quiets alerts; it never powers "identify the stranger"
   features. An unknown face stays "a person" — judged by behavior, like everything else.
+  The one opt-in exception ([ADR-0014](architecture/adr/0014-anonymous-identities.md),
+  off by default): an unknown face may be counted when it comes back, as a number
+  ("stranger #12, 3rd time today"), never named, kept locally for 30 days, because coming
+  back *is* behavior. It keeps biometric data of people who never agreed, so it is your
+  call where the law allows it ([people.md](people.md#privacy-and-the-law)).
 - **Local-only.** Embeddings are computed and stored on your box, encrypted at rest,
   deletable in one click; enrollment happens in the UI with the person's consent. No cloud
   biometrics, no third-party identity databases, ever.

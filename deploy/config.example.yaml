@@ -66,12 +66,26 @@ policies:
     sensitivity: balanced  # relaxed | balanced | paranoid
     actions: [notify]
     known_people: judge    # judge | quiet: known people never need an alert (docs/people.md)
+    # levels:              # optional: scenarios by severity; the level decides who wakes
+    #   critical:          # (docs/telegram.md#levels-who-wakes-for-what)
+    #     wake: always     # always | unless_quiet | unless_known | never
+    #     scenarios:
+    #       door_handle_attempt: someone pulls or tries the door handle
+    #   elevated:
+    #     wake: unless_known
+    #     scenarios:
+    #       lingering_at_door: someone stays at the door with no visible errand
 
 # people:                  # known people: local face recognition, opt-in (docs/people.md)
 #   enabled: true          # needs `pip install 'vidette[people]'` and `vidette people models`
 #   dir: /config/people    # biometric data: outside any git repository, owner-only
 #   threshold: 0.4
 #   min_face_px: 40
+#   track_unknown: false   # anonymous identities of strangers (ADR-0014): biometric data of
+#                          # people who never agreed; read docs/people.md#privacy-and-the-law
+#   identities:
+#     dir: /config/identities
+#     retention_days: 30   # unnamed, unflagged identities go after this long
 
 notifications:
   channels:
@@ -85,6 +99,12 @@ notifications:
       url: https://automation.example.com/vidette
       secret: ${VIDETTE_WEBHOOK_SECRET}
       include: [summary, snapshot_url, clip_url]
+  # telegram:              # the built-in bot: alerts with buttons, digest (docs/telegram.md)
+  #   token: ${VIDETTE_TELEGRAM_BOT_TOKEN}
+  #   allowed_chats: ${VIDETTE_TELEGRAM_ALLOWED_CHATS}   # "id,id"; nobody else is answered
+  #   topics: ${VIDETTE_TELEGRAM_TOPICS}                 # "<chat>:alerts=<t>,digest=<t>;…"
+  #   recipients: all        # first: a trial, only the first chat gets alerts
+  #   names: false           # names of recognized people go to Telegram when true
   rules:
     - when: event.confirmed  # nothing is confirmed until verdicts land (v0.2, week 2)
       channels: [push, telegram, hooks]

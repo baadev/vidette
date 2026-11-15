@@ -72,7 +72,10 @@ This page is the threat model and the hardening guide. Reporting: [SECURITY.md](
   members, computed and stored locally, encrypted at rest, deletable in one click, used
   solely to *suppress* alerts. Uncertain matches never suppress (fail toward alerting); no
   cloud biometrics or third-party identity databases, so the worst-case leak surface stays
-  bounded and documented.
+  bounded and documented. Since ADR-0014, one more opt-in, off by default: anonymous
+  identities keep embeddings and crops of unknown faces (people who never consented) in
+  one local folder, 0700/0600, refused inside a git tree, pruned after 30 days, wiped
+  with `secure_delete`; nothing of it is ever sent, and no appearance attribute exists.
 - **Export redaction** (blur regions on shared clips) is a designed M3+ feature: sharing
   evidence with neighbors/police shouldn't leak your kids' faces.
 - Jurisdiction note in docs: pointing cameras at public space carries legal duties that vary

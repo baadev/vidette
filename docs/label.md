@@ -113,6 +113,14 @@ You can correct an entry again later by its number; reviewed entries keep the mo
 draft, so the eval report can say how many truth labels are drafts accepted unchanged.
 That number is the honest measure of how much the truth leans on the model being judged.
 
+## From Telegram
+
+The buttons under a [Telegram alert](telegram.md#the-buttons) are replies too: 👍 sets the
+scenario the judge named, 👎 sets `other`, "Не знаю" is `?`, "Это свой" is
+`household_member` and a face answer. They go through the same code as `vidette label
+apply`; a clip without an entry gets one (with the live verdict as its draft), and the
+policy's scenarios are added to the vocabulary if they are missing.
+
 ## Without a model
 
 `--no-vlm`, or a model that cannot be reached (Ollama not running, budget spent, bad

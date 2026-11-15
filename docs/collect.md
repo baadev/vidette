@@ -112,7 +112,43 @@ works but reacts to motion more slowly. `--no-probe` skips the port check.
 
 Options: `--min 3s` (drop shorter clips), `--max 2m` (cut longer ones), `--probe-every 5s`,
 `--cooldown 10s`, `--silence 8s`, `--camera NAME`, `--rotate 90|180|270`
-([rotation](#a-camera-on-its-side---rotate)), `--base-station`.
+([rotation](#a-camera-on-its-side---rotate)), `--base-station`, `--early 8s`.
+
+### Early windows: `--early 8s`
+
+A wake period lasts until the camera sleeps again, often a minute or two after the person
+has gone, and the clip exists only then. With `--early 8s`, once a recording has 8 s of
+video, its first 8 s are copied (no re-encode) to `.early/<id>.mp4` with a sidecar
+`.early/<id>.json`, written last and atomically. The clip that follows gets the same id,
+so `vidette serve` judges the early window at once and the whole clip later under one
+event ([docs/telegram.md](telegram.md#early-alerts-before-the-clip-ends)). The part file
+is written in half-second Matroska clusters, flushed at once, so it can be read while it
+grows. Early windows are pruned after an hour. In continuous mode the window is the
+motion event's first seconds with its pre-roll, cut from the ring once the event has run
+that long.
+
+### Timestamps, and a restreamer in front of the camera
+
+A clip keeps the camera's own clock (its RTP timestamps): the time each frame was taken.
+The time a frame *arrives* is a worse clock. Measured through a restreamer (go2rtc) on a
+Wi-Fi camera, 25 s of the same packets: the camera's timestamps were 376 frames 61 to
+73 ms apart; their arrival times came in bursts (47 % less than 30 ms apart) with eight
+pauses of up to 0.7 s. On a camera with a weak radio link the pauses reach 7 to 13 s,
+after which the backlog arrives at once. A clip stamped on arrival plays that as a frozen
+picture followed by fast-forward, and a judge reads a person walking past as a person
+standing still.
+
+A restreamer has one trap of its own: when the camera drops and comes back while a reader
+is attached, go2rtc splices the new camera session into the same RTSP session, clock and
+all, so the timestamps jump by up to hours. The collector repairs that on the input
+(`setts` jump guard): a packet more than 10 s after the previous one, or not after it at
+all, continues one frame later; real pauses of the camera up to 10 s stay as they are.
+The clip's length limit (`--max`) is the collector's own, not ffmpeg's `-t`, which would
+read the timestamps before the repair.
+
+`--wallclock-timestamps` stamps packets on arrival instead. It is there for a source whose
+clock cannot be trusted at all; it is not needed behind go2rtc any more. Each clip's
+sidecar carries its [stream health](#stream-health) either way.
 
 ## What lands on disk
 
@@ -123,12 +159,22 @@ Options: `--min 3s` (drop shorter clips), `--max 2m` (cut longer ones), `--probe
   frames/20261114-210304/1.jpg    4 to 8 key frames spread over the clip (≤ 1280 px)
   .partial/…                      the recording in progress (adopted on the next start
                                   if the collector was killed)
+  .early/20261114-210304.mp4      with --early: its first seconds, while it records
   ring/20261114T210304+0200.mkv   continuous mode only: the lookback ring, 60 s a file
   .vidette/collect-state.json     watched hours, clip count
 ```
 
 The clip id is the local time the video started. No file contains the camera's address
-or credentials. Sound is not recorded: the judge does not use it, and recording
+or credentials.
+
+### Stream health
+
+Every sidecar has a `health` block, measured from the clip's packet times (no decoding):
+how many frames, how many pauses longer than 0.5 s and the time they cover, the longest
+one and where it starts, the share of frames that came in a heap after a pause
+(`burst_share`), and the longest pauses as `[start, end]` seconds into the clip. A clip
+with a pause of 2 s or more, or pauses covering a tenth of it, counts as interrupted: the
+judge is told where the video stalled, and the bot says «запись прерывалась». Sound is not recorded: the judge does not use it, and recording
 conversations is a legal minefield in many places.
 
 ## Disk limits
@@ -204,8 +250,9 @@ flowchart LR
   A leaf flicking once never opens one; leaves in a steady wind will, and the VLM draft
   and the person labelling throw those clips away (the gate errs on keeping).
 - **The clip** is the event plus `--preroll` (3 s) and `--postroll` (3 s), between
-  `--min` and `--max`. It waits until the segment holding its end is finished (up to one
-  segment, a minute), is cut by stream copy (so it starts on the key frame at or before the
+  `--min` and `--max`. It is cut as soon as the ring holds its end (the open segment is
+  written in half-second clusters, flushed at once, so the clip need not wait up to a
+  minute for it to finish), by stream copy (so it starts on the key frame at or before the
   pre-roll: a little more lead, never less) and gets key frames and a sidecar exactly like
   a wake-period clip, plus `"trigger": "motion"` and what the gate saw (`motion.active_s`,
   `motion.peak_area`). `vidette label` and the [clip-folder source](clip-folders.md) read

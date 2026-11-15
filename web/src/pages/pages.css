@@ -1587,3 +1587,297 @@ button.ghost.danger {
   font-size: 0.85rem;
   overflow-wrap: anywhere;
 }
+
+/* --- identities (docs/people.md, ADR-0014) --------------------------------------------- */
+
+.people-switch {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.people-switch a {
+  padding: 0.25rem 0.8rem;
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.people-switch a.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+}
+
+.people-page .page-header .kbd-hint {
+  width: 100%;
+}
+
+.identities-page {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.id-summary {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.id-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.id-filters button.id-filter-active {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.id-filters button.id-order {
+  margin-left: auto;
+}
+
+.id-list,
+.id-sightings,
+.id-similar {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.id-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.id-item:hover {
+  border-color: var(--muted);
+}
+
+.id-item-main {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.id-item-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.id-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.id-item-stats {
+  font-size: 0.8rem;
+}
+
+.id-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.id-cameras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.id-face {
+  flex: none;
+  border-radius: 10px;
+  object-fit: cover;
+  background: #000;
+  display: block;
+}
+
+.id-face-small {
+  width: 3.25rem;
+  height: 3.25rem;
+}
+
+.id-face-large {
+  width: 6.5rem;
+  height: 6.5rem;
+}
+
+.id-face-empty {
+  border: 1px dashed var(--line);
+  background: transparent;
+}
+
+.id-status {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.id-status-suspicious {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 60%, transparent);
+}
+
+.id-status-known {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 60%, transparent);
+}
+
+.id-back {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.id-head {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.id-head-info {
+  min-width: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.id-head-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.id-actions {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.id-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.id-section {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.id-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.id-section-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.id-section p {
+  margin: 0;
+}
+
+.id-similar-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.id-similar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.id-split-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.id-sighting {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.5rem 0.6rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.id-sighting-selected {
+  border-color: var(--accent);
+}
+
+.id-sighting-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.id-sighting-info {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 0.15rem;
+  font-size: 0.9rem;
+}
+
+.id-camera {
+  color: var(--accent);
+}
+
+.id-check {
+  width: 1.2rem;
+  height: 1.2rem;
+  accent-color: var(--accent);
+}
+
+.id-video {
+  width: 100%;
+  max-height: 60vh;
+  border-radius: 8px;
+  background: #000;
+}
+
+@media (max-width: 30rem) {
+  .id-face-large {
+    width: 5rem;
+    height: 5rem;
+  }
+
+  .id-similar-item {
+    flex-wrap: wrap;
+  }
+}

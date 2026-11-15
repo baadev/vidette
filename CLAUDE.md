@@ -24,9 +24,11 @@ do not resurrect it on this line. See [ROADMAP.md](ROADMAP.md) for what exists.
    targets.
 4. **Privacy promises are inviolable.** No telemetry, no phone-home, no cloud calls unless the
    user explicitly configured that destination. Identity features are limited to the
-   documented opt-in, local-only trusted-faces *suppression* (M4) — no stranger
-   identification, no third-party identity databases, no cloud biometrics, and uncertain
-   matches never suppress. Do not add "just a version check" HTTP calls.
+   documented opt-in, local-only trusted faces (known people, ADR-0012) and the opt-in
+   anonymous identities of ADR-0014 (unknown faces counted as numbers, retention, off by
+   default) — no naming of strangers from any source, no third-party identity databases,
+   no cloud biometrics, no appearance attributes (age, gender, skin colour) in matching,
+   suspicion or policy, and uncertain matches never suppress. Do not add "just a version check" HTTP calls.
 5. **Security defaults do not weaken.** No default credentials, auth on by default, webhooks
    signed, secrets never logged, config files never contain bootstrap passwords. See
    [docs/architecture/security-model.md](docs/architecture/security-model.md).
@@ -39,11 +41,13 @@ do not resurrect it on this line. See [ROADMAP.md](ROADMAP.md) for what exists.
 | `server/vidette/frigate/` | Frigate source (MQTT), HTTP client, payload models, `vidette frigate` CLI |
 | `server/vidette/events/` | Event intake (incident → observed event), canonical payload |
 | `server/vidette/verdicts/` | `Judge` interface and model-free baselines (the VLM judge lands here) |
-| `server/vidette/people/` | Known people (ADR-0012): face store, YuNet/SFace engine (opt-in extra), face check, `vidette people` |
+| `server/vidette/people/` | Known people (ADR-0012): face store, YuNet/SFace engine (opt-in extra), face check, `vidette people`; anonymous identities and the recurrence rule (ADR-0014) |
 | `server/vidette/eval/` | `vidette eval`: dataset format, metrics, runner, reports |
 | `server/vidette/db/` | SQLite store (WAL, append-only migrations, single-writer discipline) |
 | `server/vidette/auth/` | scrypt hashing, sessions, scoped tokens, FastAPI deps |
 | `server/vidette/notify/` | Webhooks (HMAC), Apprise, web push, MQTT + HA discovery, dispatcher |
+| `server/vidette/telegram/` | The Telegram bot (ADR-0013): Bot API client, routing by policy level, alerts, digest, commands, buttons |
+| `server/vidette/label/` | `vidette label`: drafts, contact sheets, review replies; `feedback.py` turns live answers into labels |
 | `server/vidette/api/` | FastAPI app + routers (auth/events/metrics/push/system/ws); 501 stubs |
 | `server/vidette/runtime.py` | AppRuntime: boots/stops every subsystem in order (lifespan) |
 | `server/tests/` | Pytest suite; `fixtures/frigate/` holds recorded-format Frigate sessions |

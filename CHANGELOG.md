@@ -11,6 +11,42 @@ Development line `v0.2`: Vidette becomes an intent layer on top of Frigate
 images published from it.
 
 ### Added
+- **Anonymous identities** ([docs/people.md](docs/people.md#strangers-who-come-back),
+  [ADR-0014](docs/architecture/adr/0014-anonymous-identities.md)), opt-in
+  `people.track_unknown` (off by default): a readable unknown face of at least 64 px that
+  is not close to anyone enrolled joins the identity it matches (SFace cosine ≥ 0.50 and
+  0.06 clear of any other) or starts "stranger #N"; never named unless someone types a
+  name. The judge's face line says how often and where ("this is the 3rd time today;
+  cameras in the last hour: …"), counts only for a cloud judge; `recurrence:` on a policy
+  with levels raises a lower scenario to `raise_to` after N sightings within a window or
+  on several cameras within minutes, and on any sighting of an identity marked
+  suspicious. Telegram: «незнакомец №12, 3-й раз за сегодня»; "Это свой" and "This is …"
+  promote the identity to a known person. Web: People → Identities with every sighting
+  and its clip; rename, mark suspicious or ignored, merge, split, promote, delete. One
+  SQLite file and one crop per sighting in `~/vidette-data/identities` (0700/0600,
+  refused in a git tree, `secure_delete`), 30-day retention for unnamed, unflagged
+  identities; `vidette people identities list | backfill | expire | delete`. No
+  appearance attribute anywhere.
+- **Telegram bot** ([docs/telegram.md](docs/telegram.md),
+  [ADR-0013](docs/architecture/adr/0013-telegram-bot.md)): `notifications.telegram` in
+  `vidette serve`, long polling only (no webhook, no open port). An alert is an album of
+  key frames and the clip (≤ 20 MB, else a link) plus a text with the camera, time, the
+  judge's description and who the face check recognized, in the chat's alerts topic, once
+  per event and chat; one camera's alerts within 5 minutes edit the first message.
+  Buttons 👍 / 👎 / "Это свой" / "Не знаю" record the event's feedback, a reviewed label in
+  the clip's dataset (`labels.yaml`, through the `vidette label apply` code) and, for
+  "Это свой", a face confirmation. An hourly silent digest of everything that did not
+  wake anyone, with the reason for events without a verdict; `/status`, `/live` (says
+  live view will be part of the Vidette app), `/quiet`. Only allowed chats get any
+  answer; `recipients: first` for a trial; `names` off by default. `vidette telegram check | try CLIP` checks the setup and
+  sends one real clip as a test alert. launchd template
+  [deploy/macos/dev.vidette.serve.plist](deploy/macos/dev.vidette.serve.plist).
+- **Policy levels**: `policies[].levels` (highest first), each with scenarios and a `wake`
+  rule (`always`, `unless_quiet`, `unless_known`, `never`). The judge names one scenario
+  (an `enum` in the JSON schema) and how many people it saw; the level decides whether the
+  event is an alert and who wakes. `understanding.vlm.language` for the description.
+- **`vidette serve --env-file`**: `KEY=VALUE` files for `${VAR}`s, read as plain
+  assignments (not shell), never printed; a file readable by others is reported.
 - **Known people** ([docs/people.md](docs/people.md),
   [ADR-0012](docs/architecture/adr/0012-known-people.md)): opt-in local face recognition
   for enrolled people (`pip install 'vidette[people]'`; YuNet MIT + SFace Apache-2.0 from
@@ -97,11 +133,59 @@ images published from it.
   means the camera is asleep (the base station answers quickly and does not wake the camera), so it
   is checked every 5 s instead of backing off to 5 minutes. Opt-in; the default is
   unchanged.
+- **Stream health per clip** ([docs/collect.md](docs/collect.md#stream-health)): the
+  sidecar's `health` block, from packet times alone (no decoding, about 0.1 s a clip):
+  frames, pauses over 0.5 s and the time they cover, the longest one, frames that came in
+  a heap after a pause, the longest pauses as `[start, end]`. A pause of 2 s or more, or
+  pauses covering a tenth of the clip, mark it interrupted.
+- **Frames where the picture changed, with their times**
+  ([docs/vlm.md](docs/vlm.md#what-the-judge-sees-and-answers)): from a clip, the judge
+  gets real frames picked by packet, two per episode of change (found on 64×36 grey
+  thumbnails of the key frames, no full decode), each frame's time in the recording, and
+  every stall between two frames from the clip's stream health; the system prompt says a
+  person who changes place is walking and that how long someone stayed is read only from
+  frames without a stall between them. Frames are chosen once per event for all policies,
+  kept under `media_dir/judge-frames/`, and become the Telegram album. Levels answers carry
+  `first_person_frame` (`person_at_s`). The bot says «запись прерывалась» in the alert and
+  the digest when the recording paused.
+- **Early alerts** ([docs/telegram.md](docs/telegram.md#early-alerts-before-the-clip-ends)):
+  `vidette collect --early 8s` copies the first seconds of a wake-period recording, or of
+  a continuous mode's motion event, to `.early/` while it goes on (half-second Matroska
+  clusters, flushed at once, make the part file and the open ring segment readable);
+  the clip folder source publishes it within a second as a partial incident of the clip
+  to come; an early alert goes out at once and the whole clip, judged under the same
+  event, edits that message (the clip replaces the album's last item, the verdict is
+  updated, a higher level buzzes once more, "not an alert after all" says so). An early
+  "nothing" never hides a later alert.
+- **Where the time went**: every event keeps `intent.timeline` (camera woke or motion,
+  first frame, person seen, early window, clip closed and picked up, judge queued, started,
+  finished) and an alert its `sent_at`; `/status` shows the stages of the last alert.
+- The VLM judge sends a prompt the server refused for its context size once more with
+  the same frames 20 % smaller.
 - **launchd template for a second camera**:
   [deploy/macos/dev.vidette.collect.camera2.plist](deploy/macos/dev.vidette.collect.camera2.plist).
 - `server/uv.lock`; CI installs from it (`--locked`).
 
 ### Changed
+- `vidette collect` keeps the camera's own clock (RTP timestamps) behind a restreamer too,
+  with a jump guard on the input (`setts`): a packet more than 10 s after the previous
+  one, or not after it, continues one frame later, so go2rtc splicing a reconnect no
+  longer ends a clip at once or cuts the ring at every key frame. Arrival-time stamps
+  turned delivery jitter into frozen pictures (measured: arrival pauses up to 13 s on a
+  weak link, while the camera's timestamps of the same packets were even). The clip's
+  `--max` is enforced by the collector from ffmpeg's progress (ffmpeg's `-t` reads the
+  timestamps before the guard; a clip may run up to a second over).
+  `--wallclock-timestamps` stays, no longer recommended.
+- `vidette collect --continuous` cuts a clip as soon as the ring holds its end, reading the
+  open segment, instead of waiting up to one segment (a minute) for it to finish.
+- Clip folders take a `vidette collect` clip as soon as its sidecar is there (written
+  last) instead of after `settle`, and list such a dataset every 2 s: settle and poll
+  had added 14 s before the judge saw a clip.
+- The verdict worker judges the newest waiting incident first; a backlog on a slow or
+  shared model delays old clips, not the current one.
+- A clip folder's incident id is the clip's full path: two folders that cut a clip in the
+  same second no longer share one event. In a `vidette collect` dataset only `clips/` is
+  read; the continuous mode's lookback ring (`ring/*.mkv`) never becomes an incident.
 - Examples use documentation address ranges.
 - Config: `understanding.vlm` is now `backend: none | local | cloud` with `local:` and
   `cloud:` sections (the v0.1 `provider`/`send` keys are rejected with a pointer).

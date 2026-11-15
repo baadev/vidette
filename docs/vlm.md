@@ -75,19 +75,43 @@ review item or clip-folder clip) is judged once per policy:
 - if every policy abstained, the event stays **observed** with the reason (for example
   "model 'qwen2.5vl:7b' not found; run `ollama pull qwen2.5vl:7b`").
 
-Only incidents that ended in the last 15 minutes are judged, one at a time, so a restart,
-a replay or a backfilled folder never turns into a burst of old alerts. Frames come from
-the clip folder's key frames, else from Frigate's recordings over the incident (event
-snapshots if the camera does not record). The System page shows how many were judged.
+Only incidents that ended in the last 15 minutes are judged, one at a time, newest
+first: while the judge is busy, the most recent waiting incident is taken next and older
+ones wait until they are too old. A slow or shared model then answers about what is
+happening now, and a restart, a replay or a backfilled folder never turns into a burst of
+old alerts. Frames come from
+the clip itself when there is one (chosen once for all policies, kept under
+`media_dir/judge-frames/<event id>/` and used for the Telegram album), else from
+Frigate's recordings over the incident (event snapshots if the camera does not record).
+The clip's [stream health](collect.md#stream-health) is kept with the event
+(`intent.stream`). The System page shows how many were judged.
 
 ## What the judge sees and answers
 
-- **Frames**: key frames already on disk (a collected clip, a dataset entry) are used as
-  they are, spread evenly; otherwise frames are taken from the clip with ffmpeg, centred in
-  equal slices of its duration. Each frame is shrunk to `max_image_side` (768 px by
-  default) and sent as a JPEG data URL.
-- **Text**: the policy's name and words, the camera, local time of day, duration and what
-  the upstream detector reported (if anything). Never a dataset's ground truth.
+- **Frames**: from a clip, real frames picked by its packets, never instants on its
+  timeline (an instant inside a stalled stretch would show the frame before the stall
+  again). Where the picture changed is found on 64×36 grey thumbnails of the key frames
+  (about half a second for two minutes of 1080p, no full decode): runs of change are
+  episodes, each episode shown gets two frames so the judge sees how things moved, and
+  with more episodes than that the longest are shown (a person working at a door lasts
+  longer than headlights sweeping past). Nothing changed: frames spread over the clip.
+  Without a clip, key frames already on disk (a dataset entry) are used as they are,
+  spread evenly. Each frame is shrunk to `max_image_side` (768 px by default) and sent as
+  a JPEG data URL. Measured on a two-minute night clip of a person walking past: the old
+  even spread over the clip put the person in one frame of four; the episodes put them in two,
+  three seconds apart, at different places.
+- **Text**: the policy's name and words, the camera, local time of day, how long the
+  recording is ("not how long anyone stayed") and what the upstream detector reported (if
+  anything). Never a dataset's ground truth. From a clip, also each frame's time in the
+  recording and, from its stream health, every stall between two frames ("the video
+  stalled between frames 2 and 3 (70.3 to 83.5 s): how much time passed is unknown") and
+  whether the recording was interrupted. The system prompt says what that means: a person
+  whose position changes between frames is walking, how long someone stayed is judged only
+  from frames without a stall between them. All of it is short on purpose: on a shared
+  llama-server slot of 2048 tokens, four frames at 640 px and a policy with levels came to
+  1916 prompt tokens, leaving about 130 for the answer (about 65 used). A prompt the
+  server refuses for its context size is sent once more with the same frames 20 %
+  smaller; the verdict counts both calls.
 - **Who it saw**, with [known people](people.md) on: one line from the local face check
   (who was recognized and how sure, faces that matched nobody, frames without a clear
   face). Names go to a local model only; a cloud model hears "a known person".
@@ -102,6 +126,20 @@ snapshots if the camera does not record). The System page shows how many were ju
 - **`unsure` is an abstention.** So are timeouts, unreadable answers, missing frames and an
   exhausted budget. An abstention counts as "no alert" and never notifies; the verdict
   records which one it was, and `vidette eval` counts them by reason.
+- **Policies with levels** ([telegram.md](telegram.md#levels-who-wakes-for-what)) get the
+  levels' scenarios instead of the alert/silent question, and answer with a scenario id
+  (enforced by an `enum` in the schema), a description, how many people are visible, the
+  first frame that shows a person (kept as `person_at_s`, seconds into the clip), and a
+  confidence:
+
+  ```json
+  {"scenario": "touching_equipment", "description": "A person opens the meter box.",
+   "persons": 1, "first_person_frame": 2, "confidence": 0.8}
+  ```
+
+  The scenario's level makes it an alert or not; `other` is never one; `unsure` (or an
+  id the policy does not have) is an abstention. `understanding.vlm.language` asks for the
+  description in another language; the rest of the prompt stays English.
 
 ## Limits that cannot be skipped
 
@@ -113,7 +151,13 @@ snapshots if the camera does not record). The System page shows how many were ju
 | `max_output_tokens` | 400 | the answer is cut; a cut answer that is not JSON abstains |
 
 Every request counts against the day's budget, including failed ones (providers may bill
-them). Command-line tools keep their count in `~/.local/state/vidette/vlm-usage.json`; the
+them).
+
+A server with a small context per request rejects the call before the model sees it
+(`HTTP 400 … exceeds the available context size`), and the judge abstains. Measured on a
+llama-server with 2048 tokens per slot and a Qwen vision model: four frames at 768 px plus
+a policy with levels came to 2101 tokens; at 640 px, 1565. Lower `max_image_side` (or
+`frames_per_call`) until it fits; small details far from the camera are the first to go. Command-line tools keep their count in `~/.local/state/vidette/vlm-usage.json`; the
 server keeps its own in its database.
 
 ## Comparing local and cloud

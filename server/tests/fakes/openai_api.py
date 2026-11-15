@@ -44,6 +44,7 @@ class FakeVlmApi:
     fenced: bool = False  # wrap the JSON in ```json fences, like chatty models
     force_status: int | None = None
     force_body: str = ""
+    force_count: int | None = None  # force only the first N requests (None: all)
     usage: tuple[int, int] = (1000, 40)
     requests: list[dict[str, Any]] = field(default_factory=list)
 
@@ -60,7 +61,9 @@ class FakeVlmApi:
                 f"Bearer {self.api_key}"
             ):
                 return JSONResponse({"error": {"message": "invalid api key"}}, status_code=401)
-            if self.force_status is not None:
+            if self.force_status is not None and (
+                self.force_count is None or len(self.requests) <= self.force_count
+            ):
                 return JSONResponse(
                     {"error": {"message": self.force_body or "forced"}},
                     status_code=self.force_status,

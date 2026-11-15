@@ -168,6 +168,37 @@ class PushSubscriptionRow:
     created_at: float
 
 
+@dataclass(frozen=True)
+class TelegramMessageRow:
+    """A message the Telegram bot sent (ADR-0013); `data` decoded from JSON."""
+
+    id: int
+    chat_id: int
+    thread_id: int | None
+    message_id: int | None
+    event_id: str | None
+    kind: str  # alert | collapsed | digest | test | upgrade
+    camera: str | None
+    level: str | None
+    created_at: float
+    data: dict[str, Any]
+
+
+def _telegram_message(row: sqlite3.Row) -> TelegramMessageRow:
+    return TelegramMessageRow(
+        id=int(row["id"]),
+        chat_id=int(row["chat_id"]),
+        thread_id=row["thread_id"],
+        message_id=row["message_id"],
+        event_id=row["event_id"],
+        kind=str(row["kind"]),
+        camera=row["camera"],
+        level=row["level"],
+        created_at=float(row["created_at"]),
+        data=json.loads(row["data"] or "{}"),
+    )
+
+
 def _push_subscription(row: sqlite3.Row) -> PushSubscriptionRow:
     return PushSubscriptionRow(
         endpoint=row["endpoint"],
@@ -607,3 +638,111 @@ class Database:
             )
             await self._db.commit()
         return cursor.rowcount > 0
+
+    # --- Telegram messages (ADR-0013) -------------------------------------------------------
+    async def insert_telegram_message(
+        self,
+        chat_id: int,
+        kind: str,
+        *,
+        thread_id: int | None = None,
+        message_id: int | None = None,
+        event_id: str | None = None,
+        camera: str | None = None,
+        level: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> int:
+        """Raises ValueError when this event already has an alert in this chat."""
+        async with self._write_lock:
+            try:
+                cursor = await self._db.execute(
+                    "INSERT INTO telegram_messages (chat_id, thread_id, message_id, event_id,"
+                    " kind, camera, level, created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (chat_id, thread_id, message_id, event_id, kind, camera, level,
+                     self._clock(), json.dumps(data or {})),
+                )  # fmt: skip
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"event {event_id} already has a message in this chat") from exc
+            await self._db.commit()
+        assert cursor.lastrowid is not None
+        return int(cursor.lastrowid)
+
+    async def update_telegram_message(
+        self, row_id: int, *, message_id: int | None = None, data: dict[str, Any] | None = None
+    ) -> None:
+        assignments: list[str] = []
+        params: list[Any] = []
+        if message_id is not None:
+            assignments.append("message_id = ?")
+            params.append(message_id)
+        if data is not None:
+            assignments.append("data = ?")
+            params.append(json.dumps(data))
+        if not assignments:
+            return
+        params.append(row_id)
+        async with self._write_lock:
+            await self._db.execute(
+                f"UPDATE telegram_messages SET {', '.join(assignments)} WHERE id = ?",
+                tuple(params),
+            )
+            await self._db.commit()
+
+    async def delete_telegram_message(self, row_id: int) -> None:
+        async with self._write_lock:
+            await self._db.execute("DELETE FROM telegram_messages WHERE id = ?", (row_id,))
+            await self._db.commit()
+
+    async def get_telegram_message(self, row_id: int) -> TelegramMessageRow | None:
+        async with self._db.execute(
+            "SELECT * FROM telegram_messages WHERE id = ?", (row_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _telegram_message(row) if row is not None else None
+
+    async def last_telegram_alert(
+        self,
+        chat_id: int | None,
+        camera: str | None = None,
+        *,
+        since: float = 0.0,
+        tests: bool = True,
+    ) -> TelegramMessageRow | None:
+        """The newest alert (not a collapsed one) in a chat (any chat: None), optionally
+        for one camera, sent at or after `since`; `tests=False` skips test alerts."""
+        kinds = "('alert', 'test')" if tests else "('alert')"
+        clauses = [f"kind IN {kinds}", "created_at >= ?", "message_id IS NOT NULL"]
+        params: list[Any] = [since]
+        if chat_id is not None:
+            clauses.append("chat_id = ?")
+            params.append(chat_id)
+        if camera is not None:
+            clauses.append("camera = ?")
+            params.append(camera)
+        async with self._db.execute(
+            f"SELECT * FROM telegram_messages WHERE {' AND '.join(clauses)}"
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
+            tuple(params),
+        ) as cur:
+            row = await cur.fetchone()
+        return _telegram_message(row) if row is not None else None
+
+    async def telegram_alerts_for_event(self, event_id: str) -> list[TelegramMessageRow]:
+        """The alert (or collapsed) messages one event got, one per chat."""
+        async with self._db.execute(
+            "SELECT * FROM telegram_messages WHERE event_id = ?"
+            " AND kind IN ('alert', 'collapsed') ORDER BY id",
+            (event_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_telegram_message(row) for row in rows]
+
+    async def telegram_alerted_events(self, chat_id: int, *, since: float) -> set[str]:
+        """Events this chat already heard about as an alert (sent or collapsed)."""
+        async with self._db.execute(
+            "SELECT event_id FROM telegram_messages WHERE chat_id = ? AND created_at >= ?"
+            " AND event_id IS NOT NULL AND kind IN ('alert', 'collapsed', 'test')",
+            (chat_id, since),
+        ) as cur:
+            rows = await cur.fetchall()
+        return {str(row["event_id"]) for row in rows}

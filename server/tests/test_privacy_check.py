@@ -80,6 +80,8 @@ def test_it_lets_examples_through(check: ModuleType, line: str) -> None:
         ("selfie.jpg", True),
         ("server/vidette/people/grid.png", True),
         ("docs/faces/sam.jpg", True),
+        ("docs/identities/crops/12.jpg", True),
+        ("server/vidette/people/identities.py", False),
         ("datasets/yard/clips/20261114-210304.mp4", True),
         ("models/face_recognition_sface_2021dec.onnx", True),
         ("web/public/embeddings.npy", True),

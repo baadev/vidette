@@ -8,6 +8,7 @@ from pathlib import Path
 from vidette.core.config import PeopleConfig
 from vidette.people.check import CheckSettings, PeopleCheck
 from vidette.people.engine import FaceLimits, OpenCvFaceEngine, load_engine
+from vidette.people.identities import IdentitySettings, IdentityStore
 from vidette.people.models import default_models_dir
 from vidette.people.store import PeopleStore
 
@@ -34,15 +35,34 @@ def engine_for(
     )
 
 
+def identities_for(config: PeopleConfig) -> IdentityStore:
+    """The anonymous identities (ADR-0014); IdentityError inside a git tree. Only
+    `vidette serve` and the backfill track identities: `match`, `scan`, `label` and `eval`
+    never add to them."""
+    settings = config.identities
+    return IdentityStore(
+        settings.dir,
+        IdentitySettings(
+            match=settings.match,
+            margin=settings.margin,
+            min_face_px=settings.min_face_px,
+            near_known=settings.near_known,
+            retention_days=settings.retention_days,
+        ),
+    )
+
+
 def check_for(
     config: PeopleConfig,
     *,
     download: bool,
     root: Path | None = None,
     say: Callable[[str], None] = print,
+    identities: IdentityStore | None = None,
 ) -> PeopleCheck:
     return PeopleCheck(
         store_for(config, root=root),
         engine_for(config, download=download, say=say),
         CheckSettings(fps=config.frames_per_second, max_frames=config.max_frames),
+        identities,
     )

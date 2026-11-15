@@ -13,11 +13,18 @@ Confirmations ("this is Sam", "this is a stranger", "not sure") come from the we
 `vidette people confirm` or a contact-sheet reply ("5 Robin"). "This is Sam" adds the
 crop as one of Sam's references; "a stranger" on a face that had matched someone raises
 that person's threshold above the wrong score and stores nothing about the stranger.
+
+Anonymous identities (ADR-0014): a check built with an `IdentityStore` (only `vidette
+serve` and `vidette people identities backfill` build one) also matches each unknown
+group against the identities seen before and records the sighting; the seen person
+carries the identity's brief. "This is Sam" on such a face promotes the whole identity.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -26,10 +33,19 @@ from pathlib import Path
 
 from vidette.ffmpeg import MediaToolError, sample_frames
 from vidette.people.engine import DetectedFace, FaceEngine
-from vidette.people.report import STRANGER, UNSURE, PeopleReport, SeenPerson
+from vidette.people.identities import (
+    GroupFace,
+    IdentityError,
+    IdentityStore,
+    SightingContext,
+    promote,
+)
+from vidette.people.report import STRANGER, UNSURE, IdentityBrief, PeopleReport, SeenPerson
 from vidette.people.store import Gallery, Match, NewFace, PeopleStore, StoreError
 from vidette.people.vectors import Vector, cosine
 from vidette.verdicts.base import Case
+
+logger = logging.getLogger(__name__)
 
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".mkv"})
@@ -37,6 +53,8 @@ SAME_FACE = 0.45  # two unmatched faces this alike are counted as one person
 MAX_SEEN = 12
 
 CropWriter = Callable[[int, bytes], str]  # (seen number, JPEG) -> path stored in the report
+# (an unknown person's readable faces, their best score for anyone enrolled) -> identity
+IdentityAssigner = Callable[[list[GroupFace], float], IdentityBrief | None]
 
 
 @dataclass(frozen=True)
@@ -69,8 +87,10 @@ def build_report(
     threshold: float,
     crops: CropWriter | None = None,
     now: datetime | None = None,
+    identities: IdentityAssigner | None = None,
 ) -> PeopleReport:
-    """Group the faces found in each frame into the people seen in the clip."""
+    """Group the faces found in each frame into the people seen in the clip; with
+    `identities`, match each unknown person against the anonymous identities."""
     observations: list[_Obs] = []
     readable_frames = 0
     unclear_frames = 0
@@ -136,6 +156,12 @@ def build_report(
         crop = None
         if crops is not None and best.face.crop is not None:
             crop = crops(number, best.face.crop)
+        identity = None
+        if group.person is None and identities is not None:
+            group_faces = [
+                GroupFace(o.embedding, o.face.face_px, o.face.score, o.face.crop) for o in group.obs
+            ]
+            identity = identities(group_faces, score)
         seen.append(
             SeenPerson(
                 n=number,
@@ -148,6 +174,7 @@ def build_report(
                 faces=len(group.obs),
                 face_px=max(o.face.face_px for o in group.obs),
                 crop=crop,
+                identity=identity,
             )
         )
     return PeopleReport(
@@ -175,15 +202,34 @@ def crop_writer(root: Path, folder: str) -> CropWriter:
     return write
 
 
+def sighting_context(case: Case) -> SightingContext:
+    """Where and when the faces of a case were seen, for the identity store."""
+    incident = case.incident
+    clip = next((p for p in case.media if p.suffix.lower() in VIDEO_SUFFIXES), None)
+    return SightingContext(
+        at=incident.started_at,
+        camera=incident.camera,
+        source=incident.source,
+        source_id=incident.source_id,
+        clip=None if clip is None else str(clip),
+    )
+
+
 class PeopleCheck:
-    """The face check for one people folder and one engine (reusable, sequential)."""
+    """The face check for one people folder and one engine (reusable, sequential).
+    With `identities`, unknown faces are also tracked as anonymous identities."""
 
     def __init__(
-        self, store: PeopleStore, engine: FaceEngine, settings: CheckSettings | None = None
+        self,
+        store: PeopleStore,
+        engine: FaceEngine,
+        settings: CheckSettings | None = None,
+        identities: IdentityStore | None = None,
     ) -> None:
         self.store = store
         self.engine = engine
         self.settings = settings or CheckSettings()
+        self.identities = identities
 
     async def frame_images(self, case: Case) -> list[bytes]:
         """Frames sampled from the clip, or the images on hand when there is no clip or
@@ -207,25 +253,46 @@ class PeopleCheck:
                     return [path.read_bytes() for path in paths]
         return [path.read_bytes() for path in images[: self.settings.max_frames]]
 
-    def analyse(self, images: list[bytes], crops: CropWriter | None = None) -> PeopleReport:
-        """Blocking: run in a worker thread."""
+    def analyse(
+        self,
+        images: list[bytes],
+        crops: CropWriter | None = None,
+        context: SightingContext | None = None,
+    ) -> PeopleReport:
+        """Blocking: run in a worker thread. `context` (with an identity store) records
+        the unknown faces as sightings of anonymous identities."""
         frames: list[list[DetectedFace]] = []
         for image in images:
             try:
                 frames.append(self.engine.faces(image))
             except ValueError:
                 frames.append([])
+        assigner = None
+        if self.identities is not None and context is not None:
+            assigner = self._assigner(self.identities, context)
         return build_report(
             frames,
             self.store.gallery(),
             engine=self.engine.name,
             threshold=self.store.threshold,
             crops=crops,
+            identities=assigner,
         )
+
+    @staticmethod
+    def _assigner(store: IdentityStore, context: SightingContext) -> IdentityAssigner:
+        def assign(faces: list[GroupFace], known_score: float) -> IdentityBrief | None:
+            try:
+                return store.assign(faces, context, known_score=known_score).brief
+            except (IdentityError, sqlite3.Error, OSError) as exc:  # never fails the check
+                logger.warning("identity store: %s", exc)
+                return None
+
+        return assign
 
     async def check(self, case: Case, crops: CropWriter | None = None) -> PeopleReport:
         images = await self.frame_images(case)
-        return await asyncio.to_thread(self.analyse, images, crops)
+        return await asyncio.to_thread(self.analyse, images, crops, sighting_context(case))
 
 
 @dataclass(frozen=True)
@@ -244,9 +311,12 @@ def confirm(
     engine: FaceEngine | None,
     media_root: Path,
     where: str,
+    identities: IdentityStore | None = None,
 ) -> Confirmation:
     """Apply one answer to seen person `n` and mark it in `report` (the caller saves the
-    report). `answer`: a person's name or id, "stranger" or "unsure"."""
+    report). `answer`: a person's name or id, "stranger" or "unsure". With `identities`,
+    "this is Sam" on a face that belongs to an anonymous identity promotes the identity:
+    its faces from every sighting become Sam's references too."""
     seen = report.get(n)
     if seen is None:
         raise StoreError(f"there is no face {n} here (faces: {len(report.seen)})")
@@ -285,6 +355,16 @@ def confirm(
             assert seen.person is not None
             store.reject(seen.person, seen.score, where)
         result = person.id
+        promoted = ""
+        if identities is not None and seen.identity is not None:
+            try:
+                _row, more = promote(identities, seen.identity.id, store, person.id)
+            except IdentityError:
+                pass  # deleted or merged since: the face itself is still learned
+            else:
+                promoted = f"; stranger #{seen.identity.id} is {person.name} now"
+                if more:
+                    promoted += f" ({more} more face(s) from earlier clips)"
         if added.added:
             message = f"added to {person.name}'s references"
         elif added.duplicates:
@@ -294,6 +374,7 @@ def confirm(
             message = f"not added: it looks more like {other} ({score:.2f})"
         else:
             message = f"not added: {person.name} has {store.max_faces} faces already"
+        message += promoted
     seen.confirmed = result
     seen.confirmed_at = datetime.now().astimezone().replace(microsecond=0)
     return Confirmation(seen=seen, answer=result, message=message)

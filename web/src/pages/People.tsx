@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type PeopleState, type Person, type UploadResult } from "../api";
+import { PeopleSwitch } from "./Identities";
 import "./pages.css";
 
 // Known people (docs/people.md, ADR-0012): who the household enrolled, their reference
@@ -196,6 +197,7 @@ export function PeoplePage() {
     <main className="page people-page">
       <header className="page-header">
         <h1 className="page-title">People</h1>
+        <PeopleSwitch current="people" />
         <p className="kbd-hint">
           Faces of people you know, recognized on this machine. The judge is told who it saw.
         </p>

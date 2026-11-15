@@ -160,6 +160,7 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
 
     from vidette.api.routers.auth import router as auth_router
     from vidette.api.routers.events import router as events_router
+    from vidette.api.routers.identities import router as identities_router
     from vidette.api.routers.metrics import router as metrics_router
     from vidette.api.routers.people import router as people_router
     from vidette.api.routers.push import router as push_router
@@ -169,6 +170,7 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
 
     app.include_router(auth_router)
     app.include_router(events_router)
+    app.include_router(identities_router)
     app.include_router(metrics_router)
     app.include_router(people_router)
     app.include_router(push_router)

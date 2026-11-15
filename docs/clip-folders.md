@@ -46,7 +46,25 @@ services:
 The middle key frame becomes the event's snapshot (copied into `media_dir`); a clip
 without key frames has no snapshot (the server image carries no ffmpeg to make one). The
 clip is served from the folder in place. Files in hidden folders (`.partial`, `.vidette`) are
-ignored, and Vidette never writes to the folder.
+ignored, and the clip-folder source never writes to the folder. In a `vidette collect`
+dataset (it has a `.vidette` folder) only `clips/` is read: the continuous mode's lookback
+ring (`ring/*.mkv`) is not a clip.
+
+Each clip is one event even when several folders hold clips with the same name (two
+cameras cutting a clip in the same second): the event's upstream id is the clip's full
+path.
+
+In a `vidette collect` dataset a clip whose sidecar is there is taken at once (the
+collector writes the sidecar last, atomically), without waiting for `settle`, and
+`clips/` is listed every 2 s whatever `poll_every` says: these clips feed alerts.
+
+Early windows (`vidette collect --early`, `.early/<id>.json` and `.mp4`) are looked for
+every second and published as a partial incident with the id of the clip to come
+(`clips/<id>.mp4`): the same event, judged early and again when the clip arrives
+([docs/telegram.md](telegram.md#early-alerts-before-the-clip-ends)). An early window
+older than two minutes, from before the source started, or whose clip is already there,
+is skipped. A sidecar's `timeline` and the moment the source picked the file up go to the
+event (`intent.timeline`).
 
 On the very first start only clips arriving after that moment count (unless `backfill`),
 so pointing Vidette at a folder of 600 old clips does not create 600 events. Progress is

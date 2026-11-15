@@ -32,7 +32,7 @@ from vidette.api.errors import problem
 from vidette.auth.deps import require_scope
 from vidette.auth.service import Principal
 from vidette.people.check import confirm
-from vidette.people.report import PeopleReport
+from vidette.people.report import IdentityBrief, PeopleReport
 from vidette.people.store import NewFace, PeopleStore, Person, StoreError
 from vidette.runtime import AppRuntime
 
@@ -103,6 +103,8 @@ class SeenOut(BaseModel):
     face_px: int
     crop: str | None
     confirmed: str | None
+    identity: int | None = None  # the anonymous identity of an unknown face (ADR-0014)
+    identity_note: str | None = None  # e.g. "3rd time today, 5 times on 2 days"
 
 
 class EventPeopleOut(BaseModel):
@@ -187,10 +189,23 @@ def event_people(event_id: str, raw: object) -> EventPeopleOut | None:
                 face_px=seen.face_px,
                 crop=(f"/api/v1/events/{event_id}/people/{seen.n}.jpg" if seen.crop else None),
                 confirmed=seen.confirmed,
+                identity=None if seen.identity is None else seen.identity.id,
+                identity_note=None if seen.identity is None else identity_note(seen.identity),
             )
             for seen in report.seen
         ],
     )
+
+
+def identity_note(brief: IdentityBrief) -> str:
+    """How often an identity had been seen when this event was checked."""
+    if brief.sightings <= 1:
+        return "first time"
+    today = brief.today()
+    note = f"{today} time{'s' if today > 1 else ''} that day"
+    if brief.sightings > today:
+        note += f", {brief.sightings} on {brief.days} days"
+    return note
 
 
 @router.get("/people")
@@ -369,6 +384,7 @@ async def confirm_event_face(
             engine=rt.face_engine,
             media_root=Path(rt.config.storage.media_dir),
             where=f"event:{event_id}",
+            identities=rt.identities,
         )
     except StoreError as exc:
         raise problem(422, "Cannot apply this answer", str(exc)) from exc

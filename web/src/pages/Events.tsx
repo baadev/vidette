@@ -116,10 +116,11 @@ function FaceRow({ eventId, seen, enrolled, onChanged }: FaceRowProps) {
       )}
       <div className="face-info">
         <span className={`face-label${seen.status === "known" ? " face-known" : ""}`}>
-          {label}
+          {seen.identity ? <a href={`#/identities/${seen.identity}`}>Stranger #{seen.identity}</a> : label}
         </span>
         <span className="muted face-meta">
           {seen.faces} frame{seen.faces === 1 ? "" : "s"} · {seen.face_px}px
+          {seen.identity_note ? ` · ${seen.identity_note}` : ""}
         </span>
         {seen.confirmed ? (
           <span className="face-confirmed">✓ {answerLabel(seen.confirmed, enrolled)}</span>

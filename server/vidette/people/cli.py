@@ -8,6 +8,8 @@
     vidette people confirm ~/vidette-data/porch/clips/20261114-210304.mp4 2 Robin
     vidette people sheet Sam out.jpg             # the reference faces, for a look
     vidette people remove Sam
+    vidette people identities list               # anonymous identities (track_unknown)
+    vidette people identities backfill           # the clip folders' old clips, oldest first
 
 The folder comes from `people.dir` in the config (default `$VIDETTE_DATA/people`, else
 ~/vidette-data/people) or `--dir`; it must be outside any git repository. Docs:
@@ -23,12 +25,14 @@ import sys
 from pathlib import Path
 
 from vidette.core.config import ConfigError, PeopleConfig
+from vidette.envfile import EnvFileError
 from vidette.ffmpeg import MediaToolError
 from vidette.people.check import PeopleCheck, confirm, crop_writer
 from vidette.people.engine import EngineUnavailableError, FaceEngine
+from vidette.people.identities import IdentityError, IdentityStore
 from vidette.people.models import MODELS, ModelError, default_models_dir
 from vidette.people.report import STRANGER, UNSURE, PeopleReport
-from vidette.people.setup import check_for, engine_for, store_for
+from vidette.people.setup import check_for, engine_for, identities_for, store_for
 from vidette.people.sidecar import crops_for, dataset_root, load_report, save_report
 from vidette.people.store import NewFace, PeopleStore, StoreError
 from vidette.verdicts.base import Case
@@ -64,6 +68,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--dir", type=Path, default=None, help="people folder (overrides people.dir)"
+    )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="KEY=VALUE file for the config's ${VAR}s (as for vidette serve); repeatable",
     )
     actions = parser.add_subparsers(dest="people_command", required=True)
 
@@ -135,6 +146,32 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     sheet.add_argument("name")
     sheet.add_argument("out", type=Path)
 
+    ids = actions.add_parser(
+        "identities",
+        help="anonymous identities of faces nobody enrolled (people.track_unknown, ADR-0014)",
+    )
+    id_actions = ids.add_subparsers(dest="identities_command", required=True)
+    id_actions.add_parser("list", help="every identity, most recently seen first")
+    backfill = id_actions.add_parser(
+        "backfill",
+        help="match the clips already in the configured clip folders, oldest first",
+        description="Runs the face check over every clip of the config's clip_folders that "
+        "the identities have not seen yet and records the unknown faces as sightings. Writes "
+        "only to people.identities.dir: no report, crop or label next to the clips.",
+    )
+    backfill.add_argument(
+        "--since", default=None, help="only clips that started on or after this date, YYYY-MM-DD"
+    )
+    backfill.add_argument("--limit", type=int, default=0, help="at most this many clips")
+    backfill.add_argument("--all", action="store_true", help="also clips looked at before")
+    backfill.add_argument(
+        "--verbose", action="store_true", help="every unknown face: why it joined, or not"
+    )
+    id_actions.add_parser("expire", help="apply retention now (unnamed, unflagged identities)")
+    forget = id_actions.add_parser("delete", help="delete an identity with all its faces")
+    forget.add_argument("identity", type=int)
+    forget.add_argument("--yes", action="store_true", help="do not ask")
+
 
 def _config(args: argparse.Namespace) -> PeopleConfig:
     config, _source = cli_config(args.config)
@@ -150,6 +187,10 @@ def _say(line: str) -> None:
 
 def run(args: argparse.Namespace) -> int:
     try:
+        if args.env_file:
+            from vidette.telegram.cli import load_env_files
+
+            load_env_files(args.env_file)
         config = _config(args)
         command = args.people_command
         if command == "models":
@@ -168,7 +209,17 @@ def run(args: argparse.Namespace) -> int:
             return _confirm(config, args.clip, args.face, args.answer)
         if command == "sheet":
             return _sheet(config, args.name, args.out)
-    except (ConfigError, StoreError, ModelError, EngineUnavailableError, MediaToolError) as exc:
+        if command == "identities":
+            return _identities(config, args)
+    except (
+        ConfigError,
+        StoreError,
+        ModelError,
+        EngineUnavailableError,
+        MediaToolError,
+        IdentityError,
+        EnvFileError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 2
@@ -478,6 +529,128 @@ def _sheet(config: PeopleConfig, name: str, out: Path) -> int:
         raise StoreError("cannot encode the sheet")
     write_private(out.expanduser(), bytes(encoded.tobytes()))
     print(f"{out} ({len(store.faces(person.id))} faces; e = enrolled, c = confirmed)")
+    return 0
+
+
+# --- identities --------------------------------------------------------------------------
+
+
+def _identities(config: PeopleConfig, args: argparse.Namespace) -> int:
+    command = args.identities_command
+    if command == "backfill":
+        return asyncio.run(_backfill(args))
+    store = identities_for(config)
+    if command == "list":
+        return _list_identities(store)
+    if command == "expire":
+        gone = store.expire()
+        print(f"{gone} identit{'y' if gone == 1 else 'ies'} past retention deleted")
+        return 0
+    if command == "delete":
+        row = store.require(args.identity)
+        if not args.yes:
+            answer = input(
+                f"delete #{row.id} ({row.sightings} sightings) with every face crop and "
+                "embedding? [y/N] "
+            )
+            if answer.strip().lower() not in ("y", "yes", "д", "да"):
+                print("nothing deleted")
+                return 1
+        store.delete(row.id)
+        print(f"deleted #{row.id} and everything stored for it")
+        return 0
+    return 2
+
+
+def _when(ts: float | None) -> str:
+    from datetime import datetime
+
+    return "never" if ts is None else datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _list_identities(store: IdentityStore) -> int:
+    rows = store.entries()
+    print(f"identities in {store.root}: {len(rows)}")
+    for warning in store.permission_warnings():
+        print(f"  ⚠ {warning}")
+    for row in rows:
+        name = f" {row.name}" if row.name else ""
+        status = "" if row.status == "unknown" else f" [{row.status}]"
+        print(
+            f"  #{row.id}{name}{status}: {row.sightings} sighting(s) on {row.days} day(s), "
+            f"last {_when(row.last_seen)}, cameras {', '.join(row.cameras)}"
+        )
+    return 0
+
+
+async def _backfill(args: argparse.Namespace) -> int:
+    from datetime import datetime
+
+    from vidette.clipfolder import clip_incident, find_clips
+
+    full, source = cli_config(args.config)
+    people = full.people
+    if not (people.enabled and people.track_unknown):
+        raise IdentityError(
+            f"people.enabled and people.track_unknown must be true in {source or 'the config'}; "
+            "the backfill only fills what live tracking keeps (and prunes)"
+        )
+    if not full.clip_folders:
+        raise IdentityError(f"no clip_folders in {source or 'the config'}")
+    store = identities_for(people)
+    check = check_for(people, download=True, say=_say, identities=store)
+    since = None if args.since is None else datetime.fromisoformat(args.since).timestamp()
+    oldest = store.settings.retention_days * 86400.0
+    oldest = datetime.now().timestamp() - oldest  # older clips would expire at once
+    since = oldest if since is None else max(since, oldest)
+    cases: list[tuple[float, Case]] = []
+    for folder in full.clip_folders:
+        for clip in find_clips(folder.path):
+            try:
+                incident = clip_incident(folder, clip)
+            except OSError:
+                continue
+            if since is not None and incident.started_at < since:
+                continue
+            if not args.all and store.was_checked(incident.source, incident.source_id):
+                continue
+            media = tuple(Path(m) for m in incident.media)
+            cases.append((incident.started_at, Case(incident=incident, media=media)))
+    cases.sort(key=lambda item: item[0])
+    if args.limit:
+        cases = cases[: args.limit]
+    print(f"{len(cases)} clip(s) to look at, oldest first; identities in {store.root}")
+    faces = 0
+    for index, (_at, case) in enumerate(cases, start=1):
+        try:
+            report = await check.check(case)
+        except MediaToolError as exc:
+            print(f"  skipped {Path(case.incident.source_id).name}: {exc}")
+            continue
+        store.mark_checked(case.incident.source, case.incident.source_id)
+        if args.verbose:
+            while store.recent:
+                done = store.recent.popleft()
+                closest = ", ".join(f"#{i} {s:.2f}" for i, s in done.scores) or "none"
+                print(
+                    f"    {done.reason}: face {done.face_px}px, enrolled {done.known_score:.2f},"
+                    f" closest {closest}"
+                )
+        tracked = [seen.identity for seen in report.unknown if seen.identity is not None]
+        faces += len(report.unknown)
+        for brief in tracked:
+            state = "new" if brief.new else f"{brief.sightings} sightings"
+            print(
+                f"  {_when(case.incident.started_at)} {case.incident.camera}: #{brief.id} ({state})"
+            )
+        if index % 50 == 0:
+            print(f"  … {index}/{len(cases)}", flush=True)
+    stats = store.stats()
+    reasons = ", ".join(f"{reason} {count}" for reason, count in sorted(store.counts.items()))
+    print(
+        f"done: {len(cases)} clip(s), {faces} unknown face group(s) ({reasons or 'none'}); "
+        f"the store holds {stats['identities']} identities, {stats['sightings']} sightings"
+    )
     return 0
 
 

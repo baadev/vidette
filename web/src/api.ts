@@ -60,6 +60,10 @@ export type SeenPerson = {
   crop: string | null;
   /** A person id, "stranger" or "unsure" once someone answered. */
   confirmed: string | null;
+  /** The anonymous identity of an unknown face (people.track_unknown, ADR-0014). */
+  identity?: number | null;
+  /** How often it had been seen when this event was checked. */
+  identity_note?: string | null;
 };
 
 export type EventPeople = {
@@ -108,6 +112,54 @@ export type UploadResult = {
 };
 
 export type ConfirmResult = { message: string; people: EventPeople };
+
+export type IdentityStatus = "unknown" | "suspicious" | "ignored" | "known";
+
+/** An anonymous identity: a face nobody enrolled, seen again (docs/people.md, ADR-0014). */
+export type Identity = {
+  id: number;
+  /** "Stranger #12", or the name someone gave it. */
+  label: string;
+  name: string | null;
+  status: IdentityStatus;
+  /** The enrolled person it became, once promoted. */
+  person: string | null;
+  sightings: number;
+  days: number;
+  first_seen: number | null;
+  last_seen: number | null;
+  cameras: string[];
+  /** URL of the largest face crop. */
+  face: string | null;
+};
+
+export type IdentitiesState = {
+  enabled: boolean;
+  reason: string | null;
+  dir: string | null;
+  retention_days: number;
+  match: number;
+  identities: Identity[];
+  warnings: string[];
+};
+
+export type Sighting = {
+  id: number;
+  at: number;
+  camera: string;
+  faces: number;
+  face_px: number;
+  face: string | null;
+  /** URL of the clip, when it is still there. */
+  clip: string | null;
+  /** The event this sighting belongs to, when there is one. */
+  event: string | null;
+};
+
+export type IdentityDetail = Identity & {
+  sightings_list: Sighting[];
+  similar: { id: number; label: string; score: number; face: string | null }[];
+};
 
 export type UpstreamFacts = {
   severity: string | null;
@@ -373,6 +425,46 @@ export const api = {
       `${BASE}/events/${encodeURIComponent(eventId)}/people/${n}`,
       { answer },
     );
+  },
+
+  /** Anonymous identities (ADR-0014): read:config to look, write:config to change. */
+  identities(): Promise<IdentitiesState> {
+    return getJson<IdentitiesState>(`${BASE}/identities`);
+  },
+
+  identity(id: number): Promise<IdentityDetail> {
+    return getJson<IdentityDetail>(`${BASE}/identities/${id}`);
+  },
+
+  async changeIdentity(
+    id: number,
+    change: { name?: string; clear_name?: boolean; status?: "unknown" | "suspicious" | "ignored" },
+  ): Promise<IdentityDetail> {
+    const response = await send(`${BASE}/identities/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(change),
+    });
+    return (await response.json()) as IdentityDetail;
+  },
+
+  mergeIdentity(id: number, into: number): Promise<IdentityDetail> {
+    return postJson<IdentityDetail>(`${BASE}/identities/${id}/merge`, { into });
+  },
+
+  splitIdentity(id: number, sightings: number[]): Promise<IdentityDetail> {
+    return postJson<IdentityDetail>(`${BASE}/identities/${id}/split`, { sightings });
+  },
+
+  promoteIdentity(
+    id: number,
+    person: string,
+  ): Promise<{ identity: Identity; person: string; faces_added: number }> {
+    return postJson(`${BASE}/identities/${id}/promote`, { person });
+  },
+
+  async deleteIdentity(id: number): Promise<void> {
+    await send(`${BASE}/identities/${id}`, { method: "DELETE" });
   },
 
   async setEventFavorite(id: string, favorite: boolean): Promise<void> {

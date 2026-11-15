@@ -3,8 +3,9 @@
 Boot sequence (FastAPI lifespan calls start/stop):
 1. Database.connect (migrations).
 2. With `workers=True`: NotificationDispatcher and MqttPublisher (both no-ops without
-   configured rules / broker), the EventIntake (incidents → event rows), then the Frigate
-   source when `frigate:` is configured and the clip folders (ADR-0010) when listed.
+   configured rules / broker), the EventIntake (incidents → event rows), the verdict
+   worker, the Telegram bot when `notifications.telegram` is set (ADR-0013), then the
+   Frigate source when `frigate:` is configured and the clip folders (ADR-0010).
    Frigate or its broker being unreachable never blocks boot: the source retries with
    backoff and reports through system events and /api/v1/system.
 3. stop() reverses in order; every subsystem stop is awaited and exception-contained.
@@ -48,9 +49,12 @@ from vidette.notify.webhook import WebhookNotifier
 from vidette.notify.webpush import WebPushNotifier
 from vidette.people.check import CheckSettings, PeopleCheck
 from vidette.people.engine import EngineUnavailableError, FaceEngine
+from vidette.people.identities import IdentityError, IdentityStore
 from vidette.people.models import ModelError
-from vidette.people.setup import engine_for, store_for
+from vidette.people.recurrence import with_recurrence
+from vidette.people.setup import engine_for, identities_for, store_for
 from vidette.people.store import PeopleStore, StoreError
+from vidette.telegram.service import TelegramService
 from vidette.verdicts.base import Judge
 from vidette.verdicts.vlm import VlmJudge
 from vidette.verdicts.worker import VerdictWorker
@@ -106,6 +110,7 @@ class AppRuntime:
         self.face_engine: FaceEngine | None = None
         self.people_check: PeopleCheck | None = None
         self.people_error: str | None = None
+        self.identities: IdentityStore | None = None  # people.track_unknown (ADR-0014)
         if config.people.enabled:
             self._setup_people()
         self.verdicts = VerdictWorker(
@@ -114,12 +119,41 @@ class AppRuntime:
             self.db,
             emit=self.emit,
             backend=self.vlm_backend,
-            judges=self._make_judge,
+            judges=lambda backend: with_recurrence(self._make_judge(backend), self.config),
             frames=self.frigate_client,
             media_dir=config.storage.media_dir,
             people=self.people_check,
         )
+        self.telegram: TelegramService | None = None
+        telegram = config.notifications.telegram
+        if telegram is not None and telegram.enabled:
+            self.telegram = TelegramService(
+                config,
+                self.db,
+                self.bus,
+                emit=self.emit,
+                people_store=self.people_store,
+                face_engine=self.face_engine,
+                identities=self.identities,
+                judge_status=self.judge_line,
+            )
         self._workers_started = False
+
+    async def judge_line(self) -> str:
+        """The judge in one line for people (the bot's /status)."""
+        backend = await self.vlm_backend()
+        if backend is VlmBackend.none:
+            return "выключен (backend: none)"
+        endpoint = endpoint_for(self.config, backend)
+        status = self.verdicts.status
+        model = endpoint.model.rstrip("/").rsplit("/", 1)[-1]
+        line = (
+            f"{backend.value} {model}; с запуска {status.judged}, "
+            f"пропущено старых {status.skipped_old}"
+        )
+        if status.last_error:
+            line += f"; ошибка: {status.last_error[:80]}"
+        return line
 
     # --- known people --------------------------------------------------------------------
 
@@ -137,10 +171,16 @@ class AppRuntime:
             except (ModelError, EngineUnavailableError) as exc:
                 self.people_error = str(exc)
             else:
+                if people.track_unknown:
+                    try:
+                        self.identities = identities_for(people)
+                    except IdentityError as exc:
+                        self.config_warnings.append(f"people.identities: {exc}")
                 self.people_check = PeopleCheck(
                     self.people_store,
                     self.face_engine,
                     CheckSettings(fps=people.frames_per_second, max_frames=people.max_frames),
+                    self.identities,
                 )
         if self.people_error is not None:
             self.config_warnings.append(f"people: {self.people_error}")
@@ -155,8 +195,8 @@ class AppRuntime:
     def _make_judge(self, backend: VlmBackend) -> Judge:
         client = VlmClient(endpoint_for(self.config, backend), ledger=self.vlm_ledger)
         self._vlm_clients.append(client)
-        frames = self.config.understanding.vlm.frames_per_call
-        return VlmJudge(client=client, frames_per_call=frames)
+        vlm = self.config.understanding.vlm
+        return VlmJudge(client=client, frames_per_call=vlm.frames_per_call, language=vlm.language)
 
     @classmethod
     def from_environment(cls) -> AppRuntime:
@@ -222,6 +262,8 @@ class AppRuntime:
         self.mqtt.start()  # sync too; no-op unless integrations.mqtt.enabled
         self.intake.start()  # incidents → event rows, state observed
         self.verdicts.start()  # closed incidents → confirmed / dismissed (VLM judge)
+        if self.telegram is not None:
+            self.telegram.start()  # alerts, digests, commands and buttons (ADR-0013)
         if self.frigate_source is not None:
             self.frigate_source.start()  # last: consumers above are subscribed already
         if self.clip_folders is not None:
@@ -234,6 +276,8 @@ class AppRuntime:
             stops.append(("clip folders", self.clip_folders.stop))
         if self.frigate_source is not None:
             stops.append(("frigate source", self.frigate_source.stop))
+        if self.telegram is not None:
+            stops.append(("telegram", self.telegram.stop))
         stops += [
             ("verdicts", self.verdicts.stop),
             ("intake", self.intake.stop),

@@ -204,6 +204,48 @@ def replace_entry(text: str, entry_id: str, block: str) -> str:
     return "".join(lines)
 
 
+_SCENARIOS_RE = re.compile(r"^scenarios:\s*(?:#.*)?$")
+
+
+def add_scenarios(text: str, scenarios: Mapping[str, str]) -> str:
+    """Append scenarios to the `scenarios:` block (block style only); ones already there
+    keep their wording. Every other byte stays as it was."""
+    lines = text.splitlines(keepends=True)
+    start = next(
+        (i for i, line in enumerate(lines) if _SCENARIOS_RE.match(line.rstrip("\n"))), None
+    )
+    if start is None:
+        raise ValueError("labels.yaml has no block-style `scenarios:` key")
+    end = start + 1
+    indent: str | None = None
+    existing: set[str] = set()
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.strip() and not line[0].isspace():
+            break  # the next top-level key or a top-level comment
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        own = line[: len(line) - len(line.lstrip())]
+        if indent is None:
+            indent = own
+        if own == indent:  # a key; deeper lines continue a folded description
+            existing.add(stripped.split(":", 1)[0].strip().strip("'\""))
+        end = index + 1
+    indent = indent or "  "
+    new = [
+        f"{indent}{key}: {_text(' '.join(value.split()))}\n"
+        for key, value in scenarios.items()
+        if key not in existing
+    ]
+    if not new:
+        return text
+    if end > 0 and not lines[end - 1].endswith("\n"):
+        lines[end - 1] += "\n"
+    lines[end:end] = new
+    return "".join(lines)
+
+
 def set_observed_hours(text: str, hours: float) -> tuple[str, bool]:
     """Refresh the tool-managed `observed_hours` line; a hand-set value is left alone."""
     lines = text.splitlines(keepends=True)

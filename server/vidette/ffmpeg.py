@@ -132,6 +132,45 @@ async def probe(path: Path) -> VideoInfo:
     )
 
 
+@dataclass(frozen=True)
+class Packets:
+    """The video packets of a file, in presentation order: each one is one frame."""
+
+    times: list[float]  # presentation time, seconds, in the file's own timeline
+    keys: list[bool]  # key frame (decodable on its own)
+
+
+async def packets(path: Path, *, timeout: float = 30.0) -> Packets:
+    """Every video packet's time and key flag, read from the container (no decoding).
+
+    About 0.1 s for a two-minute 1080p clip. Packets without a time are skipped."""
+    rc, stdout, stderr = await run(
+        [
+            binary("ffprobe"), "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path),
+        ],
+        timeout=timeout,
+    )  # fmt: skip
+    if rc != 0:
+        raise MediaToolError(f"ffprobe cannot list packets of {path.name}: {stderr.strip()[-200:]}")
+    rows: list[tuple[float, bool]] = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        time_text, _, flags = line.strip().partition(",")
+        try:
+            value = float(time_text)
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            rows.append((value, "K" in flags))
+    rows.sort(key=lambda row: row[0])
+    return Packets([row[0] for row in rows], [row[1] for row in rows])
+
+
+async def packet_times(path: Path) -> list[float]:
+    """Presentation times of every video packet, sorted (see `packets`)."""
+    return (await packets(path)).times
+
+
 def frame_times(duration_s: float, count: int) -> list[float]:
     """`count` instants spread evenly over the clip, centred in equal slices."""
     if count <= 0 or duration_s <= 0:
@@ -235,6 +274,30 @@ async def remux_mp4(src: Path, dst: Path, *, hevc: bool, rotation: int = 0) -> b
             return bool(turn) or not rotation
         tmp.unlink(missing_ok=True)
     raise MediaToolError(f"cannot remux {src.name} to MP4: {stderr.strip()[-200:]}")
+
+
+async def cut_head(
+    src: Path, dst: Path, seconds: float, *, hevc: bool, rotation: int = 0
+) -> None:
+    """The first `seconds` of `src` (it may still be growing) as a fast-start MP4, stream
+    copy, written to a temporary name and renamed: a reader never sees half a file."""
+    tmp = dst.with_name(dst.name + ".tmp")
+    tag = ["-tag:v", "hvc1"] if hevc else []
+    turn = ["-display_rotation:v:0", str(display_rotation(rotation))] if rotation else []
+    rc, _, stderr = await run(
+        [
+            binary("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            *turn, "-i", str(src), "-map", "0:v:0", "-t", f"{seconds:g}", "-c", "copy", *tag,
+            "-movflags", "+faststart", "-f", "mp4", str(tmp),
+        ],
+        timeout=60,
+    )  # fmt: skip
+    if rc != 0 or not tmp.is_file():
+        tmp.unlink(missing_ok=True)
+        raise MediaToolError(
+            f"cannot cut the first {seconds:g} s of {src.name}: {stderr.strip()[-200:]}"
+        )
+    tmp.replace(dst)
 
 
 async def jpeg(src: Path, *, max_side: int) -> bytes:

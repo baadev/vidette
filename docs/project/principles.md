@@ -31,13 +31,17 @@ documented and minimized (keyframes, not streams; clips, not archives).
 
 ## 4. Behavior first; identity only by consent
 
-Vidette judges *what is happening*, not *who someone is*. The single identity feature is
+Vidette judges *what is happening*, not *who someone is*. The identity features are
 **trusted faces**: opt-in, local-only matching of people who consented to enrollment, used
-exclusively to *suppress* alerts they cause
-([guardrails](../faq.md#what-about-face-recognition)). Uncertain matches never suppress —
-the system fails toward alerting. No stranger identification, no third-party identity
-databases, no cloud biometrics: a values line and a scope decision at once — the intent
-problem is bigger and less served.
+to tell the judge who it saw and to *suppress* alerts they cause
+([guardrails](../faq.md#what-about-face-recognition)); and, since
+[ADR-0014](../architecture/adr/0014-anonymous-identities.md), **anonymous identities**:
+opt-in and off by default, an unknown face is counted when it comes back, as a number,
+so that "keeps coming back" can count as behaviour. Uncertain matches never suppress —
+the system fails toward alerting. No naming of strangers from any source, no third-party
+identity databases, no cloud biometrics, no appearance attributes (age, gender, skin
+colour) anywhere: a values line and a scope decision at once — the intent problem is
+bigger and less served.
 
 ## 5. Honest software
 

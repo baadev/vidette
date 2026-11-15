@@ -152,8 +152,10 @@ class EventIntake:
             existing.id,
             kinds=list(incident.objects) or None,
             zones=list(incident.zones) or None,
-            ended_at=incident.ended_at,
+            # an early window never ends an event or replaces its clip; the clip does
+            ended_at=None if incident.partial else incident.ended_at,
             upstream=upstream_facts(incident, existing.upstream),
+            clip_path=None if incident.partial else _local_clip(incident),
         )
         return await self._db.get_event(existing.id)
 

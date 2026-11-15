@@ -39,9 +39,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from vidette.collect.clips import ClipMeta, adopt_leftovers, finalize, partial_path
+from vidette.collect.clips import (
+    ClipMeta,
+    adopt_leftovers,
+    finalize,
+    partial_path,
+    reserve_id,
+    write_early,
+)
 from vidette.collect.disk import DiskLimits, measure
-from vidette.collect.session import Outcome, SessionResult, record_session
+from vidette.collect.session import CLUSTER_MS, Outcome, SessionResult, record_session
 from vidette.collect.target import RtspTarget
 from vidette.units import format_duration, format_size
 
@@ -75,9 +82,12 @@ class CollectSettings:
     # The URL is a base station's (Eufy HomeBase): its port is always open and it answers
     # 404 for a camera that sleeps, so 404 means asleep, not busy (no TCP check, no backoff).
     base_station: bool = False
-    # The URL is a restreamer's (go2rtc) that splices a camera's reconnect into the same
-    # session: timestamp packets on arrival (session.wallclock_input).
+    # Stamp packets on arrival instead of the camera's guarded clock (session.timestamp_input).
+    # Not needed behind a restreamer any more: the jump guard handles its splices.
     wallclock_timestamps: bool = False
+    # Write the first `early_s` seconds of each recording to .early/ while it goes on, so
+    # an alert need not wait for the clip (0: off). See clips.write_early.
+    early_s: float = 0.0
 
 
 def backoff(streak: int, schedule: tuple[float, float]) -> float:
@@ -137,6 +147,7 @@ class Collector:
         self._lock_file: TextIO | None = None
         self._last_save = 0.0
         self._disk_blocked: str | None = None
+        self._early_id: str | None = None  # the id the early window of this session took
 
     # --- paths, state, lock -------------------------------------------------------------
 
@@ -286,9 +297,24 @@ class Collector:
 
         self.state = "recording"
         started = time.monotonic()
+        part = partial_path(settings.dataset, self._clock())
+        self._early_id = None
+        early_task: asyncio.Task[None] | None = None
+        requested = self._clock()
+
+        def progress(media_s: float, started_wall: float | None) -> None:
+            nonlocal early_task
+            if (
+                settings.early_s > 0
+                and early_task is None
+                and started_wall is not None
+                and media_s >= settings.early_s + CLUSTER_MS / 1000
+            ):
+                early_task = asyncio.create_task(self._write_early(part, started_wall, requested))
+
         result = await record_session(
             self.target,
-            partial_path(settings.dataset, self._clock()),
+            part,
             max_seconds=settings.max_seconds,
             silence_s=settings.silence_s,
             max_bytes=disk.clip_allowance_bytes,
@@ -296,7 +322,11 @@ class Collector:
             disk_check=self._disk_check,
             clock=self._clock,
             wallclock=settings.wallclock_timestamps,
+            on_progress=progress,
         )
+        if early_task is not None:
+            with contextlib.suppress(Exception):
+                await early_task
         self.stats.watched_s += time.monotonic() - started
         self.stats.sessions += 1
         self.stats.outcomes[result.outcome.value] = (
@@ -392,6 +422,28 @@ class Collector:
                              format_duration(wait))
         await self._wait(wait, stop, watched=watched)
 
+    async def _write_early(self, part: Path, started_wall: float, requested: float) -> None:
+        """The early window of the recording in progress; never fails the recording."""
+        entry_id = reserve_id(self.settings.dataset, started_wall)
+        try:
+            meta = await write_early(
+                part,
+                self.settings.dataset,
+                entry_id=entry_id,
+                camera=self.settings.camera,
+                started_at=started_wall,
+                window_s=self.settings.early_s,
+                rotation=self.settings.rotation,
+                timeline={"requested": requested, "first_frame": started_wall},
+            )
+        except OSError as exc:
+            logger.warning("no early window: %s", exc)
+            return
+        if meta is not None:
+            self._early_id = entry_id
+            logger.info("early window %s · first %s", entry_id,
+                        format_duration(self.settings.early_s))
+
     async def _finalize(self, result: SessionResult) -> ClipMeta | None:
         started = result.started_at if result.started_at is not None else result.ended_at
         meta = await finalize(
@@ -402,6 +454,8 @@ class Collector:
             stop_reason=result.stop_reason,
             min_seconds=self.settings.min_seconds,
             rotation=self.settings.rotation,
+            entry_id=self._early_id,
+            timeline=None if result.requested_at is None else {"requested": result.requested_at},
         )
         if meta is None:
             return None

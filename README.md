@@ -126,6 +126,7 @@ Legend: ✅ works on `v0.2` · 🚧 in progress · 📐 designed · 🔭 explori
 | VLM verdict worker: frames, structured answer, abstention, daily budget, OpenAI-compatible API with a local and a cloud backend, switch on the System page | ✅ tested with a fake model; not yet measured |
 | `vidette label`: VLM drafts, contact sheets, review replies by number | ✅ tested with a fake model |
 | Known people: local face recognition for enrolled people, the judge told who it saw, People page with confirm buttons ([docs/people.md](docs/people.md)) | 🚧 opt-in; small faces on security cameras are often unreadable |
+| Anonymous identities: an unknown face counted when it comes back ("stranger #12, 3rd time today"), facts for the judge, a rule that raises a level, an Identities view ([docs/people.md](docs/people.md#strangers-who-come-back)) | 🚧 opt-in, off by default; biometric data of passers-by, 30-day retention |
 | Plain-language policy shown back as an inspectable spec | 📐 week 2 |
 | Dry run of a policy over the last N days of Frigate history | 📐 week 2 |
 | Calibration from 👍/👎 | 📐 |
@@ -139,8 +140,11 @@ Legend: ✅ works on `v0.2` · 🚧 in progress · 📐 designed · 🔭 explori
   streams.
 - **Zero telemetry.** No accounts, no phone-home, no paywalled features.
 - **Behaviour, not identity.** Vidette judges what is happening, not who someone is. The
-  one exception is opt-in: [known people](docs/people.md), recognized on your machine,
-  only among people who agreed to be enrolled; a cloud judge never hears their names.
+  exceptions are opt-in: [known people](docs/people.md), recognized on your machine,
+  only among people who agreed to be enrolled; a cloud judge never hears their names. And,
+  off by default, [anonymous identities](docs/people.md#strangers-who-come-back): an
+  unknown face counted as a number when it comes back, never named, kept on your machine
+  for 30 days, never sent anywhere.
 
 Threat model and hardening: [security-model.md](docs/architecture/security-model.md).
 

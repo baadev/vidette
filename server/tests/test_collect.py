@@ -9,6 +9,7 @@ clients and holds dead sessions like a battery camera did in v0.1.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import shutil
@@ -28,8 +29,10 @@ from vidette.collect.collector import (
     tcp_reachable,
 )
 from vidette.collect.disk import GB, MB, DiskLimits, DiskState
-from vidette.collect.session import Outcome, classify, record_command
+from vidette.collect.session import Outcome, classify, record_command, timestamp_input
 from vidette.collect.target import RtspTarget, TargetError, load_target
+from vidette.ffmpeg import packet_times
+from vidette.ffmpeg import run as run_tool
 from vidette.units import format_size, parse_duration, parse_size
 
 needs_ffmpeg = pytest.mark.skipif(
@@ -119,16 +122,26 @@ def test_frame_count_stays_between_four_and_eight() -> None:
     assert [frame_count(s) for s in (2, 10, 24, 40, 120)] == [4, 4, 5, 7, 8]
 
 
+async def run_ffmpeg(ffmpeg: str, *args: str) -> None:
+    rc, _, stderr = await run_tool([ffmpeg, "-v", "error", "-y", *args], timeout=60)
+    assert rc == 0, stderr
+
+
 def test_record_command_is_video_only_bounded_and_probes_long() -> None:
     command = record_command(
         "ffmpeg", "rtsp://x", Path("/d/p.mkv.part"), max_seconds=120, silence_s=8, max_bytes=999
     )
     joined = " ".join(command)
     assert "-allowed_media_types video" in joined and "-c copy" in joined
-    assert "-t 120" in joined and "-fs 999" in joined and "-timeout 8000000" in joined
+    assert "-fs 999" in joined and "-timeout 8000000" in joined
+    # the length limit is the collector's: ffmpeg's -t reads timestamps before the guard
+    assert "-t" not in command
     assert "-analyzeduration 10000000" in joined  # v0.1: a waking camera sends SPS late
     assert "-rtsp_transport tcp" in joined and "-nostdin" not in joined  # q needs stdin
     assert "-use_wallclock_as_timestamps" not in joined  # the camera's own clock by default
+    # ... guarded against a restreamer's splices, as an input option (before -i)
+    assert command.index("-bsf:v") < command.index("-i")
+    assert command[command.index("-bsf:v") + 1].startswith("setts=")
 
 
 def test_record_command_behind_a_restreamer_stamps_packets_on_arrival() -> None:
@@ -139,6 +152,31 @@ def test_record_command_behind_a_restreamer_stamps_packets_on_arrival() -> None:
     # an input option: it must come before -i
     assert command.index("-use_wallclock_as_timestamps") < command.index("-i")
     assert command[command.index("-use_wallclock_as_timestamps") + 1] == "1"
+    assert "-bsf:v" not in command
+
+
+@needs_ffmpeg
+async def test_the_jump_guard_repairs_a_splice_and_keeps_real_pauses(tmp_path: Path) -> None:
+    """A restreamer splices a reconnect with the new session's clock (a jump of hours);
+    the guard continues one frame later. A real 3 s pause of the camera stays a pause."""
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg is not None
+    base, jumped, out = tmp_path / "base.mkv", tmp_path / "jumped.mkv", tmp_path / "out.mkv"
+    await run_ffmpeg(
+        ffmpeg, "-f", "lavfi", "-i", "testsrc=size=160x90:rate=15", "-t", "8",
+        "-c:v", "libx264", "-g", "15", "-bf", "0", str(base),
+    )  # fmt: skip
+    # frames 0-44 as they are, a 3 s pause, then a jump of 3 hours from frame 75 on
+    shift = "if(gte(N\\,75)\\,PTS+10800/TB\\,if(gte(N\\,45)\\,PTS+3/TB\\,PTS))"
+    await run_ffmpeg(ffmpeg, "-i", str(base), "-c", "copy", "-bsf:v", f"setts=ts={shift}",
+                     str(jumped))  # fmt: skip
+    await run_ffmpeg(ffmpeg, *timestamp_input(), "-i", str(jumped), "-c", "copy", str(out))
+    times = await packet_times(out)
+    gaps = [b - a for a, b in itertools.pairwise(times)]
+    assert len(times) == 120
+    assert max(gaps) == pytest.approx(3.067, abs=0.01)  # the real pause is kept
+    assert sorted(gaps)[-2] < 0.1  # the splice became one frame
+    assert times[-1] < 12
 
 
 @pytest.mark.parametrize(
@@ -239,6 +277,7 @@ async def test_wake_periods_become_clips_with_frames_and_a_clean_sidecar(
         assert all((dataset / frame).is_file() for frame in meta.frames)
         assert meta.camera == "porch" and meta.stop_reason.startswith("stream ended")
         assert len(meta.id) == len("20261114-210304")
+        assert meta.health is not None and meta.health["frames"] > 10  # stream health
     assert not list((dataset / ".partial").glob("*")), "partial files are cleaned up"
     # Gentle: one session per wake, and every stop the camera saw was a clean one.
     assert camera.stats.max_concurrent_sessions == 1
@@ -273,6 +312,39 @@ async def test_stop_mid_recording_tears_down_cleanly_and_keeps_the_clip(
 
 
 @needs_ffmpeg
+async def test_an_early_window_is_written_while_recording_and_the_clip_shares_its_id(
+    tmp_path: Path, stream: Path
+) -> None:
+    camera = FakeRtspCamera(stream)
+    await camera.reserve_port()
+    await camera.wake(4.0)
+    dataset = tmp_path / "d"
+    settings = fast_settings(dataset, early_s=1.5, once=True)
+    collector = Collector(RtspTarget.parse(camera.url(), "t"), settings)
+    early_seen_while_recording: list[Path] = []
+
+    def recording_with_an_early_window() -> bool:
+        found = list((dataset / ".early").glob("*.json"))
+        if found and not list((dataset / "clips").glob("*.json")):
+            early_seen_while_recording.extend(found)
+        return bool(list((dataset / "clips").glob("*.json")))
+
+    await run_until(collector, asyncio.Event(), recording_with_an_early_window, timeout=20)
+    await camera.sleep()
+    assert early_seen_while_recording, "the early window exists before the clip"
+    (early,) = (dataset / ".early").glob("*.json")
+    (sidecar,) = (dataset / "clips").glob("*.json")
+    assert early.stem == sidecar.stem  # one id: the event the early verdict opened
+    early_meta = json.loads(early.read_text())
+    assert (dataset / early_meta["clip"]).is_file() and early_meta["window_s"] == 1.5
+    assert {"requested", "first_frame", "early"} <= set(early_meta["timeline"])
+    meta = ClipMeta.model_validate_json(sidecar.read_text())
+    assert {"requested", "first_frame", "closed"} <= set(meta.timeline)
+    assert meta.timeline["requested"] <= meta.timeline["first_frame"] <= meta.timeline["closed"]
+    assert early_meta["timeline"]["early"] <= meta.timeline["closed"]
+
+
+@needs_ffmpeg
 async def test_max_duration_cuts_a_long_wake_period(tmp_path: Path, stream: Path) -> None:
     camera = FakeRtspCamera(stream)
     await camera.reserve_port()
@@ -283,7 +355,9 @@ async def test_max_duration_cuts_a_long_wake_period(tmp_path: Path, stream: Path
     await camera.sleep()
     (sidecar,) = (tmp_path / "d" / "clips").glob("*.json")
     meta = json.loads(sidecar.read_text())
-    assert meta["stop_reason"] == "max duration" and meta["duration_s"] <= 2.6
+    # The collector's own limit (not ffmpeg's -t): ffmpeg still writes what it had read
+    # ahead when asked to finish, about a second at most.
+    assert meta["stop_reason"] == "max duration" and meta["duration_s"] <= 3.6
 
 
 @needs_ffmpeg

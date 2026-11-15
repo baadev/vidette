@@ -7,16 +7,28 @@
              stays observed  ◀── every policy abstains ─┘ (an incident without a
                                                            verdict never notifies)
 
+Early windows (`incident.updated` with `partial`, a clip folder's `.early/`): the first
+seconds of a recording still in progress, judged at once. An early alert confirms the
+event right away; anything else leaves it observed. The whole clip is judged when it
+closes, after an early alert too, and its verdict replaces the early one:
+
+    early alert ── event.confirmed (the bot alerts) ─▶ clip: alert   ── event.updated
+                                                       clip: silent  ── event.dismissed
+                                                       clip: no verdict ── event.updated
+    early silent ─ stays observed ─────────────────▶ clip judged as usual
+
 What it judges with: the backend chosen on the System page (or the config); with `none`
-nothing is judged and incidents stay `observed`. Frames: a clip folder's key frames, else
+nothing is judged and incidents stay `observed`. Frames: chosen once from the clip where
+the picture changed (vidette.verdicts.frames), else a clip folder's key frames, else
 frames from Frigate's recordings over the incident (snapshots when the camera does not
-record), else the cached snapshot.
+record), else the cached snapshot. `intent.timeline` keeps when each stage happened.
 
 Guards, in the spirit of the prime directives:
 - one incident at a time; the VLM's own budget, pace and timeout apply (vidette.vlm);
 - only incidents that ended in the last `max_age_s` (15 min) are judged, so a restart, a
   Frigate replay or a clip-folder backfill never turns into a burst of old alerts;
-- an event that is no longer `observed` is never judged again;
+- an event that is no longer `observed` is never judged again, except the whole clip of
+  an event an early window confirmed;
 - `sensitivity` sets how sure the model must be before an alert counts: relaxed 0.75,
   balanced 0.5, paranoid any; below it the policy counts as silent;
 - nothing here can crash the loop: failures become rate-limited `verdict.failed` events.
@@ -46,10 +58,12 @@ from vidette.core.events import EventState, InProcessEventBus, Subscription
 from vidette.core.incidents import Incident
 from vidette.db import Database, EventRow
 from vidette.events.payload import canonical_payload
+from vidette.ffmpeg import MediaToolError
 from vidette.frigate.client import Frame
 from vidette.people.check import CropWriter, crop_writer
 from vidette.people.report import PeopleReport
-from vidette.verdicts.base import Case, Judge, PolicyText, Verdict
+from vidette.verdicts.base import Case, FrameSet, Judge, Verdict, policy_text
+from vidette.verdicts.frames import first_video, frame_set
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +148,7 @@ class VerdictWorker:
         self._subscription: Subscription | None = None
         self._task: asyncio.Task[None] | None = None
         self._judge_cache: dict[VlmBackend, Judge] = {}
+        self._queued: dict[str, float] = {}  # incident key → when it was taken off the bus
         self.status = WorkerStatus()
 
     @property
@@ -143,7 +158,7 @@ class VerdictWorker:
     def start(self) -> None:
         if self._task is not None:
             return
-        self._subscription = self._bus.subscribe("incident.closed")
+        self._subscription = self._bus.subscribe("incident.*")
         self._task = asyncio.create_task(self._pump(self._subscription), name="verdicts")
 
     async def stop(self) -> None:
@@ -157,17 +172,54 @@ class VerdictWorker:
                 await task
 
     async def _pump(self, subscription: Subscription) -> None:
+        """Newest first: while the judge is busy, incidents pile up; the most recent one
+        is judged next, and older ones wait until they are too old (`max_age_s`). A slow
+        or shared model then answers about what is happening now, not 15 minutes ago."""
+        pending: dict[str, Incident] = {}
         while True:
-            _topic, payload = await subscription.get()
-            try:
-                incident = Incident.model_validate(payload)
-            except ValidationError:
+            if not pending:
+                self._take(pending, await subscription.get())
+            while True:  # everything that arrived while the last one was judged
+                try:
+                    self._take(pending, subscription.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            incident = self.next_incident(pending)
+            if incident is None:
                 continue
             try:
                 await self.handle(incident)
             except Exception as exc:  # the loop survives anything
-                logger.exception("verdict worker failed on %s", payload.get("source_id"))
+                logger.exception("verdict worker failed on %s", incident.source_id)
                 await self._failed(f"{type(exc).__name__}: {exc}")
+
+    def _take(self, pending: dict[str, Incident], message: tuple[str, dict[str, Any]]) -> None:
+        """Closed incidents and early windows (partial) wait to be judged. An early window
+        never replaces the closed incident of the same clip: the whole clip says more."""
+        topic, payload = message
+        try:
+            incident = Incident.model_validate(payload)
+        except ValidationError:
+            return
+        if topic != "incident.closed" and not incident.partial:
+            return
+        waiting = pending.get(incident.key)
+        if incident.partial and waiting is not None and not waiting.partial:
+            return
+        self._queued[incident.key] = self._clock()
+        pending[incident.key] = incident
+
+    def next_incident(self, pending: dict[str, Incident]) -> Incident | None:
+        """Drop what is too old to judge, then take the most recent incident."""
+        now = self._clock()
+        for key, incident in list(pending.items()):
+            if now - (incident.ended_at or incident.started_at) > self._max_age_s:
+                del pending[key]
+                self.status.skipped_old += 1
+        if not pending:
+            return None
+        key = max(pending, key=lambda k: pending[k].ended_at or pending[k].started_at)
+        return pending.pop(key)
 
     async def _failed(self, error: str) -> None:
         self.status.failed += 1
@@ -210,8 +262,30 @@ class VerdictWorker:
             return Case(incident=incident, media=(Path(row.snapshot_path),))
         return Case(incident=incident)
 
+    async def _choose_frames(self, case: Case, event_id: str, count: int) -> FrameSet | None:
+        """The frames every policy is judged on, chosen once from the clip (where the
+        picture changed, vidette.verdicts.frames) and kept under
+        `media_dir/judge-frames/<event id>/` for the alert's album. None without a clip,
+        or when the clip cannot be read (each judge then uses what is on disk)."""
+        if first_video(case) is None:
+            return None
+        out_dir = self._media_dir / "judge-frames" / event_id
+        try:
+            return await frame_set(case, count, work_dir=out_dir, out_dir=out_dir)
+        except (MediaToolError, OSError) as exc:
+            logger.info("frames for %s not chosen from the clip: %s", event_id, exc)
+            return None
+
     async def handle(self, incident: Incident) -> EventRow | None:
-        """Judge one closed incident; returns the updated row, or None when skipped."""
+        """Judge one incident; returns the updated row, or None when skipped.
+
+        An early window (`incident.partial`) is judged once, while the event is still
+        observed: an alert confirms the event at once (the bot sends it), anything else
+        leaves it observed and changes nothing. The closed incident of the same clip is
+        then judged whole, also after an early alert: its verdict replaces the early one
+        (`event.updated` when the event stays confirmed, `event.dismissed` when the whole
+        clip is not an alert), so an early "nothing" never hides a later alert, and an
+        early alert is corrected or completed by the clip."""
         policies = policies_for(self._config, incident.camera)
         if not policies:
             return None
@@ -223,12 +297,25 @@ class VerdictWorker:
             self.status.skipped_old += 1
             return None
         row = await self._row(incident)
-        if row is None or row.state != EventState.observed.value:
+        if row is None:
+            return None
+        phase = (row.intent or {}).get("phase")
+        early_alert = row.state == EventState.confirmed.value and phase == "early"
+        if incident.partial:
+            if row.state != EventState.observed.value or phase is not None:
+                return None
+        elif row.state != EventState.observed.value and not early_alert:
             return None
 
+        started = self._clock()
         judge = self._judge(backend)
         frames = self._config.understanding.vlm.frames_per_call
         case = await self._case(incident, row, frames)
+        chosen = await self._choose_frames(
+            case, f"{row.id}/early" if incident.partial else row.id, frames
+        )
+        if chosen is not None:
+            case = replace(case, frames=chosen)
         people: dict[str, Any] | None = None
         if self._people is not None:
             try:
@@ -243,54 +330,132 @@ class VerdictWorker:
                 people = report.model_dump(mode="json")
         results: list[tuple[PolicyConfig, Verdict]] = []
         for policy in policies:
-            text = PolicyText(policy.name, policy.description, policy.known_people)
-            verdict = await judge.judge(case, text)
+            verdict = await judge.judge(case, policy_text(policy))
             results.append((policy, verdict))
 
         alerting = [(p, v) for p, v in results if counts_as_alert(p, v)]
         decided = [(p, v) for p, v in results if not v.abstained]
-        intent = {
+        intent: dict[str, Any] = {
             "judge": getattr(judge, "name", "judge"),
             "backend": backend.value,
-            "verdicts": [
-                {
-                    "policy": policy.name,
-                    "alert": counts_as_alert(policy, verdict),
-                    "model_said_alert": verdict.alert,
-                    "abstained": verdict.abstained,
-                    "label": verdict.label,
-                    "confidence": verdict.confidence,
-                    "rationale": verdict.rationale,
-                    "model": verdict.model,
-                    "latency_s": verdict.latency_s,
-                    "cost_usd": verdict.cost_usd,
-                }
-                for policy, verdict in results
-            ],
+            "phase": "early" if incident.partial else "final",
+            "verdicts": [verdict_record(policy, verdict) for policy, verdict in results],
         }
+        previous = row.intent or {}
+        if phase == "early":
+            intent["early"] = {
+                key: previous[key] for key in ("verdicts", "frames", "stream") if key in previous
+            }
         if people is not None:
             intent["people"] = people
+        elif "people" in previous:
+            intent["people"] = previous["people"]
+        if chosen is not None:
+            intent["frames"] = [{"path": str(path), "t": at} for path, at in chosen.timed()]
+            if chosen.health is not None:
+                intent["stream"] = {
+                    **chosen.health.model_dump(mode="json"),
+                    "interrupted": chosen.health.interrupted,
+                }
+        intent["timeline"] = self._timeline(previous, incident, started, results)
         self.status.judged += 1
         self.status.last_judged_at = self._clock()
+
+        if incident.partial:
+            if not alerting:  # nothing yet: the whole clip decides
+                await self._db.update_event(row.id, intent=intent)
+                return await self._db.get_event(row.id)
+            policy, verdict = alerting[0]
+            self.status.confirmed += 1
+            return await self._settle(
+                row.id, EventState.confirmed, verdict.rationale, intent, policy.name,
+                "event.confirmed",
+            )  # fmt: skip
         if alerting:
             policy, verdict = alerting[0]
-            state, summary, policy_name = EventState.confirmed, verdict.rationale, policy.name
             self.status.confirmed += 1
-        elif decided:
+            topic = "event.updated" if early_alert else "event.confirmed"
+            return await self._settle(
+                row.id, EventState.confirmed, verdict.rationale, intent, policy.name, topic
+            )
+        if decided:
             policy, verdict = decided[0]
-            state, summary, policy_name = EventState.dismissed, verdict.rationale, None
             self.status.dismissed += 1
-        else:
-            reasons = "; ".join(sorted({v.rationale or "no reason" for _p, v in results}))
-            await self._db.update_event(row.id, summary=f"no verdict: {reasons}", intent=intent)
-            self.status.undecided += 1
-            return await self._db.get_event(row.id)
+            return await self._settle(
+                row.id, EventState.dismissed, verdict.rationale, intent, None, "event.dismissed"
+            )
+        if early_alert:  # the clip got no verdict: the early one stands, with the clip
+            kept = dict(previous)
+            kept["timeline"] = intent["timeline"]
+            kept["phase"] = "final"
+            kept["final"] = {"verdicts": intent["verdicts"]}
+            return await self._settle(
+                row.id, EventState.confirmed, row.summary, kept, row.policy, "event.updated"
+            )
+        reasons = "; ".join(sorted({v.rationale or "no reason" for _p, v in results}))
+        await self._db.update_event(row.id, summary=f"no verdict: {reasons}", intent=intent)
+        self.status.undecided += 1
+        return await self._db.get_event(row.id)
 
+    def _timeline(
+        self,
+        previous: dict[str, Any],
+        incident: Incident,
+        started: float,
+        results: list[tuple[PolicyConfig, Verdict]],
+    ) -> dict[str, float]:
+        """Where the time went: the upstream stages, then the judge's. An early window's
+        judge stages are kept under `early_*` next to the clip's."""
+        prefix = "early_" if incident.partial else ""
+        timeline = {
+            k: float(v) for k, v in (previous.get("timeline") or {}).items()
+            if isinstance(v, int | float)
+        }  # fmt: skip
+        for key, value in incident.timeline.items():
+            name = f"early_{key}" if incident.partial and key == "picked_up" else key
+            timeline.setdefault(name, float(value))
+        queued = self._queued.pop(incident.key, None)
+        if queued is not None:
+            timeline[f"{prefix}judge_queued"] = queued
+        timeline[f"{prefix}judge_started"] = started
+        timeline[f"{prefix}judge_finished"] = self._clock()
+        seen = [v.person_at_s for _p, v in results if v.person_at_s is not None]
+        if seen and "person_seen" not in timeline:
+            timeline["person_seen"] = incident.started_at + min(seen)
+        return {key: round(value, 3) for key, value in timeline.items()}
+
+    async def _settle(
+        self,
+        event_id: str,
+        state: EventState,
+        summary: str | None,
+        intent: dict[str, Any],
+        policy: str | None,
+        topic: str,
+    ) -> EventRow | None:
         await self._db.update_event(
-            row.id, state=state.value, summary=summary, intent=intent, policy=policy_name
+            event_id, state=state.value, summary=summary, intent=intent, policy=policy
         )
-        updated = await self._db.get_event(row.id)
+        updated = await self._db.get_event(event_id)
         if updated is not None:
-            topic = f"event.{state.value}"
             await self._bus.publish(topic, canonical_payload(updated, topic))
         return updated
+
+
+def verdict_record(policy: PolicyConfig, verdict: Verdict) -> dict[str, Any]:
+    """One policy's verdict as kept in the event's `intent.verdicts`."""
+    return {
+        "policy": policy.name,
+        "alert": counts_as_alert(policy, verdict),
+        "model_said_alert": verdict.alert,
+        "abstained": verdict.abstained,
+        "label": verdict.label,
+        "level": verdict.level,
+        "persons": verdict.persons,
+        "person_at_s": verdict.person_at_s,
+        "confidence": verdict.confidence,
+        "rationale": verdict.rationale,
+        "model": verdict.model,
+        "latency_s": verdict.latency_s,
+        "cost_usd": verdict.cost_usd,
+    }

@@ -218,11 +218,11 @@ def test_frames_spread_keeps_first_and_last() -> None:
 
 
 def durations_answer(table: dict[int, dict[str, Any]]) -> Any:
-    """Answer by the clip length the judge reports ("lasted about 33 s"), which is unique
+    """Answer by the clip length the judge reports ("covers about 33 s"), which is unique
     per sample entry and independent of the machine's time zone."""
 
     def answer(text: str, images: list[bytes], body: dict[str, Any]) -> dict[str, Any]:
-        match = re.search(r"lasted about (\d+) s", text)
+        match = re.search(r"covers about (\d+) s", text)
         seconds = int(match.group(1)) if match else -1
         default = {"decision": "silent", "label": "nothing", "description": "-", "confidence": 0.6}
         return table.get(seconds, default)
@@ -386,3 +386,33 @@ def test_eval_without_a_cloud_section_says_what_to_add(
     config_file.write_text("understanding:\n  vlm:\n    backend: local\n")
     assert main(["eval", str(SAMPLE), "--judge", "vlm-cloud", "--config", str(config_file)]) == 2
     assert "understanding.vlm.cloud" in capsys.readouterr().err
+
+
+@needs_ffmpeg
+async def test_a_prompt_over_the_context_is_sent_once_more_with_smaller_frames(
+    tmp_path: Path,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+        "-i", "testsrc2=size=1280x720:rate=10", "-t", "4", "-pix_fmt", "yuv420p", str(clip),
+    )  # fmt: skip
+    assert await proc.wait() == 0
+    dataset = load_dataset(SAMPLE)
+    case = Case(incident=dataset.case(dataset.labels.entries[0]).incident, media=(clip,))
+    api = FakeVlmApi(
+        force_status=400,
+        force_body="request (2094 tokens) exceeds the available context size (2048 tokens)",
+        force_count=1,
+    )
+    judge = VlmJudge(client=client_for(api, local_endpoint(max_image_side=640)))
+    verdict = await judge.judge(case, dataset.policy_text("entry-interest"))
+    assert not verdict.abstained and verdict.vlm_calls == 2
+    sizes = [len(r["body"]["messages"][1]["content"][1]["image_url"]["url"]) for r in api.requests]
+    assert sizes[1] < sizes[0]  # the same frames, smaller
+    api.force_count = None  # refused again: one retry only, then an abstention
+    verdict = await VlmJudge(client=client_for(api, local_endpoint())).judge(
+        case, dataset.policy_text("entry-interest")
+    )
+    assert verdict.abstained and verdict.vlm_calls == 2
+    assert "context size" in (verdict.rationale or "")

@@ -58,4 +58,5 @@ def make_judge(
         client=client,
         frames_per_call=config.understanding.vlm.frames_per_call,
         cache_dir=cache_dir,
+        language=config.understanding.vlm.language,
     )

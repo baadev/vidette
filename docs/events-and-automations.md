@@ -106,6 +106,10 @@ The reference implementation lives in `server/vidette/notify/signing.py` (tested
 
 ## Push, Telegram and friends
 
+For Telegram with buttons that record feedback (and an hourly digest, `/status`, `/live`,
+`/quiet`), use the built-in bot: [telegram.md](telegram.md). The Apprise `tgram://`
+channel below only sends text.
+
 - **Web push (VAPID)** — PWA notifications with the snapshot inline; no vendor cloud between
   your camera and your phone. (iOS requires the PWA installed to the home screen — documented
   honestly in the FAQ.)

@@ -115,6 +115,10 @@ class Subscription:
     async def get(self) -> Message:
         return await self._queue.get()
 
+    def get_nowait(self) -> Message:
+        """The next queued message without waiting; asyncio.QueueEmpty when none."""
+        return self._queue.get_nowait()
+
     def close(self) -> None:
         self._bus._detach(self)
 

@@ -11,14 +11,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
-from vidette.collect.clips import load_meta
-from vidette.collect.collector import STATE_DIR, STATE_FILE
 from vidette.core.config import ConfigError, VlmBackend
 from vidette.eval.dataset import (
     LABELS_FILE,
@@ -31,14 +28,14 @@ from vidette.eval.dataset import (
 )
 from vidette.ffmpeg import MediaToolError
 from vidette.label import labels_file
+from vidette.label.apply import apply_reply, pending
 from vidette.label.drafting import UNCLEAR, DraftError, draft_label, first_policy_alert
-from vidette.label.people_reply import FaceTarget, resolve_faces, split_reply
-from vidette.label.review import ReviewError, resolve
+from vidette.label.entries import clip_entry, new_clips, watched_hours
+from vidette.label.review import ReviewError
 from vidette.label.sheet import SheetItem, render_sheet, sheet_faces
-from vidette.people.check import PeopleCheck, confirm
-from vidette.people.engine import EngineUnavailableError
+from vidette.people.check import PeopleCheck
+from vidette.people.engine import EngineUnavailableError, FaceEngine
 from vidette.people.models import ModelError
-from vidette.people.report import STRANGER, UNSURE
 from vidette.people.setup import check_for, engine_for, store_for
 from vidette.people.sidecar import crops_for, load_report, save_report
 from vidette.people.store import PeopleStore, StoreError
@@ -112,7 +109,7 @@ def run(args: argparse.Namespace) -> int:
             return asyncio.run(_draft(root, args))
         if args.label_command == "sheets":
             dataset = load_dataset(root)
-            pending = [e for e in dataset.labels.entries if _pending(e)]
+            pending = [e for e in dataset.labels.entries if pending(e)]
             paths = asyncio.run(_sheets(dataset, pending, args.per_sheet))
             _print_sheets(root, paths, len(pending))
             return 0
@@ -125,50 +122,6 @@ def run(args: argparse.Namespace) -> int:
 
 
 # --- draft ---------------------------------------------------------------------------
-
-
-def watched_hours(root: Path) -> float | None:
-    try:
-        data = json.loads((root / STATE_DIR / STATE_FILE).read_text(encoding="utf-8"))
-        return float(data["watched_seconds"]) / 3600
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def new_clips(dataset: Dataset) -> list[Path]:
-    referenced = {item for entry in dataset.labels.entries for item in entry.media}
-    clips = sorted(
-        path
-        for path in (dataset.root / "clips").glob("*")
-        if path.suffix.lower() in VIDEO_SUFFIXES
-        and path.relative_to(dataset.root).as_posix() not in referenced
-    )
-    return clips
-
-
-def clip_entry(root: Path, clip: Path, number: int) -> Entry:
-    meta = load_meta(clip.with_suffix(".json"))
-    media = [clip.relative_to(root).as_posix()]
-    if meta is not None:
-        media += [frame for frame in meta.frames if (root / frame).is_file()]
-        return Entry(
-            id=meta.id,
-            scenario=UNLABELLED,
-            number=number,
-            camera=meta.camera,
-            at=meta.started_at,
-            duration_s=meta.duration_s,
-            media=media,
-        )
-    frames_dir = root / "frames" / clip.stem
-    if frames_dir.is_dir():
-        media += sorted(
-            (p.relative_to(root).as_posix() for p in frames_dir.glob("*.jpg")),
-            key=lambda name: (len(name), name),
-        )
-    entry_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in clip.stem)
-    return Entry(id=entry_id.strip("-.") or f"clip-{number}", scenario=UNLABELLED,
-                 number=number, media=media)  # fmt: skip
 
 
 @dataclass
@@ -319,13 +272,6 @@ def _people_check(args: argparse.Namespace) -> PeopleCheck | None:
 # --- sheets --------------------------------------------------------------------------
 
 
-def _pending(entry: Entry) -> bool:
-    """On the next sheet: numbered, and either a draft or never labelled."""
-    if entry.number is None:
-        return False
-    return entry.status == "draft" or (entry.status is None and entry.scenario == UNLABELLED)
-
-
 def _sheet_item(dataset: Dataset, entry: Entry) -> SheetItem:
     assert entry.number is not None
     draft = entry.draft
@@ -389,67 +335,32 @@ def _people_store(config_path: Path | None) -> PeopleStore | None:
     return store if store.people() else None
 
 
-def _apply_faces(
-    root: Path, targets: list[FaceTarget], store: PeopleStore, config_path: Path | None
-) -> None:
-    engine = None
-    if any(t.answer.answer not in (STRANGER, UNSURE) for t in targets):
-        config, _source = cli_config(config_path)
-        engine = engine_for(config.people, download=True)
-    for target in targets:
-        done = confirm(target.report, target.face, target.answer.answer, store=store,
-                       engine=engine, media_root=root, where=f"clip:{target.entry_id}")  # fmt: skip
-        save_report(target.clip, target.report)
-        print(f"  #{target.answer.number}.{target.face} {target.entry_id}: {done.message}")
-
-
 def _apply(root: Path, reply: str, *, dry_run: bool, config_path: Path | None = None) -> int:
     if reply == "-":
         reply = sys.stdin.read()
-    dataset = load_dataset(root)
-    store = _people_store(config_path)
-    answers, rest = split_reply(reply, store)
-    targets, face_problems = resolve_faces(dataset.labels, root, answers)
+
+    def engine() -> FaceEngine:
+        config, _source = cli_config(config_path)
+        return engine_for(config.people, download=True)
+
     try:
-        changes = resolve(dataset.labels, rest) if rest.strip() else []
+        applied = apply_reply(
+            root, reply, store=_people_store(config_path), engine=engine, dry_run=dry_run
+        )
     except ReviewError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        for problem in face_problems:
-            print(f"  - {problem}", file=sys.stderr)
         return 1
-    if face_problems:
-        print("error: nothing applied:\n  - " + "\n  - ".join(face_problems), file=sys.stderr)
-        return 1
-    if targets and store is not None:
-        if dry_run:
-            for target in targets:
-                print(f"  #{target.answer.number}.{target.face} {target.entry_id}: would be "
-                      f"{target.answer.answer}")  # fmt: skip
-        else:
-            _apply_faces(root, targets, store, config_path)
-    if not changes:
-        if not targets:
+    for line in applied.lines:
+        print(f"  {line}")
+    if not applied.changes:
+        if not applied.lines:
             print("nothing to change")
         return 0
-    text = (root / LABELS_FILE).read_text(encoding="utf-8")
-    by_id = {entry.id: entry for entry in dataset.labels.entries}
-    for change in changes:
-        entry = by_id[change.entry_id]
-        updated = entry.model_copy(update={"scenario": change.new, "status": "reviewed"})
-        text = labels_file.replace_entry(
-            text, entry.id, labels_file.render_entry(labels_file.entry_dict(updated))
-        )
-        verb = "accepted" if change.accepted_draft else "set"
-        was = "" if change.accepted_draft or change.old == change.new else f" (was {change.old})"
-        print(f"  #{change.number} {change.entry_id}: {verb} {change.new}{was}")
     if dry_run:
         print("dry run: nothing written")
         return 0
-    labels_file.write_validated(root, text)
-    after = load_dataset(root)
-    left = sum(1 for entry in after.labels.entries if _pending(entry))
     print(
-        f"{len(changes)} entries reviewed; {len(after.scored_entries)} scored now, "
-        f"{left} still waiting for review"
+        f"{len(applied.changes)} entries reviewed; {applied.scored} scored now, "
+        f"{applied.waiting} still waiting for review"
     )
     return 0

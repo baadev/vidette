@@ -396,6 +396,35 @@ async def test_continuous_stream_fills_a_bounded_ring_and_cuts_one_clip_per_moti
 
 
 @needs_ffmpeg
+async def test_an_early_window_of_a_motion_event_and_its_clip_share_an_id(
+    tmp_path: Path, street: Path
+) -> None:
+    camera = FakeRtspCamera(street)
+    await camera.reserve_port()
+    await camera.wake(120)
+    dataset = tmp_path / "street"
+    collector = ContinuousCollector(
+        RtspTarget.parse(camera.url(), "t"),
+        settings_for(dataset, early_s=1.0),
+        continuous_for(segment_s=30.0),  # the clip comes from the open segment
+    )
+    await run_until(collector, asyncio.Event(), lambda: collector.stats.clips >= 1, timeout=40)
+    await camera.sleep()
+    (early,) = (dataset / ".early").glob("*.json")
+    (sidecar,) = (dataset / "clips").glob("*.json")
+    assert early.stem == sidecar.stem
+    early_meta = json.loads(early.read_text())
+    assert (dataset / early_meta["clip"]).is_file()
+    assert {"motion", "first_frame", "early"} <= set(early_meta["timeline"])
+    meta = ClipMeta.model_validate(json.loads(sidecar.read_text()))
+    assert meta.timeline["motion"] == early_meta["timeline"]["motion"]
+    assert early_meta["timeline"]["early"] < meta.timeline["closed"]
+    # cut from a 30 s segment still being written, not after it finished
+    assert len(list((dataset / "ring").glob("*.mkv"))) == 1
+    assert not list((dataset / ".partial").glob("*"))
+
+
+@needs_ffmpeg
 async def test_free_space_floor_blocks_before_connecting(tmp_path: Path, street: Path) -> None:
     camera = FakeRtspCamera(street)
     await camera.reserve_port()

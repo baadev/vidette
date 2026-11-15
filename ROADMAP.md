@@ -60,11 +60,14 @@ numbers with the set's size, and nothing better than them.
 | Machine drafts in `labels.yaml` are not truth until reviewed (`status: draft`); reports count accepted-unchanged drafts | ✅ |
 | `vidette label draft / sheets / apply`: VLM drafts from the set's vocabulary, PNG contact sheets for a phone, replies by number in Russian or English ([docs/label.md](docs/label.md)) | ✅ tested with a fake model; no real model run yet |
 | Known people: local face recognition (YuNet + SFace, opt-in extra), one line of facts for the judge, `known_people: quiet` on a policy, People page, confirmations from the event card, `vidette people` and contact-sheet replies ([docs/people.md](docs/people.md), [ADR-0012](docs/architecture/adr/0012-known-people.md)) | 🚧 works end to end with a fake engine in tests and on real clips; no accuracy figure yet; encryption at rest not done |
-| Policy in plain words → inspectable `PolicySpec` shown back to the person | 📐 |
+| Anonymous identities (opt-in `people.track_unknown`): readable unknown faces counted when they come back, never named; recurrence facts for the judge, a `recurrence` rule that raises a policy's level, an Identities view (rename, flag, merge, split, promote, delete), «незнакомец №12, 3-й раз» in Telegram, 30-day retention, `vidette people identities backfill` ([docs/people.md](docs/people.md#strangers-who-come-back), [ADR-0014](docs/architecture/adr/0014-anonymous-identities.md)) | 🚧 tested with a fake engine; backfilled over real clips; thresholds from those clips, no accuracy figure |
+| Policy levels: scenarios grouped by severity, each level with a `wake` rule (always, unless quiet, unless only known people, never); the judge names a scenario ([docs/telegram.md](docs/telegram.md#levels-who-wakes-for-what), [ADR-0013](docs/architecture/adr/0013-telegram-bot.md)) | 🚧 tested with a fake model; running live; not measured by `vidette eval` yet |
+| Policy in plain words → inspectable `PolicySpec` shown back to the person | 📐 (levels are written by hand; no compiler) |
 | Verdicts move events from `observed` to `confirmed` / `dismissed`; only confirmed ones notify (verdict worker: recent closed incidents only, one at a time, sensitivity as a confidence floor) | ✅ tested with a fake model |
 | Backend switch Off / Local / Cloud on the System page, stored, with where the frames go and today's usage; Cloud asks before it is stored | ✅ |
 | Dry run: replay the last N days of Frigate review items through a policy ("this is what would have fired") | 📐 |
-| Telegram via Apprise with the verdict's reason and 👍/👎; HA sensor via MQTT | 📐 (delivery plumbing ✅) |
+| Telegram bot: alerts with frames, clip and the verdict's reason; 👍/👎, "This is …", "?" become feedback and reviewed dataset labels; hourly digest; `/status` `/live` `/quiet` ([docs/telegram.md](docs/telegram.md), [ADR-0013](docs/architecture/adr/0013-telegram-bot.md)) | 🚧 tested against a fake Telegram API; running live (one test alert on a real clip so far) |
+| HA sensor via MQTT | 📐 (delivery plumbing ✅) |
 | First published numbers: `vidette eval` on the real set, VLM judge vs the four baselines | 📐 |
 | Release v0.2.0 with its own images (v0.1.x images untouched) | 📐 |
 
@@ -89,7 +92,7 @@ numbers with the set's size, and nothing better than them.
 | Camera adapters (RTSP, ONVIF, Eufy) | Frigate and go2rtc do it |
 | Semantic search over events | Frigate does it (0.14+) |
 | Face recognition for cameras under Frigate | Frigate does it (0.16+); Vidette may use its sub-labels. For clip folders, known people ([ADR-0012](docs/architecture/adr/0012-known-people.md)) |
-| Identifying people nobody enrolled | Never: no stranger identification, no third-party identity data ([principles](docs/project/principles.md)) |
+| Naming people nobody enrolled | Never: an unknown face is at most a number a household counts locally ([ADR-0014](docs/architecture/adr/0014-anonymous-identities.md)); no name from any source, no third-party identity data, no appearance attributes ([principles](docs/project/principles.md)) |
 
 ---
 

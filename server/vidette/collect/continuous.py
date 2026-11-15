@@ -15,10 +15,13 @@ the floor; when clips eat into that, the ring gives up its oldest segments; only
 the ring is down to its last few segments and free space is still below the floor does
 recording stop (and it resumes by itself when space comes back).
 
-A clip waits until the segment holding its end is finished (up to one `--segment`
-after the motion ended), then it is cut, remuxed to MP4 and gets its key frames and
-sidecar exactly like a battery-camera clip, so `vidette label` and the clip-folder source
-read it unchanged.
+A clip is cut as soon as the ring holds its end: the open segment is written in
+half-second Matroska clusters, flushed at once, so it is read while it grows (it used to
+wait up to one `--segment` for the segment to finish). Then it is remuxed to MP4 and gets
+its key frames and sidecar exactly like a battery-camera clip, so `vidette label` and the
+clip-folder source read it unchanged. With `--early`, a motion event that has run
+`early_s` also gets its first seconds (with the pre-roll) in .early/ under the id its clip
+will have.
 """
 
 from __future__ import annotations
@@ -41,18 +44,21 @@ from vidette.collect.clips import (
     adopt_leftovers,
     finalize,
     partial_path,
+    reserve_id,
+    write_early,
 )
 from vidette.collect.collector import Collector, CollectSettings, CollectStats, backoff
 from vidette.collect.disk import FRAMES_RESERVE_BYTES, GB, MB, free_bytes, measure
 from vidette.collect.motion import FrameScorer, MotionDetector, MotionEvent, MotionSettings
 from vidette.collect.ring import RING_DIR, Ring, Segment, cut, output_pattern, plan_cut
 from vidette.collect.session import (
+    CLUSTER_MS,
     PROBE_US,
     Outcome,
     ask_to_finish,
     classify,
+    timestamp_input,
     wait_or_force,
-    wallclock_input,
 )
 from vidette.collect.target import RtspTarget
 from vidette.ffmpeg import MediaToolError, binary
@@ -109,10 +115,13 @@ def continuous_command(
         "-timeout", str(int(silence_s * 1_000_000)),
         "-allowed_media_types", "video",
         "-analyzeduration", str(PROBE_US), "-probesize", str(PROBE_US),
-        *wallclock_input(wallclock),
+        *timestamp_input(wallclock),
         "-i", url,
         "-map", "0:v:0", "-c", "copy",
         "-f", "segment", "-segment_time", f"{segment_s:g}", "-segment_format", "matroska",
+        # the open segment is readable up to its last half second: early windows and
+        # clips are cut from it without waiting for it to finish
+        "-segment_format_options", f"flush_packets=1:cluster_time_limit={CLUSTER_MS}",
         "-reset_timestamps", "1", "-strftime", "1", output_pattern(ring),
         "-map", "0:v:0", "-vf", motion.filter_graph(),
         "-f", "rawvideo", "-pix_fmt", "gray", "-flush_packets", "1", "pipe:1",
@@ -137,6 +146,24 @@ class PendingClip:
     event: MotionEvent
     reason: str
     queued_mono: float
+    entry_id: str | None = None  # the id its early window took
+
+
+OPEN_SEGMENT_LAG_S = 2 * CLUSTER_MS / 1000  # the open segment is on disk up to this far back
+
+
+def readable(segments: list[Segment], now: float) -> list[Segment]:
+    """The ring with its open segment counted as finished up to what is on disk (its
+    clusters are flushed as they close), so a cut can use it."""
+    out: list[Segment] = []
+    for segment in segments:
+        if segment.complete:
+            out.append(segment)
+            continue
+        written = now - segment.start - OPEN_SEGMENT_LAG_S
+        if written > 0:
+            out.append(Segment(segment.path, segment.start, written, segment.size_bytes))
+    return out
 
 
 @dataclass(frozen=True)
@@ -184,6 +211,8 @@ class ContinuousCollector(Collector):
         self._reported = _Counters()
         self._short_streak = 0
         self._kept_this_run = 0
+        self._early_ids: dict[float, str] = {}  # motion start → the id its early window took
+        self._early_tasks: set[asyncio.Task[None]] = set()
         max_event = settings.max_seconds - continuous.preroll_s - continuous.postroll_s
         self._max_event_s = max(1.0, max_event)
 
@@ -378,6 +407,7 @@ class ContinuousCollector(Collector):
                     stop_reason = f"no video for {cont.stall_s:.0f} s"
                 if stop_reason is not None:
                     break
+                self._maybe_early()
                 await self._housekeeping(writing=True)
                 self._status()
                 if now - self._last_save > 60:
@@ -425,8 +455,60 @@ class ContinuousCollector(Collector):
             min_s=self.settings.min_seconds,
             max_s=self.settings.max_seconds,
         )
-        self._pending.append(PendingClip(start, end, event, reason, time.monotonic()))
+        entry_id = self._early_ids.pop(event.start, None)
+        self._pending.append(
+            PendingClip(start, end, event, reason, time.monotonic(), entry_id)
+        )
         self.counters.events += 1
+
+    def _maybe_early(self) -> None:
+        """`--early`: once a motion event has run `early_s`, its first seconds (with the
+        pre-roll) go to .early/ while it goes on; its clip gets the same id."""
+        early_s = self.settings.early_s
+        detector = self._detector
+        if early_s <= 0 or detector is None or not detector.busy:
+            return
+        start = detector.open_since
+        if start is None or start in self._early_ids:
+            return
+        if self._clock() - start < early_s + OPEN_SEGMENT_LAG_S:
+            return
+        self._early_ids[start] = ""  # taken; the id once written
+        task = asyncio.create_task(self._write_early_window(start))
+        self._early_tasks.add(task)
+        task.add_done_callback(self._early_tasks.discard)
+        for old in [k for k in self._early_ids if k < start - 3600]:
+            del self._early_ids[old]
+
+    async def _write_early_window(self, start: float) -> None:
+        settings = self.settings
+        try:
+            segments = readable(await self.ring.scan(writing=True), self._clock())
+            pieces = plan_cut(segments, start - self.cont.preroll_s, start + settings.early_s)
+            if not pieces:
+                return
+            part = partial_path(settings.dataset, start).with_name(f"{int(start * 1000)}-early.mkv")
+            entry_id = reserve_id(settings.dataset, pieces[0].wall_start)
+            try:
+                await cut(pieces, part)
+                meta = await write_early(
+                    part,
+                    settings.dataset,
+                    entry_id=entry_id,
+                    camera=settings.camera,
+                    started_at=pieces[0].wall_start,
+                    window_s=pieces[-1].wall_end - pieces[0].wall_start + 1.0,
+                    rotation=settings.rotation,
+                    timeline={"motion": start, "first_frame": pieces[0].wall_start},
+                )
+            finally:
+                part.unlink(missing_ok=True)
+            if meta is not None and start in self._early_ids:
+                self._early_ids[start] = entry_id
+                logger.info("early window %s · motion since %s", entry_id,
+                            datetime.fromtimestamp(start).strftime("%H:%M:%S"))
+        except Exception:  # crash containment: an early window never stops the stream
+            logger.exception("early window failed; the clip follows as usual")
 
     # --- disk ---------------------------------------------------------------------------
 
@@ -471,15 +553,18 @@ class ContinuousCollector(Collector):
             segments = await self.ring.scan(writing=writing)
             complete_end = max((s.end for s in segments if s.complete), default=0.0)
             waited_too_long = 2 * self.cont.segment_s + 30
+            on_disk = readable(segments, self._clock())
+            written_end = max((s.end for s in on_disk), default=0.0)
             for pending in list(self._pending):
                 ready = (
                     not writing
                     or complete_end >= pending.end
+                    or written_end >= pending.end  # the open segment has it already
                     or time.monotonic() - pending.queued_mono > waited_too_long
                 )
                 if ready:
                     self._pending.remove(pending)
-                    await self._cut(pending, segments)
+                    await self._cut(pending, on_disk)
             await self._trim(writing=writing)
         except Exception:  # crash containment: a bad segment never stops the stream
             logger.exception("ring housekeeping failed; continuing")
@@ -560,6 +645,8 @@ class ContinuousCollector(Collector):
                 preroll_s=self.cont.preroll_s,
                 postroll_s=self.cont.postroll_s,
             ),
+            timeline={"motion": event.start, "motion_end": event.end},
+            entry_id=pending.entry_id or None,
         )
         if meta is None:
             self.counters.dropped += 1

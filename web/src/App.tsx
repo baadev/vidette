@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { UNAUTHORIZED_EVENT, api, type Me } from "./api";
 import { EventsPage } from "./pages/Events";
+import { IdentitiesPage } from "./pages/Identities";
 import { LoginPage } from "./pages/Login";
 import { PeoplePage } from "./pages/People";
 import { SystemPage } from "./pages/System";
 
 // v0.2 (ADR-0009): live view, review timeline, camera management and the setup
 // wizard belonged to the NVR core, frozen at tag `nvr-core`. Frigate does those.
-type Route = "events" | "people" | "system";
+type Route = "events" | "people" | "identities" | "system";
 
 const ROUTES: { route: Route; hash: string; label: string }[] = [
   { route: "events", hash: "#/events", label: "Events" },
@@ -18,17 +19,27 @@ const ROUTES: { route: Route; hash: string; label: string }[] = [
 function parseRoute(hash: string): Route {
   if (hash.startsWith("#/system")) return "system";
   if (hash.startsWith("#/people")) return "people";
+  if (hash.startsWith("#/identities")) return "identities";
   return "events"; // default, including "" and unknown or retired hashes
 }
 
-function useRoute(): Route {
-  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
+/** `#/identities/12` → 12; anything else → null (the list). */
+function parseIdentity(hash: string): number | null {
+  const match = /^#\/identities\/(\d+)/.exec(hash);
+  return match ? Number(match[1]) : null;
+}
+
+function useRoute(): [Route, number | null] {
+  const [hash, setHash] = useState<string>(() => window.location.hash);
   useEffect(() => {
-    const onHashChange = () => setRoute(parseRoute(window.location.hash));
+    const onHashChange = () => {
+      setHash(window.location.hash);
+      window.scrollTo(0, 0);
+    };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
-  return route;
+  return [parseRoute(hash), parseIdentity(hash)];
 }
 
 type Boot =
@@ -40,7 +51,9 @@ type Boot =
 
 export function App() {
   const [boot, setBoot] = useState<Boot>({ phase: "loading" });
-  const route = useRoute();
+  const [route, identity] = useRoute();
+  // Identities live under the People tab: both are "who the camera saw".
+  const tabRoute: Route = route === "identities" ? "people" : route;
 
   const bootstrapFlow = useCallback(async () => {
     setBoot({ phase: "loading" });
@@ -124,8 +137,8 @@ export function App() {
             <a
               key={tab}
               href={hash}
-              className={route === tab ? "tab active" : "tab"}
-              aria-current={route === tab ? "page" : undefined}
+              className={tabRoute === tab ? "tab active" : "tab"}
+              aria-current={tabRoute === tab ? "page" : undefined}
             >
               {label}
             </a>
@@ -143,6 +156,7 @@ export function App() {
       <main className="app-main">
         {route === "events" && <EventsPage />}
         {route === "people" && <PeoplePage />}
+        {route === "identities" && <IdentitiesPage id={identity} />}
         {route === "system" && <SystemPage />}
       </main>
     </div>

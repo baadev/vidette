@@ -122,11 +122,35 @@ CREATE UNIQUE INDEX idx_events_source_ref ON events(source, source_ref)
     WHERE source IS NOT NULL;
 """
 
+_V5_TELEGRAM: Final[str] = """
+-- The Telegram bot (ADR-0013): one row per message it sent about events. An alert row
+-- carries the event it is about; `data` holds what is needed to answer its buttons and
+-- edit its text (caption lines, the mark, album message ids). The partial unique index
+-- makes "one alert per event and chat" a database fact, not a hope (test alerts, sent by
+-- `vidette telegram try`, may repeat).
+CREATE TABLE telegram_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    thread_id   INTEGER,
+    message_id  INTEGER,
+    event_id    TEXT,
+    kind        TEXT NOT NULL,   -- alert | collapsed | digest | test
+    camera      TEXT,
+    level       TEXT,
+    created_at  REAL NOT NULL,
+    data        TEXT NOT NULL DEFAULT '{}'
+);
+CREATE UNIQUE INDEX idx_telegram_alert_once ON telegram_messages(event_id, chat_id)
+    WHERE kind IN ('alert', 'collapsed');
+CREATE INDEX idx_telegram_chat_camera ON telegram_messages(chat_id, camera, created_at);
+"""
+
 MIGRATIONS: Final[list[str]] = [
     _V1_INITIAL,
     _V2_EVENTS,
     _V3_MANAGEMENT,
     _V4_UPSTREAM,
+    _V5_TELEGRAM,
 ]
 
 SCHEMA_VERSION: Final[int] = len(MIGRATIONS)

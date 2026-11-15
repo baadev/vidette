@@ -23,7 +23,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -305,6 +307,9 @@ class VlmConfig(StrictModel):
 
     backend: VlmBackend = VlmBackend.none
     frames_per_call: int = Field(default=4, ge=1, le=8)
+    # The language of the judge's one-line description (what notifications quote); the
+    # rest of the prompt stays English. None: the model's default, English.
+    language: str | None = Field(default=None, max_length=40)
     local: LocalVlmConfig = LocalVlmConfig()
     cloud: CloudVlmConfig | None = None
 
@@ -341,6 +346,68 @@ class Sensitivity(StrEnum):
     paranoid = "paranoid"
 
 
+class Wake(StrEnum):
+    """Who gets woken for a verdict at a level (docs/telegram.md#levels)."""
+
+    always = "always"  # immediately, also in quiet hours and when only known people are seen
+    unless_quiet = "unless_quiet"  # immediately, except in quiet hours (then the digest)
+    unless_known = "unless_known"  # immediately, unless only known people are seen or quiet
+    never = "never"  # not an alert: the digest only (vocabulary for what is ordinary)
+
+
+OTHER_SCENARIO = "other"  # the judge's catch-all: none of a policy's scenarios (never alerts)
+_RESERVED_SCENARIOS = frozenset({OTHER_SCENARIO, "unsure", "unclear", "unlabelled"})
+_SCENARIO_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class ScenarioConfig(StrictModel):
+    description: str = Field(min_length=1)  # what the judge is told this scenario means
+    title: str | None = Field(default=None, max_length=40)  # short name in digests
+
+
+class LevelConfig(StrictModel):
+    """One severity level of a policy: the scenarios that belong to it and who wakes."""
+
+    title: str | None = Field(default=None, max_length=40)  # e.g. "critical", shown in alerts
+    wake: Wake = Wake.unless_quiet
+    scenarios: dict[str, str | ScenarioConfig] = Field(min_length=1)
+
+    def scenario_configs(self) -> dict[str, ScenarioConfig]:
+        return {
+            key: value if isinstance(value, ScenarioConfig) else ScenarioConfig(description=value)
+            for key, value in self.scenarios.items()
+        }
+
+
+class RecurrenceConfig(StrictModel):
+    """The same unknown face coming back raises a verdict to `raise_to` (ADR-0014).
+
+    Needs `people.track_unknown`. Only a verdict that named a scenario of a level below
+    `raise_to` is raised; `other`, an abstention and a verdict already at or above it
+    stay as the judge said. Behaviour over time only: how often and where."""
+
+    raise_to: str  # a level of this policy
+    sightings: int = Field(default=3, ge=2, le=100)  # the same face this many times...
+    within: str = "24h"  # ...within this window, this sighting included
+    cameras: int | None = Field(default=2, ge=2, le=20)  # or on this many cameras...
+    cameras_within: str = "10m"  # ...within this window; `cameras: null` turns it off
+    suspicious: bool = True  # an identity marked suspicious raises on every sighting
+
+    @model_validator(mode="after")
+    def _check(self) -> RecurrenceConfig:
+        _duration(self.within, "recurrence.within")
+        _duration(self.cameras_within, "recurrence.cameras_within")
+        return self
+
+    @property
+    def within_s(self) -> float:
+        return _duration(self.within, "within")
+
+    @property
+    def cameras_within_s(self) -> float:
+        return _duration(self.cameras_within, "cameras_within")
+
+
 class PolicyConfig(StrictModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     description: str
@@ -350,11 +417,100 @@ class PolicyConfig(StrictModel):
     # With people: enabled, "quiet" tells the judge that people recognized as known never
     # need an alert by themselves; "judge" only reports who was seen (docs/people.md).
     known_people: Literal["judge", "quiet"] = "judge"
+    # Levels (docs/telegram.md#levels): the judge picks one scenario, the scenario's level
+    # decides whether it is an alert and who wakes. Highest level first. Without levels the
+    # judge answers alert / silent, and an alert wakes like `unless_quiet`.
+    levels: dict[str, LevelConfig] = Field(default_factory=dict)
+    # Repeated presence of the same unknown face raises the level (docs/people.md, ADR-0014)
+    recurrence: RecurrenceConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_recurrence(self) -> PolicyConfig:
+        if self.recurrence is not None and self.recurrence.raise_to not in self.levels:
+            names = ", ".join(self.levels) or "none: add levels first"
+            raise ValueError(
+                f"policy '{self.name}': recurrence.raise_to '{self.recurrence.raise_to}' is not "
+                f"a level of this policy ({names})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_levels(self) -> PolicyConfig:
+        seen: set[str] = set()
+        for level_name, level in self.levels.items():
+            if not _SCENARIO_RE.match(level_name):
+                raise ValueError(
+                    f"policy '{self.name}': level '{level_name}' must be lower case letters, "
+                    "digits and '_'"
+                )
+            for scenario in level.scenarios:
+                if not _SCENARIO_RE.match(scenario):
+                    raise ValueError(
+                        f"policy '{self.name}': scenario '{scenario}' must be lower case "
+                        "letters, digits and '_' (snake_case)"
+                    )
+                if scenario in _RESERVED_SCENARIOS:
+                    raise ValueError(
+                        f"policy '{self.name}': scenario '{scenario}' is reserved; "
+                        f"'{OTHER_SCENARIO}' (none of the scenarios) is always there"
+                    )
+                if scenario in seen:
+                    raise ValueError(
+                        f"policy '{self.name}': scenario '{scenario}' is in two levels"
+                    )
+                seen.add(scenario)
+        return self
+
+    def scenario_level(self, scenario: str | None) -> tuple[str, LevelConfig] | None:
+        """The level a scenario belongs to; None for `other`, unknown names, no levels."""
+        for name, level in self.levels.items():
+            if scenario in level.scenarios:
+                return name, level
+        return None
+
+    def scenario_configs(self) -> dict[str, ScenarioConfig]:
+        """Every scenario of every level, in level order."""
+        merged: dict[str, ScenarioConfig] = {}
+        for level in self.levels.values():
+            merged.update(level.scenario_configs())
+        return merged
+
+    def wake_for(self, scenario: str | None) -> Wake:
+        """How a verdict naming `scenario` wakes people (an alert, for a policy without
+        levels, wakes `unless_quiet`)."""
+        if not self.levels:
+            return Wake.unless_quiet
+        found = self.scenario_level(scenario)
+        return Wake.never if found is None else found[1].wake
 
 
 def _default_people_dir() -> Path:
     base = os.environ.get("VIDETTE_DATA")
     return (Path(base) if base else Path("~/vidette-data")).expanduser() / "people"
+
+
+def _default_identities_dir() -> Path:
+    base = os.environ.get("VIDETTE_DATA")
+    return (Path(base) if base else Path("~/vidette-data")).expanduser() / "identities"
+
+
+class IdentitiesConfig(StrictModel):
+    """Anonymous identities for unknown faces (`people.track_unknown`, ADR-0014).
+
+    The folder holds face embeddings and crops of people who never agreed to anything:
+    outside any git repository, owner-only, and pruned after `retention_days`."""
+
+    dir: Path = Field(default_factory=_default_identities_dir)
+    match: float = Field(default=0.5, ge=0.3, le=0.95)  # SFace cosine to join an identity
+    margin: float = Field(default=0.06, ge=0.0, le=0.3)  # over the next-closest identity
+    min_face_px: int = Field(default=64, ge=40, le=400)  # smaller faces never count
+    near_known: float = Field(default=0.3, ge=0.0, le=0.95)  # closer to an enrolled person
+    retention_days: int = Field(default=30, ge=1, le=3650)  # unnamed, unflagged ones
+
+    @model_validator(mode="after")
+    def _expand(self) -> IdentitiesConfig:
+        self.dir = self.dir.expanduser()
+        return self
 
 
 class PeopleConfig(StrictModel):
@@ -372,6 +528,10 @@ class PeopleConfig(StrictModel):
     frames_per_second: float = Field(default=2.0, gt=0, le=10)  # sampled from each clip
     max_frames: int = Field(default=24, ge=1, le=120)
     max_faces_per_person: int = Field(default=60, ge=5, le=500)
+    # Anonymous identities for faces nobody enrolled (docs/people.md, ADR-0014): off by
+    # default; biometric data of passers-by, local only, pruned after retention_days.
+    track_unknown: bool = False
+    identities: IdentitiesConfig = Field(default_factory=IdentitiesConfig)
 
     @model_validator(mode="after")
     def _expand(self) -> PeopleConfig:
@@ -413,9 +573,120 @@ class NotifyRule(StrictModel):
     channels: list[str] = Field(min_length=1)
 
 
+class TelegramTopic(StrictModel):
+    """Forum topics (message_thread_id) of one chat: where alerts and digests go."""
+
+    alerts: int | None = None
+    digest: int | None = None
+
+
+def _parse_topics(value: object) -> object:
+    """`<chat>:alerts=<thread>,digest=<thread>;<chat>:…` → {chat: {alerts, digest}}."""
+    if not isinstance(value, str):
+        return value
+    topics: dict[str, dict[str, str]] = {}
+    for number, part in enumerate((p.strip() for p in value.split(";")), start=1):
+        if not part:
+            continue
+        chat, sep, rest = part.partition(":")
+        pairs = [pair.partition("=") for pair in rest.split(",") if pair.strip()]
+        if not sep or not chat.strip() or not pairs or any(not eq for _k, eq, _v in pairs):
+            raise ValueError(
+                f"notifications.telegram.topics: entry {number} is not "
+                "'<chat>:alerts=<thread>,digest=<thread>'"
+            )
+        topics[chat.strip()] = {k.strip(): v.strip() for k, _eq, v in pairs}
+    return topics
+
+
+class TelegramConfig(StrictModel):
+    """The Telegram bot (docs/telegram.md, ADR-0013): alerts with feedback buttons,
+    hourly digests, /status /live /quiet. Long polling only: no webhook, no open port."""
+
+    enabled: bool = True
+    token: SecretStr  # ${VIDETTE_TELEGRAM_BOT_TOKEN}; never a literal, never logged
+    # Chats that may talk to the bot; everything else is ignored. "id1,id2" or a list.
+    allowed_chats: list[int] = Field(min_length=1)
+    topics: dict[int, TelegramTopic] = Field(default_factory=dict)
+    # Who gets alerts and digests: "first" (only the first allowed chat: a trial run) or
+    # "all". Commands are answered in every allowed chat either way.
+    recipients: Literal["first", "all"] = "all"
+    # Names of recognized people in messages and on the "This is ..." buttons. Off: "known".
+    names: bool = False
+    frames: int = Field(default=4, ge=1, le=9)  # key frames in an alert's album
+    max_video_mb: float = Field(default=20, gt=0, le=50)  # bigger clips are linked
+    collapse: str = "5m"  # one camera's alerts within this window become one message
+    digest_every: str = "1h"
+    digest_settle: str = "20m"  # events younger than this wait for their verdict
+    quiet_for: str = "1h"  # /quiet
+    labels: bool = True  # answers become reviewed labels in the clip's dataset
+    camera_names: dict[str, str] = Field(default_factory=dict)  # camera → name in messages
+    clip_url: str | None = None  # base URL for clips too big to send; default server.base_url
+    api_url: str = "https://api.telegram.org"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed_keys(cls, data: object) -> object:
+        if isinstance(data, dict) and "live" in data:
+            raise ValueError(
+                "notifications.telegram.live was removed: live view will be part of the "
+                "Vidette app itself, not links to a separate restreamer; delete the "
+                "section (docs/telegram.md)"
+            )
+        return data
+
+    @field_validator("allowed_chats", mode="before")
+    @classmethod
+    def _chats_from_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+        return value
+
+    @field_validator("topics", mode="before")
+    @classmethod
+    def _topics_from_text(cls, value: object) -> object:
+        return _parse_topics(value)
+
+    @model_validator(mode="after")
+    def _check(self) -> TelegramConfig:
+        token = self.token.get_secret_value()
+        if not re.match(r"^\d+:[A-Za-z0-9_-]{20,}$", token):
+            raise ValueError(
+                "notifications.telegram.token does not look like a bot token "
+                "(<digits>:<letters>); reference it as ${VIDETTE_TELEGRAM_BOT_TOKEN}"
+            )
+        if len(set(self.allowed_chats)) != len(self.allowed_chats):
+            raise ValueError("notifications.telegram.allowed_chats lists a chat twice")
+        for chat in self.topics:
+            if chat not in self.allowed_chats:
+                raise ValueError(
+                    "notifications.telegram.topics names a chat that is not in allowed_chats"
+                )
+        for key in ("collapse", "digest_every", "digest_settle", "quiet_for"):
+            seconds = _duration(getattr(self, key), f"notifications.telegram.{key}")
+            if key == "digest_every" and seconds < 60:
+                raise ValueError("notifications.telegram.digest_every must be at least 1m")
+        _check_http_url(self.api_url, "notifications.telegram.api_url")
+        self.api_url = self.api_url.rstrip("/")
+        if self.clip_url is not None:
+            _check_http_url(self.clip_url, "notifications.telegram.clip_url")
+            self.clip_url = self.clip_url.rstrip("/")
+        return self
+
+    def seconds(
+        self, key: Literal["collapse", "digest_every", "digest_settle", "quiet_for"]
+    ) -> float:
+        return _duration(getattr(self, key), key)
+
+    @property
+    def recipient_chats(self) -> list[int]:
+        return self.allowed_chats[:1] if self.recipients == "first" else list(self.allowed_chats)
+
+
 class NotificationsConfig(StrictModel):
     channels: dict[str, ChannelConfig] = Field(default_factory=dict)
     rules: list[NotifyRule] = Field(default_factory=list)
+    telegram: TelegramConfig | None = None
 
 
 class MqttConfig(StrictModel):
@@ -551,11 +822,50 @@ def designed_feature_warnings(config: VidetteConfig) -> list[str]:
             f"people.dir {config.people.dir} does not exist yet; add someone with "
             "`vidette people add NAME PHOTO…` or on the People page (docs/people.md)"
         )
+    telegram = config.notifications.telegram
+    if telegram is not None and telegram.enabled:
+        if telegram.recipients == "first" and len(telegram.allowed_chats) > 1:
+            warnings.append(
+                "notifications.telegram.recipients: first, so alerts and digests go to the "
+                "first allowed chat only (a trial run); set all when the others agreed"
+            )
+        if telegram.names:
+            warnings.append(
+                "notifications.telegram.names: true sends the names of recognized people to "
+                "Telegram's servers with each alert (docs/telegram.md#privacy)"
+            )
+    unless_known = [
+        p.name
+        for p in config.policies
+        if any(level.wake is Wake.unless_known for level in p.levels.values())
+    ]
+    if unless_known and not config.people.enabled:
+        warnings.append(
+            f"policies {unless_known}: wake: unless_known cannot tell known people while "
+            "people.enabled is false, so those levels wake everyone (except in quiet hours)"
+        )
     quiet = [p.name for p in config.policies if p.known_people == "quiet"]
     if quiet and not config.people.enabled:
         warnings.append(
-            f"policies {quiet}: known_people: quiet has no effect while people.enabled is "
-            "false"
+            f"policies {quiet}: known_people: quiet has no effect while people.enabled is false"
+        )
+    if config.people.track_unknown and not config.people.enabled:
+        warnings.append(
+            "people.track_unknown has no effect while people.enabled is false (the face "
+            "check finds the faces it tracks)"
+        )
+    elif config.people.track_unknown:
+        warnings.append(
+            "people.track_unknown keeps face embeddings and crops of people who never agreed "
+            f"to it, for {config.people.identities.retention_days} days, in "
+            f"{config.people.identities.dir}; check the rules where you live "
+            "(docs/people.md#privacy-and-the-law)"
+        )
+    recurring = [p.name for p in config.policies if p.recurrence is not None]
+    if recurring and not (config.people.enabled and config.people.track_unknown):
+        warnings.append(
+            f"policies {recurring}: recurrence has no effect while people.enabled or "
+            "people.track_unknown is false"
         )
     return warnings
 

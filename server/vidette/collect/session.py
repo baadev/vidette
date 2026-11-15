@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 PROBE_US = 10_000_000  # analyzeduration/probesize: wait up to 10 s for SPS + key frame
 _GRACEFUL_STOP_S = 5.0
 _TICK_S = 1.0
+PROGRESS_EVERY_S = 0.25  # how often ffmpeg reports progress (the length limit's grain)
+CLUSTER_MS = 500  # Matroska clusters of the part file (it is readable up to the last one)
 _STDERR_LINES = 12
 
 
@@ -65,6 +67,7 @@ class SessionResult:
     stop_reason: str
     detail: str  # scrubbed tail of ffmpeg's stderr (never contains the URL)
     clean_stop: bool = True  # False if ffmpeg had to be killed (the camera may hold a ghost)
+    requested_at: float | None = None  # wall clock when the session was opened
 
 
 def record_command(
@@ -79,31 +82,66 @@ def record_command(
 ) -> list[str]:
     return [
         ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats",
-        "-progress", "pipe:1",
+        "-progress", "pipe:1", "-stats_period", f"{PROGRESS_EVERY_S:g}",
         "-rtsp_transport", "tcp",
         "-timeout", str(int(silence_s * 1_000_000)),
         "-allowed_media_types", "video",
         "-analyzeduration", str(PROBE_US), "-probesize", str(PROBE_US),
-        *wallclock_input(wallclock),
+        *timestamp_input(wallclock),
         "-i", url,
         "-map", "0:v:0", "-c", "copy",
-        "-t", f"{max_seconds:g}",
         "-fs", str(max_bytes),
+        # short clusters, flushed at once: the part file is readable while it grows (the
+        # early window is cut from it), and a crash loses at most half a second
+        "-flush_packets", "1", "-cluster_time_limit", str(CLUSTER_MS),
         "-f", "matroska", "-y", str(part),
     ]  # fmt: skip
 
 
-def wallclock_input(enabled: bool) -> list[str]:
-    """Stamp each packet with its arrival time instead of the camera's RTP clock.
+# The camera's own clock, kept monotonic: a packet more than this after the previous one,
+# or not after it at all, is a restreamer splicing a reconnect (go2rtc carries the new
+# camera session's RTP clock into the same RTSP session, a jump of up to hours either way);
+# it continues one frame after the previous packet instead. Real pauses of the camera
+# (dropped frames, a short drop-out) stay as they are, up to this long.
+JUMP_GUARD_S = 10.0
+_GUARD_STEP_S = 1 / 15  # one frame of a typical camera, for the packet after a splice
 
-    For a restreamer such as go2rtc: when the camera drops and comes back while a reader
-    is attached, go2rtc splices the new camera session into the same RTSP session, RTP
-    timestamps and all, so the clock jumps by up to hours (forward: `-t` ends the clip
-    at once and the segment muxer cuts at every key frame; backward: timestamps stall).
-    Arrival time stays monotonic and the gap is the real one. Safe for cameras without
-    B-frames (Eufy sends none); the cost is the network's jitter in the frame times.
+
+def jump_guard(max_step_s: float = JUMP_GUARD_S, step_s: float = _GUARD_STEP_S) -> str:
+    """The `setts` bitstream filter that keeps the camera's timestamps but repairs jumps.
+
+    Applied to the input (`-bsf:v` before `-i`), so the copy, the segment muxer and the
+    decoder of the motion branch all see the repaired clock. The first timed packet keeps
+    its time; a packet without one, or after one without one, continues one frame later."""
+    delta = "(PTS-PREV_INPTS)"
+    usable = (
+        f"not(eq(PTS\\,NOPTS))*not(eq(PREV_INPTS\\,NOPTS))*gt({delta}\\,0)"
+        f"*lte({delta}\\,{max_step_s:g}/TB)"
+    )
+    return (
+        f"setts=ts=if(eq(PREV_OUTPTS\\,NOPTS)\\,PTS\\,"
+        f"PREV_OUTPTS+if({usable}\\,{delta}\\,{step_s:.6f}/TB))"
+    )
+
+
+def timestamp_input(wallclock: bool = False) -> list[str]:
+    """Input options for the packets' timestamps.
+
+    Default: the camera's own (RTP) clock, guarded against restreamer splices
+    (`jump_guard`). It is the truthful one: measured through go2rtc on a Wi-Fi camera,
+    25 s of RTP timestamps were 376 frames 61 to 73 ms apart, while arrival times of the
+    same packets came in bursts (47 % less than 30 ms apart) with eight pauses up to
+    0.7 s; on a camera with a weak link, arrival pauses reach 13 s. Stamped on arrival,
+    such a burst plays as a frozen picture followed by fast-forward, and a judge reads a
+    person walking past as a person standing still.
+
+    `wallclock` (`--wallclock-timestamps`) stamps each packet with its arrival time
+    instead: monotonic whatever the source does, but delivery jitter becomes the video's
+    timeline. Kept for sources whose clock cannot be trusted at all.
     """
-    return ["-use_wallclock_as_timestamps", "1"] if enabled else []
+    if wallclock:
+        return ["-use_wallclock_as_timestamps", "1"]
+    return ["-bsf:v", jump_guard()]
 
 
 _CONNECT_FAILURES = (
@@ -163,12 +201,15 @@ async def record_session(
     disk_check: Callable[[int], str | None],
     clock: Callable[[], float] = time.time,
     wallclock: bool = False,
+    on_progress: Callable[[float, float | None], None] | None = None,
 ) -> SessionResult:
     """Connect once and record until the stream ends, a limit hits or `stop` is set.
 
     `disk_check(bytes_written)` is asked about once a second; a returned reason stops
-    the recording cleanly (the clip so far is kept).
+    the recording cleanly (the clip so far is kept). `on_progress(media_seconds,
+    started_wall)` hears every progress report (about four a second) and must not block.
     """
+    requested_at = clock()
     part.parent.mkdir(parents=True, exist_ok=True)
     command = record_command(
         binary("ffmpeg"),
@@ -200,6 +241,11 @@ async def record_session(
     # Silence is ffmpeg's to detect (-timeout); this watchdog only catches an ffmpeg that
     # is stuck somewhere -timeout does not reach.
     stuck_after = silence_s + PROBE_US / 1_000_000 + 5.0
+    # The length limit is ours, not ffmpeg's `-t`: `-t` reads the timestamps before the
+    # jump guard repairs them, so a restreamer's splice would end the clip at once. The
+    # wall-clock cap only matters when a slow link delivers far less than real time.
+    began_mono = time.monotonic()
+    wall_cap_s = max_seconds * 3 + 60
 
     while True:
         try:
@@ -221,6 +267,8 @@ async def record_session(
             progress.media_seconds = max(progress.media_seconds, out_us / 1e6)
             progress.bytes_written = max(progress.bytes_written, size)
             block = {}
+            if on_progress is not None:
+                on_progress(progress.media_seconds, progress.media_started_wall)
             if value == "end":
                 continue
         if stop_reason is not None:
@@ -231,6 +279,10 @@ async def record_session(
             stop_reason = f"disk guard: {reason}"
         elif time.monotonic() - progress.last_advance_mono > stuck_after:
             stop_reason = f"no data for {stuck_after:.0f} s"
+        elif progress.media_seconds >= max_seconds - PROGRESS_EVERY_S:
+            stop_reason = "max duration"
+        elif time.monotonic() - began_mono > wall_cap_s:
+            stop_reason = f"max duration ({wall_cap_s:.0f} s of wall clock: a slow link)"
         if stop_reason is not None:
             await ask_to_finish(proc)
 
@@ -261,6 +313,7 @@ async def record_session(
         stop_reason=stop_reason,
         detail=" | ".join(line for line in stderr.splitlines() if line.strip())[-400:],
         clean_stop=clean,
+        requested_at=requested_at,
     )
 
 

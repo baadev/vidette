@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for `vidette serve` on a Mac: the clip-folder sources, the verdict worker
+  and the Telegram bot (docs/telegram.md), next to the dev.vidette.collect agents that
+  fill the folders.
+
+  Secrets are not in this file. The config (~/.config/vidette/serve.yaml) references
+  them as ${VAR}s; they come from a KEY=VALUE file read by `vidette serve --env-file`
+  (chmod 600), for example:
+
+    VIDETTE_TELEGRAM_BOT_TOKEN=…
+    VIDETTE_TELEGRAM_ALLOWED_CHATS=111111111,222222222
+    VIDETTE_TELEGRAM_TOPICS=111111111:alerts=2,digest=3
+
+  A judge's key can live in the same file, or in a second --env-file.
+
+  Fill in the placeholders, then load it:
+
+    sed -e "s|__VIDETTE__|$HOME/development/vidette/server/.venv/bin/vidette|" \
+        -e "s|__WEB__|$HOME/development/vidette/web/dist|" \
+        -e "s|__HOME__|$HOME|" \
+        deploy/macos/dev.vidette.serve.plist > ~/Library/LaunchAgents/dev.vidette.serve.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.vidette.serve.plist
+
+  Stop:     launchctl bootout gui/$(id -u)/dev.vidette.serve
+  Restart:  launchctl kickstart -k gui/$(id -u)/dev.vidette.serve
+  Logs:     tail -f ~/Library/Logs/vidette-serve.log
+
+  It listens on 127.0.0.1 only. To open the web app from other devices at home, change
+  host to 0.0.0.0 (macOS asks once whether Python may accept connections) and create the
+  admin account first (the first visitor creates it).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.vidette.serve</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VIDETTE__</string>
+    <string>serve</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8642</string>
+    <string>--config</string>
+    <string>__HOME__/.config/vidette/serve.yaml</string>
+    <string>--env-file</string>
+    <string>__HOME__/.config/vidette/vidette.env</string>
+  </array>
+
+  <!-- launchd's PATH does not include Homebrew; ffmpeg and ffprobe live there. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>VIDETTE_WEB_DIST</key>
+    <string>__WEB__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart after a crash, not after a clean stop. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>Nice</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/vidette-serve.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/vidette-serve.log</string>
+</dict>
+</plist>

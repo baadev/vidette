@@ -14,7 +14,8 @@ What it refuses, and what it lets through so the existing examples stay valid:
    documentation ranges above: a real LAN address says where someone's cameras are.
 3. **Images, video and model files** outside the folders allowed to hold them
    (`docs/`, `web/`, `datasets/synthetic-sample/`, `server/tests/fixtures/`), and anywhere
-   under a `faces/` or `people/` folder. Model weights (`.onnx`, `.pt`, `.npy`, …) never.
+   under a `faces/`, `people/` or `identities/` folder. Model weights (`.onnx`, `.pt`,
+   `.npy`, …) never.
 4. **Email addresses** other than the project's own contact and example/no-reply ones.
 
 A line can opt out with `privacy-check: allow` in a comment on it; use that only for an
@@ -65,7 +66,7 @@ MEDIA = {
 }  # fmt: skip
 WEIGHTS = {".onnx", ".pt", ".pth", ".npy", ".npz", ".tflite", ".pb", ".safetensors", ".bin"}
 MEDIA_ALLOWED = ("docs/", "web/", "datasets/synthetic-sample/", "server/tests/fixtures/")
-NEVER_UNDER = {"faces", "people"}
+NEVER_UNDER = {"faces", "people", "identities"}
 SKIP_TEXT = {"server/uv.lock", "web/package-lock.json"}
 TS_SOURCE = {"web/src", "server"}  # .ts is TypeScript there, not a video
 
@@ -104,7 +105,8 @@ def check_media(path: str) -> list[str]:
     if suffix not in MEDIA:
         return []
     if parts & NEVER_UNDER:
-        return [f"{path}: an image or video under a faces/ or people/ folder (biometric data)"]
+        where = "a faces/, people/ or identities/ folder"
+        return [f"{path}: an image or video under {where} (biometric data)"]
     if not path.startswith(MEDIA_ALLOWED):
         allowed = ", ".join(MEDIA_ALLOWED)
         return [f"{path}: images and video are allowed only under {allowed}"]
