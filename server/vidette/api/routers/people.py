@@ -11,6 +11,11 @@ faces are biometric data, so viewers who may watch events do not see the referen
     DELETE /api/v1/people/{id}/faces/{face}        drop one reference
     GET    /api/v1/events/{id}/people/{n}.jpg      the crop of face n seen in an event
     POST   /api/v1/events/{id}/people/{n}          {"answer": name | "stranger" | "unsure"}
+    POST   /api/v1/events/{id}/people/{n}/identity {"identity"?, "name"?, "status"?}
+    DELETE /api/v1/events/{id}/people/{n}          take the decision about face n back
+
+Every decision about a face can be changed or taken back (ADR-0016): a new answer takes
+the previous one back first, exactly (`vidette.people.decisions`).
 
 Nothing here calls out: photos are read in memory, faces found by the local engine and
 stored in `people.dir`. No system events are emitted for people changes, so a
@@ -26,12 +31,19 @@ from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from vidette.api.errors import problem
 from vidette.auth.deps import require_scope
 from vidette.auth.service import Principal
-from vidette.people.check import confirm
+from vidette.people.decisions import (
+    RELIABLE_FACE_PX,
+    FaceContext,
+    IdentityChoice,
+    decide,
+    undo,
+)
+from vidette.people.identities import IdentityError, SightingContext
 from vidette.people.report import IdentityBrief, PeopleReport
 from vidette.people.store import NewFace, PeopleStore, Person, StoreError
 from vidette.runtime import AppRuntime
@@ -95,7 +107,7 @@ class AnswerIn(BaseModel):
 
 class SeenOut(BaseModel):
     n: int
-    status: Literal["known", "unknown"]
+    status: Literal["known", "unknown", "unclear"]
     person: str | None
     name: str | None
     score: float
@@ -105,6 +117,10 @@ class SeenOut(BaseModel):
     confirmed: str | None
     identity: int | None = None  # the anonymous identity of an unknown face (ADR-0014)
     identity_note: str | None = None  # e.g. "3rd time today, 5 times on 2 days"
+    identity_name: str | None = None  # as of the check or the last decision about it
+    identity_status: str | None = None
+    closest: str | None = None  # an unknown face's nearest enrolled id (a suggestion)
+    small: bool = False  # under 64 px or unclear: may not be recognized next time
 
 
 class EventPeopleOut(BaseModel):
@@ -118,6 +134,12 @@ class EventPeopleOut(BaseModel):
 class ConfirmOut(BaseModel):
     message: str
     people: EventPeopleOut
+
+
+class IdentityIn(BaseModel):
+    identity: int | None = None  # an existing identity; none: a new one
+    name: str | None = Field(default=None, max_length=40)
+    status: Literal["unknown", "familiar", "suspicious"] = "unknown"
 
 
 def _runtime(request: Request) -> AppRuntime:
@@ -174,8 +196,11 @@ def event_people(event_id: str, raw: object) -> EventPeopleOut | None:
         report = PeopleReport.model_validate(raw)
     except ValidationError:
         return None
+    summary = report.summary()
+    if not report.seen and report.frames_checked:
+        summary = "no face found"
     return EventPeopleOut(
-        summary=report.summary(),
+        summary=summary,
         frames_checked=report.frames_checked,
         unclear_frames=report.unclear_frames,
         seen=[
@@ -191,6 +216,10 @@ def event_people(event_id: str, raw: object) -> EventPeopleOut | None:
                 confirmed=seen.confirmed,
                 identity=None if seen.identity is None else seen.identity.id,
                 identity_note=None if seen.identity is None else identity_note(seen.identity),
+                identity_name=None if seen.identity is None else seen.identity.name,
+                identity_status=None if seen.identity is None else seen.identity.status,
+                closest=seen.closest if seen.status == "unknown" else None,
+                small=seen.status == "unclear" or seen.face_px < RELIABLE_FACE_PX,
             )
             for seen in report.seen
         ],
@@ -363,6 +392,37 @@ async def event_face(
     return FileResponse(path, media_type="image/jpeg", headers=_HEADERS)
 
 
+async def _face_context(rt: AppRuntime, event_id: str) -> FaceContext:
+    row = await rt.db.get_event(event_id)
+    if row is None:
+        raise problem(404, "Event not found", "list recent ids via GET /api/v1/events")
+    sighting = SightingContext(
+        at=row.started_at,
+        camera=row.camera,
+        source=row.source or "event",
+        source_id=row.source_ref or row.id,
+        clip=row.clip_path,
+    )
+    return FaceContext(
+        _store(rt),
+        rt.face_engine,
+        Path(rt.config.storage.media_dir),
+        f"event:{event_id}",
+        rt.identities,
+        sighting,
+    )
+
+
+async def _decided(
+    rt: AppRuntime, event_id: str, intent: dict[str, object], report: PeopleReport, message: str
+) -> ConfirmOut:
+    intent["people"] = report.model_dump(mode="json")
+    await rt.db.update_event(event_id, intent=intent)
+    out = event_people(event_id, intent["people"])
+    assert out is not None
+    return ConfirmOut(message=message, people=out)
+
+
 @router.post("/events/{event_id}/people/{n}")
 async def confirm_event_face(
     event_id: str,
@@ -371,25 +431,47 @@ async def confirm_event_face(
     request: Request,
     principal: Annotated[Principal, Depends(_WRITE)],
 ) -> ConfirmOut:
+    """This is <person> / a stranger / not sure; replaces an earlier answer."""
     rt = _runtime(request)
-    store = _store(rt)
+    ctx = await _face_context(rt, event_id)
     report, intent = await _event_report(rt, event_id)
     try:
-        done = await asyncio.to_thread(
-            confirm,
-            report,
-            n,
-            body.answer,
-            store=store,
-            engine=rt.face_engine,
-            media_root=Path(rt.config.storage.media_dir),
-            where=f"event:{event_id}",
-            identities=rt.identities,
-        )
-    except StoreError as exc:
+        done = await asyncio.to_thread(decide, report, n, body.answer, ctx)
+    except (StoreError, IdentityError) as exc:
         raise problem(422, "Cannot apply this answer", str(exc)) from exc
-    intent["people"] = report.model_dump(mode="json")
-    await rt.db.update_event(event_id, intent=intent)
-    out = event_people(event_id, intent["people"])
-    assert out is not None
-    return ConfirmOut(message=done.message, people=out)
+    return await _decided(rt, event_id, intent, report, done.message)
+
+
+@router.post("/events/{event_id}/people/{n}/identity")
+async def event_face_identity(
+    event_id: str,
+    n: int,
+    body: IdentityIn,
+    request: Request,
+    principal: Annotated[Principal, Depends(_WRITE)],
+) -> ConfirmOut:
+    """Put face n in an identity, or in a new one with a name and a disposition."""
+    rt = _runtime(request)
+    ctx = await _face_context(rt, event_id)
+    report, intent = await _event_report(rt, event_id)
+    choice = IdentityChoice(body.identity, body.name, body.status)
+    try:
+        done = await asyncio.to_thread(decide, report, n, choice, ctx)
+    except (StoreError, IdentityError) as exc:
+        raise problem(422, "Cannot put this face there", str(exc)) from exc
+    return await _decided(rt, event_id, intent, report, done.message)
+
+
+@router.delete("/events/{event_id}/people/{n}")
+async def undo_event_face(
+    event_id: str, n: int, request: Request, principal: Annotated[Principal, Depends(_WRITE)]
+) -> ConfirmOut:
+    """Take the decision about face n back, exactly."""
+    rt = _runtime(request)
+    ctx = await _face_context(rt, event_id)
+    report, intent = await _event_report(rt, event_id)
+    try:
+        done = await asyncio.to_thread(undo, report, n, ctx)
+    except (StoreError, IdentityError) as exc:
+        raise problem(422, "Cannot take this back", str(exc)) from exc
+    return await _decided(rt, event_id, intent, report, done.message)

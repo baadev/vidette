@@ -179,7 +179,12 @@ class AppRuntime:
                 self.people_check = PeopleCheck(
                     self.people_store,
                     self.face_engine,
-                    CheckSettings(fps=people.frames_per_second, max_frames=people.max_frames),
+                    CheckSettings(
+                        fps=people.frames_per_second,
+                        max_frames=people.max_frames,
+                        extra_fps=people.extra_fps,
+                        extra_frames=people.extra_frames,
+                    ),
                     self.identities,
                 )
         if self.people_error is not None:

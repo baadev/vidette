@@ -6,7 +6,7 @@
     never         → not an alert: the digest
 
 "Recognized everyone" is deliberately narrow, so that a doubt wakes someone: at least one
-known face, no face that matched nobody, and the judge counted no more people than were
+known or familiar face, no other face, and the judge counted no more people than were
 recognized. No face check, a face too small to tell, or a judge that did not count people
 all mean "not known", which wakes (the fail-toward-alerting rule of ADR-0012).
 """
@@ -21,13 +21,20 @@ from vidette.core.config import PolicyConfig, Wake
 Route = Literal["alert", "digest"]
 
 
+def _familiar(person: Mapping[str, Any]) -> bool:
+    identity = person.get("identity")
+    return isinstance(identity, Mapping) and identity.get("status") == "familiar"
+
+
 def known_only(people: Mapping[str, Any] | None, persons: int | None) -> bool:
+    """Everyone the judge counted was recognized as household (enrolled) or familiar
+    (an anonymous identity the household marked so, ADR-0016), and no other face."""
     if people is None or persons is None:
         return False
     seen = [p for p in people.get("seen") or [] if isinstance(p, Mapping)]
-    known = [p for p in seen if p.get("status") == "known"]
-    unknown = [p for p in seen if p.get("status") == "unknown"]
-    return bool(known) and not unknown and persons <= len(known)
+    ours = [p for p in seen if p.get("status") == "known" or _familiar(p)]
+    others = [p for p in seen if p not in ours]
+    return bool(ours) and not others and persons <= len(ours)
 
 
 def decide(

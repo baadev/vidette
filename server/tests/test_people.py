@@ -201,9 +201,11 @@ def test_report_groups_faces_into_people_and_counts_unclear_frames(tmp_path: Pat
     assert [(p.status, p.name, p.faces) for p in report.seen] == [
         ("known", "Alice", 2),
         ("unknown", None, 2),
+        ("unclear", None, 2),  # the small face in frames 4 and 5, followed by place
     ]
     assert report.seen[0].frames == [0, 1] and report.seen[1].frames == [1, 2]
-    assert sorted(written) == [1, 2] and report.seen[0].crop == "faces/clip/1.jpg"
+    assert report.seen[2].frames == [3, 4]  # the turned-away face, seen once, is noise
+    assert sorted(written) == [1, 2, 3] and report.seen[0].crop == "faces/clip/1.jpg"
     assert report.summary().startswith("Alice 0.") and "1 unknown" in report.summary()
 
 
@@ -493,12 +495,12 @@ def test_scan_writes_the_report_into_the_sidecar_and_a_reply_confirms_a_face(
     dataset = fake_cli / "yard"
     clip = make_dataset(dataset, "20261114-210304", ["face:dave/1", "face:alice/q", "small"])
 
-    async def no_video(*_a: Any, **_k: Any) -> list[Path]:
+    async def no_video(*_a: Any, **_k: Any) -> Any:
         from vidette.ffmpeg import MediaToolError
 
         raise MediaToolError("the test clip is not a real video")
 
-    monkeypatch.setattr("vidette.people.check.sample_frames", no_video)
+    monkeypatch.setattr("vidette.people.check.probe", no_video)
     assert run_cli("scan", str(dataset)) == 0
     out = capsys.readouterr().out
     assert "Alice 0." in out and "1 unknown" in out

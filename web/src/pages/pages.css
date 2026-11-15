@@ -1881,3 +1881,106 @@ button.ghost.danger {
     flex-wrap: wrap;
   }
 }
+
+/* --- decisions about a face, look-alikes (ADR-0016) ------------------------------------ */
+
+.face-decided {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.face-decided button.ghost {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+.face-small {
+  color: var(--accent);
+}
+
+.face-label .id-status {
+  margin-left: 0.4rem;
+}
+
+.face-pick {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+  max-width: 100%;
+}
+
+.face-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.face-name input {
+  flex: 1 1 10rem;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+}
+
+.face-name button.primary {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+}
+
+.id-status-familiar {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 50%, transparent);
+}
+
+.id-item-selected {
+  border-color: var(--accent);
+}
+
+.id-pairs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.id-pair {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  flex-wrap: wrap;
+}
+
+.id-pair-face {
+  display: grid;
+  justify-items: center;
+  gap: 0.2rem;
+  color: var(--text);
+  text-decoration: none;
+  max-width: 5.5rem;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.id-pair-actions {
+  margin-left: auto;
+  display: grid;
+  justify-items: end;
+  gap: 0.3rem;
+}
+
+.id-sighting .face-pick {
+  justify-self: start;
+}

@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 STRANGER = "stranger"
 UNSURE = "unsure"
-IdentityStatus = Literal["unknown", "suspicious", "ignored", "known"]
+IdentityStatus = Literal["unknown", "suspicious", "familiar", "known"]
 FACTS_WINDOW_S = 3600.0  # "cameras in the last hour" in the judge's line
 
 
@@ -48,6 +48,9 @@ class IdentityBrief(BaseModel):
     # (time, camera) of the sightings in the week up to this one, newest first, this one
     # included: what recurrence rules count (vidette.people.recurrence)
     recent: list[tuple[float, str]] = Field(default_factory=list)
+    sighting: int | None = None  # this sighting's id in the identity store
+    weak: bool = False  # no face of it clear enough to compare: joined only by hand
+    near_known: bool = False  # close to someone enrolled: probably them, never raises
 
     def within(self, seconds: float) -> list[tuple[float, str]]:
         """Sightings from `seconds` before this one up to it (this one included)."""
@@ -74,11 +77,30 @@ class IdentityBrief(BaseModel):
         )
 
 
+class Effect(BaseModel):
+    """One change a decision about a face made, kept so the decision can be taken back
+    exactly (vidette.people.decisions, ADR-0016)."""
+
+    kind: Literal["face", "reject", "promote", "sighting", "move", "status"]
+    person: str | None = None  # face, reject, promote: the enrolled person
+    face: str | None = None  # face: the reference added to them
+    where: str | None = None  # reject: the clip or event it came from
+    score: float | None = None  # reject: the wrong match's score
+    identity: int | None = None  # promote, sighting, move, status: the identity
+    sighting: int | None = None  # sighting, move: the sighting
+    previous: int | None = None  # move: the identity it came from
+    created: bool = False  # sighting, move: the identity was created by the decision
+    old_status: str | None = None  # status: what it was before
+
+
 class SeenPerson(BaseModel):
-    """One person in a clip: faces grouped across frames (by name, or by likeness)."""
+    """One person in a clip: faces grouped across frames (by name, by likeness, or, for
+    faces too small to compare, by where they are from one frame to the next)."""
 
     n: int = Field(ge=1)  # 1-based within the report; "5.2 Robin" names it on a sheet
-    status: Literal["known", "unknown"]
+    # known: matched someone enrolled; unknown: readable, matched nobody; unclear: a face
+    # was followed through frames but never clear enough to compare (ADR-0016)
+    status: Literal["known", "unknown", "unclear"]
     person: str | None = None  # known: the person's id
     name: str | None = None  # known: the display name
     score: float  # known: the best score for that person; unknown: the best for anyone
@@ -87,9 +109,12 @@ class SeenPerson(BaseModel):
     faces: int = 1  # detections grouped here
     face_px: int = 0  # height of the largest face, in the frame's pixels
     crop: str | None = None  # the best aligned crop, relative to the report's media root
-    confirmed: str | None = None  # a person id, "stranger" or "unsure", set by a person
+    # a person's decision: a person id, "stranger", "unsure" or "identity:<id>"
+    confirmed: str | None = None
     confirmed_at: datetime | None = None
-    identity: IdentityBrief | None = None  # unknown + people.track_unknown (ADR-0014)
+    effects: list[Effect] = Field(default_factory=list)  # what the decision changed
+    identity: IdentityBrief | None = None  # people.track_unknown (ADR-0014, ADR-0016)
+    best_at_s: float | None = None  # when in the clip the best picture of this face is
 
 
 class PeopleReport(BaseModel):
@@ -101,6 +126,9 @@ class PeopleReport(BaseModel):
     frames_checked: int = 0
     frames_with_readable_faces: int = 0
     unclear_frames: int = 0  # frames whose faces were all too small or unclear
+    # frames looked at again around the faces, for the best moment (ADR-0016); not part
+    # of the counts above, which stay comparable with checks before it
+    extra_frames: int = 0
     seen: list[SeenPerson] = Field(default_factory=list)
 
     @property
@@ -112,6 +140,21 @@ class PeopleReport(BaseModel):
         return [person for person in self.seen if person.status == "unknown"]
 
     @property
+    def unclear(self) -> list[SeenPerson]:
+        return [person for person in self.seen if person.status == "unclear"]
+
+    @property
+    def familiar(self) -> list[SeenPerson]:
+        """Faces of identities the household marked as familiar (a neighbour): not
+        enrolled, not strangers either; treated like known people when routing."""
+        return [p for p in self.seen if p.status != "known" and is_familiar(p)]
+
+    @property
+    def strangers(self) -> list[SeenPerson]:
+        """Readable faces that are neither enrolled nor familiar."""
+        return [p for p in self.unknown if not is_familiar(p)]
+
+    @property
     def frames_without_readable_face(self) -> int:
         return max(0, self.frames_checked - self.frames_with_readable_faces)
 
@@ -121,13 +164,21 @@ class PeopleReport(BaseModel):
     def summary(self) -> str:
         """Short, human: "Sam 0.83, 1 unknown, 2 unclear frames" (sheets, CLI, UI)."""
         parts = [f"{p.name or p.person} {p.score:.2f}" for p in self.known]
-        if self.unknown:
-            parts.append(f"{len(self.unknown)} unknown")
+        parts += [f"familiar #{p.identity.id}" for p in self.familiar if p.identity]
+        if self.strangers:
+            parts.append(f"{len(self.strangers)} unknown")
+        unclear = [p for p in self.unclear if not is_familiar(p)]
+        if unclear:
+            parts.append(f"{len(unclear)} small face(s)")
         if self.unclear_frames:
             parts.append(f"{self.unclear_frames} unclear frame(s)")
         if not parts:
             return "no face" if self.frames_checked else "not checked"
         return ", ".join(parts)
+
+
+def is_familiar(seen: SeenPerson) -> bool:
+    return seen.identity is not None and seen.identity.status == "familiar"
 
 
 def _plural(count: int, word: str) -> str:
@@ -144,15 +195,26 @@ def people_line(report: PeopleReport | None, *, names: bool, quiet: bool = False
     if report is None or report.frames_checked == 0:
         return ""
     known = report.known
+    familiar = report.familiar
     if known and names:
         found = "recognized " + ", ".join(f"{p.name or p.person} ({p.score:.2f})" for p in known)
     elif known:
         found = f"recognized {_plural(len(known), 'person')} the household enrolled as known"
     else:
         found = "nobody recognized"
+    if familiar:
+        named = [p.identity.name for p in familiar if p.identity and p.identity.name]
+        if names and named:
+            found += "; familiar to the household (not enrolled, never a concern by themselves): "
+            found += ", ".join(named)
+        else:
+            found += (
+                f"; {_plural(len(familiar), 'person')} the household marked as familiar "
+                "(a neighbour or a regular visitor)"
+            )
     parts = [
         found,
-        f"faces that match nobody enrolled: {len(report.unknown)}",
+        f"faces that match nobody enrolled: {len(report.strangers)}",
         f"no clear face in {report.frames_without_readable_face} of "
         f"{report.frames_checked} frames (too small, turned away or absent)",
     ]
@@ -162,10 +224,10 @@ def people_line(report: PeopleReport | None, *, names: bool, quiet: bool = False
         "An unrecognized or unseen face is not evidence of a stranger; judge people by "
         "what they do.",
     ]
-    if quiet and known:
+    if quiet and (known or familiar):
         lines.append(
-            "Policy rule: the people recognized above never need an alert by themselves. "
-            "If you see anyone else, judge that person by the policy as usual."
+            "Policy rule: the people recognized above (known or familiar) never need an alert "
+            "by themselves. If you see anyone else, judge that person by the policy as usual."
         )
     lines += recurrence_lines(report, names=names)
     return "\n".join(lines)
@@ -186,14 +248,11 @@ def recurrence_lines(report: PeopleReport, *, names: bool) -> list[str]:
     facts: list[str] = []
     for seen in report.unknown:
         brief = seen.identity
-        if brief is None or brief.status == "known":
-            continue
+        if brief is None or brief.status in ("known", "familiar"):
+            continue  # familiar people are reported above, with the known ones
         who = f"unknown face #{brief.id}"
         if names and brief.name:
             who += f" (the household calls them {brief.name!r})"
-        if brief.status == "ignored":
-            facts.append(f"{who}: the household marked this person as familiar.")
-            continue
         if brief.sightings <= 1:
             text = f"{who}: not seen before by this system"
         else:
@@ -208,6 +267,8 @@ def recurrence_lines(report: PeopleReport, *, names: bool) -> list[str]:
                 text += f"; cameras in the last hour: {', '.join(cameras)}"
         if brief.status == "suspicious":
             text += "; the household marked this person as suspicious"
+        if brief.near_known:
+            text += "; resembles someone enrolled, possibly a household member"
         facts.append(text + ".")
     if not facts:
         return []

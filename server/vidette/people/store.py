@@ -480,6 +480,22 @@ class PeopleStore:
             self._write_faces(pid, stored)
             return True
 
+    def unreject(self, pid: str, where: str, score: float | None = None) -> bool:
+        """Take back a confirmed wrong match from `where` (one, with `score` when given);
+        the threshold falls back accordingly. False when there was none."""
+        with self._locked():
+            person = self._read_person(pid)
+            if person is None:
+                return False
+            for rejection in person.rejected:
+                if rejection.where == where and (
+                    score is None or abs(rejection.score - round(score, 3)) < 1e-6
+                ):
+                    person.rejected.remove(rejection)
+                    self._write_person(person)
+                    return True
+            return False
+
     def reject(self, pid: str, score: float, where: str | None) -> float:
         """Record that a match with this score was wrong; returns the new threshold."""
         with self._locked():

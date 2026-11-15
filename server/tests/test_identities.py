@@ -98,13 +98,31 @@ def test_a_face_that_comes_back_joins_its_identity_and_a_new_face_starts_one(
     assert store.sighting_crop(rows[1].cover) is not None
 
 
-def test_small_faces_and_faces_close_to_someone_enrolled_never_make_an_identity(
+def test_small_faces_start_weak_identities_that_nothing_joins_automatically(
     store: IdentityStore,
 ) -> None:
-    assert store.assign([face("dave", "1", px=30)], at(0)).reason == "too small"
-    assert store.assign([face("dave", "1", px=63)], at(1)).reason == "too small"
-    assert store.assign([face("dave", "1")], at(2), known_score=0.35).reason == "near known"
-    assert store.entries() == []
+    small = store.assign([face("dave", "1", px=30)], at(0))
+    assert small.reason == "new weak" and small.brief is not None and small.brief.weak
+    again = store.assign([face("dave", "1", px=30)], at(0))  # the same clip checked twice
+    assert again.brief is not None and again.brief.id == small.brief.id
+    clear = store.assign([face("dave", "1")], at(10))  # the same face, readable: no join
+    assert clear.reason == "new" and clear.brief is not None and clear.brief.id == 2
+    assert store.assign([face("dave", "2", px=30)], at(20), weak=True).reason == "new weak"
+    rows = {row.id: row for row in store.entries()}
+    assert rows[1].weak and not rows[2].weak
+    suggested = store.similar(2)
+    assert suggested and suggested[0].weak  # a weak look-alike: offered, never merged
+    pairs = store.duplicates()
+    assert any({d.a, d.b} == {1, 2} for d in pairs)
+
+
+def test_a_face_close_to_someone_enrolled_gets_an_identity_marked_so(
+    store: IdentityStore,
+) -> None:
+    near = store.assign([face("dave", "1")], at(0), known_score=0.35)
+    assert near.reason == "new" and near.brief is not None and near.brief.near_known
+    far = store.assign([face("erin", "1")], at(10), known_score=0.1)
+    assert far.brief is not None and not far.brief.near_known
 
 
 def test_a_face_close_to_two_identities_joins_neither(store: IdentityStore) -> None:
@@ -171,7 +189,7 @@ def test_retention_drops_unflagged_identities_and_keeps_named_and_flagged_ones(
         store.assign([face(who, "1")], at(index))
     store.rename(2, "Erin")
     store.set_status(3, "suspicious")
-    store.set_status(4, "ignored")
+    store.set_status(4, "familiar")
     clock["now"] = T0 + 29 * DAY
     assert store.expire() == 0
     clock["now"] = T0 + 31 * DAY
@@ -234,9 +252,9 @@ def test_an_unknown_person_in_a_clip_gets_an_identity_and_a_known_one_does_not(
     )
     calls: list[float] = []
 
-    def assign(faces: list[GroupFace], known: float) -> IdentityBrief | None:
+    def assign(faces: list[GroupFace], known: float, weak: bool) -> IdentityBrief | None:
         calls.append(known)
-        return store.assign(faces, at(0), known_score=known).brief
+        return store.assign(faces, at(0), known_score=known, weak=weak).brief
 
     report = build_report(
         [frame("face:alice/x", "face:dave/1"), frame("face:dave/2")],
@@ -279,7 +297,7 @@ def test_this_is_sam_on_a_tracked_face_promotes_the_identity(
         engine="fake",
         threshold=0.4,
         crops=crop_writer(media, "faces/ev"),
-        identities=lambda faces, known: store.assign(faces, at(60), known_score=known).brief,
+        identities=lambda faces, known, weak: store.assign(faces, at(60), known_score=known).brief,
     )
     assert report.seen[0].identity is not None and report.seen[0].identity.id == 1
     done = confirm(
@@ -346,8 +364,15 @@ def test_the_judge_hears_recurrence_as_counts_and_names_only_locally() -> None:
     assert "the courier" not in cloud and "#12" in cloud and "3rd time today" in cloud
     first = people_line(report_with(brief(sightings=1, recent=[(T0 + 3600, "yard")])), names=True)
     assert "not seen before" in first
-    ignored = people_line(report_with(brief(status="ignored")), names=True)
-    assert "familiar" in ignored and "3rd time" not in ignored
+    familiar = people_line(report_with(brief(status="familiar", name="Anna")), names=True)
+    assert "familiar to the household" in familiar and "Anna" in familiar
+    assert "3rd time" not in familiar and "match nobody enrolled: 0" in familiar
+    familiar_cloud = people_line(report_with(brief(status="familiar", name="Anna")), names=False)
+    assert "Anna" not in familiar_cloud and "marked as familiar" in familiar_cloud
+    quiet = people_line(report_with(brief(status="familiar")), names=True, quiet=True)
+    assert "(known or familiar) never need an alert" in quiet
+    near = people_line(report_with(brief(near_known=True)), names=False)
+    assert "possibly a household member" in near
     suspicious = people_line(report_with(brief(status="suspicious")), names=False)
     assert "marked this person as suspicious" in suspicious
     assert "compared with earlier clips" not in people_line(report_with(None), names=True)
@@ -399,7 +424,7 @@ def test_a_recurring_stranger_raises_a_lower_level_and_nothing_else() -> None:
     assert raise_for_recurrence(policy, passer_by(), far_apart).level == "none"
     flagged = report_with(brief(status="suspicious", sightings=1, recent=[(T0 + 3600, "yard")]))
     assert raise_for_recurrence(policy, passer_by(), flagged).level == "elevated"
-    for status in ("ignored", "known"):
+    for status in ("familiar", "known"):
         flagged = report_with(brief(status=status))
         assert raise_for_recurrence(policy, passer_by(), flagged).level == "none"
     critical = Verdict(alert=True, label="door_attempt", level="critical", confidence=0.9)
@@ -597,7 +622,7 @@ def test_an_event_face_links_its_identity(identities_api: Any, tmp_path: Path) -
         people.gallery(),
         engine="fake",
         threshold=0.4,
-        identities=lambda faces, known: (
+        identities=lambda faces, known, weak: (
             runtime.identities.assign(faces, at(0), known_score=known).brief
         ),
     )
@@ -666,3 +691,263 @@ def test_backfill_reads_the_clip_folders_oldest_first_and_only_once(
     off.write_text(f"clip_folders:\n  - {{path: {folder}}}\npeople:\n  enabled: true\n")
     assert main(["people", "--config", str(off), "identities", "backfill"]) == 2
     assert "track_unknown must be true" in capsys.readouterr().err
+
+
+# --- decisions about a face, and taking them back (ADR-0016) -------------------------------------
+
+
+def decision_setup(tmp_path: Path) -> tuple[PeopleStore, IdentityStore, Path, Any]:
+    from vidette.people.decisions import FaceContext
+
+    people = PeopleStore(tmp_path / "people")
+    sam = people.create("Sam")
+    people.add_faces(
+        sam.id,
+        [NewFace(identity_vector("sam", str(i)), f"s{i}".encode(), 100, "t") for i in range(3)],
+        kind="enrolled",
+    )
+    ids = IdentityStore(tmp_path / "ids", clock=lambda: T0 + DAY)
+    media = tmp_path / "media"
+    ctx = FaceContext(people, FakeFaceEngine(), media, "event:ev", ids, at(0, clip="ev"))
+    return people, ids, media, ctx
+
+
+def test_every_decision_about_a_face_can_be_taken_back(tmp_path: Path) -> None:
+    from vidette.people.decisions import IdentityChoice, decide, undo
+
+    people, ids, media, ctx = decision_setup(tmp_path)
+    report = build_report(
+        [frame("face:dave/1"), frame("face:dave/2")],
+        people.gallery(),
+        engine="fake",
+        threshold=0.4,
+        crops=crop_writer(media, "faces/ev"),
+        identities=lambda faces, known, weak: (
+            ids.assign(faces, at(0, clip="ev"), known_score=known, weak=weak).brief
+        ),
+    )
+    seen = report.seen[0]
+    assert seen.identity is not None and seen.identity.id == 1 and seen.identity.sighting
+
+    stranger = decide(report, 1, "stranger", ctx)
+    assert "it is #1" in stranger.message and seen.confirmed == "stranger"
+
+    familiar = decide(report, 1, IdentityChoice(name="Anna", status="familiar"), ctx)
+    assert familiar.answer == "identity:2" and "moved to #2" in familiar.message
+    assert seen.identity is not None and seen.identity.status == "familiar"
+    assert seen.identity.name == "Anna" and [e.kind for e in seen.effects] == ["move"]
+    assert ids.sightings(1) == [] and len(ids.sightings(2)) == 1
+
+    back = undo(report, 1, ctx)
+    assert "the move to #2" in back.message and seen.confirmed is None
+    assert seen.identity is not None and seen.identity.id == 1
+    assert ids.get(2) is None and len(ids.sightings(1)) == 1  # the new one went with it
+
+    before = len(people.faces("sam"))
+    ours = decide(report, 1, "Sam", ctx)
+    assert "stranger #1 is Sam now" in ours.message
+    assert ids.require(1).status == "known" and len(people.faces("sam")) > before
+    changed = decide(report, 1, IdentityChoice(identity=1), ctx)  # changes the answer:
+    assert len(people.faces("sam")) == before  # Sam's faces from it are gone again
+    assert ids.require(1).status == "unknown" and changed.answer == "identity:1"
+    undo(report, 1, ctx)
+    assert seen.effects == [] and len(people.faces("sam")) == before
+
+
+def test_a_small_face_becomes_an_identity_by_hand_and_says_it_may_not_be_recognized(
+    tmp_path: Path,
+) -> None:
+    from vidette.people.decisions import IdentityChoice, decide
+
+    people, ids, media, ctx = decision_setup(tmp_path)
+    report = build_report(
+        [frame("small"), frame("small")],  # followed by place: one unclear person
+        people.gallery(),
+        engine="fake",
+        threshold=0.4,
+        crops=crop_writer(media, "faces/ev"),
+    )
+    assert [s.status for s in report.seen] == ["unclear"] and report.seen[0].identity is None
+    done = decide(report, 1, IdentityChoice(name="Neighbour", status="familiar"), ctx)
+    assert "may not be recognized next time" in done.message
+    row = ids.require(1)
+    assert row.weak and row.status == "familiar" and row.name == "Neighbour"
+    assert ids.sightings(1)[0].manual
+    ours = decide(report, 1, "Sam", ctx)  # too unclear to teach Sam anything
+    assert "too unclear to learn from" in ours.message and len(people.faces("sam")) == 3
+
+
+def test_an_answer_given_before_answers_were_reversible_can_still_be_taken_back(
+    tmp_path: Path,
+) -> None:
+    from vidette.people.decisions import undo
+
+    people, _ids, media, ctx = decision_setup(tmp_path)
+    report = build_report(
+        [frame("face:dave/1")], people.gallery(), engine="fake", threshold=0.4,
+        crops=crop_writer(media, "faces/ev"),
+    )  # fmt: skip
+    people.add_faces(
+        "sam", [NewFace(identity_vector("dave", "1"), b"crop:dave/1", 100, "confirmed:event:ev#1")],
+        kind="confirmed", check_outliers=False,
+    )  # fmt: skip
+    report.seen[0].confirmed = "sam"  # what the old code stored, without effects
+    assert len(people.faces("sam")) == 4
+    undo(report, 1, ctx)
+    assert len(people.faces("sam")) == 3 and report.seen[0].confirmed is None
+
+
+def test_familiar_people_are_quiet_like_the_household_but_critical_still_wakes() -> None:
+    from vidette.core.config import Wake
+    from vidette.telegram.routing import decide as route
+    from vidette.telegram.routing import known_only
+
+    familiar = report_with(brief(status="familiar", name="Anna")).model_dump(mode="json")
+    assert known_only(familiar, 1)
+    assert route(Wake.unless_known, familiar, 1, quiet=False) == "digest"
+    assert route(Wake.always, familiar, 1, quiet=False) == "alert"
+    both = report_with(brief(status="familiar"), brief(id=13)).model_dump(mode="json")
+    assert not known_only(both, 2)  # a stranger next to the neighbour still wakes
+    assert not known_only(familiar, 2)  # the judge saw someone whose face was not found
+
+
+# --- the bot: who is this, and a name by reply --------------------------------------------------
+
+
+async def test_the_bot_asks_who_a_face_is_and_takes_a_name_by_reply(tmp_path: Path) -> None:
+    from test_telegram import bot
+
+    people = PeopleStore(tmp_path / "people")
+    people.create("Sam")
+    b = await bot(tmp_path, store=people)
+    try:
+        await _who_is_this(b, people, tmp_path)
+    finally:
+        await b.db.close()
+
+
+async def _who_is_this(b: Any, people: PeopleStore, tmp_path: Path) -> None:
+    from test_telegram import alert, callback, event
+
+    ids = IdentityStore(tmp_path / "ids")
+    b.service._identities = ids
+    media = b.config.storage.media_dir
+    report = build_report(
+        [frame("face:dave/1")],
+        people.gallery(),
+        engine="fake",
+        threshold=0.4,
+        crops=crop_writer(media, "faces/ev-20260115-101500"),
+        identities=lambda faces, known, weak: (
+            ids.assign(faces, at(0, clip="x"), known_score=known).brief
+        ),
+    )
+    event_id = await event(
+        b, "20260115-101500", level="elevated", scenario="person_at_house",
+        people=report.model_dump(mode="json"), persons=1,
+    )  # fmt: skip
+    [row] = await alert(b, event_id)
+    text = b.fake.last("sendMessage").params["text"]
+    assert "незнакомец №1, впервые" in text
+    await b.service.handle_update(callback(b, row, "own"))
+    menu = b.fake.last("editMessageText").params["reply_markup"]["inline_keyboard"]
+    labels = [button["text"] for line in menu for button in line]
+    assert "Новый знакомый…" in labels and "Чужой" in labels and "Свой: Sam" in labels
+    await b.service.handle_update(callback(b, row, "nf:1", update_id=2))
+    prompt = b.fake.last("sendMessage")
+    assert prompt.params["reply_markup"]["force_reply"] is True
+    prompt_id = b.fake.next_id  # the id the fake gave the prompt
+    reply = {
+        "update_id": 3,
+        "message": {
+            "message_id": 900, "date": int(b.clock[0]), "text": "Соседка",
+            "chat": {"id": row.chat_id}, "reply_to_message": {"message_id": prompt_id},
+        },
+    }  # fmt: skip
+    await b.service.handle_update(reply)
+    edited = b.fake.last("editMessageText").params["text"]
+    assert "знакомый «Соседка»" in edited and "знакомый: Соседка" in edited
+    stored = await b.db.get_event(event_id)
+    assert stored is not None and stored.intent is not None
+    face = stored.intent["people"]["seen"][0]
+    assert face["identity"]["status"] == "familiar" and face["identity"]["name"] == "Соседка"
+    assert "Готово" in b.fake.last("sendMessage").params["text"]
+    await b.service.handle_update(callback(b, row, "u:1", update_id=4))
+    assert "Решение по лицу отменено" in b.fake.last("editMessageText").params["text"]
+    stored = await b.db.get_event(event_id)
+    assert stored is not None and stored.intent is not None
+    assert stored.intent["people"]["seen"][0]["identity"]["id"] == 1  # back where it was
+    stranger_reply = dict(reply, update_id=5)  # a reply to no prompt: just a message
+    assert await b.service._prompt_reply(stranger_reply["message"]) is False  # type: ignore[arg-type]
+
+
+# --- the web API: decisions on an event card, merging, moving ------------------------------------
+
+
+def test_api_event_face_decisions_are_reversible(identities_api: Any, tmp_path: Path) -> None:
+    client, runtime = identities_api
+    media = runtime.config.storage.media_dir
+    report = build_report(
+        [frame("face:dave/1")],
+        runtime.people_store.gallery(),
+        engine="fake",
+        threshold=0.4,
+        crops=crop_writer(media, "faces/ev-1"),
+    )
+    client.portal.call(
+        lambda: runtime.db.insert_event(
+            "ev-1", "street", T0, "dismissed", [], [], {}, source="clip-folder",
+            source_ref="/data/c.mp4", intent={"people": report.model_dump(mode="json")},
+        )
+    )  # fmt: skip
+    made = client.post(
+        "/api/v1/events/ev-1/people/1/identity", json={"name": "Anna", "status": "familiar"}
+    )
+    assert made.status_code == 200, made.text
+    face = made.json()["people"]["seen"][0]
+    assert face["identity"] == 1 and face["identity_status"] == "familiar"
+    assert face["confirmed"] == "identity:1" and face["identity_name"] == "Anna"
+    taken = client.delete("/api/v1/events/ev-1/people/1").json()
+    assert taken["people"]["seen"][0]["confirmed"] is None
+    assert client.get("/api/v1/identities").json()["identities"] == []  # it went with it
+    stranger = client.post("/api/v1/events/ev-1/people/1", json={"answer": "stranger"}).json()
+    assert stranger["people"]["seen"][0]["identity"] == 2 and "#2" in stranger["message"]
+
+
+def test_api_merges_many_moves_a_sighting_and_takes_a_promotion_back(
+    identities_api: Any,
+) -> None:
+    client, runtime = identities_api
+    store: IdentityStore = runtime.identities
+    for index, who in enumerate(["dave", "erin", "fay"]):
+        store.assign([face(who, "1")], at(index * 60))
+    merged = client.post("/api/v1/identities/merge", json={"identities": [2, 3], "into": 1})
+    assert merged.status_code == 200 and merged.json()["sightings"] == 3
+    sighting = merged.json()["sightings_list"][0]["id"]
+    moved = client.post(f"/api/v1/identities/sightings/{sighting}/move", json={"person": "Fay"})
+    assert moved.status_code == 200 and moved.json()["status"] == "known"
+    new_id = moved.json()["id"]
+    assert runtime.people_store.find("fay") is not None
+    back = client.post(f"/api/v1/identities/{new_id}/demote").json()
+    assert back["status"] == "unknown" and back["person"] is None
+    assert runtime.people_store.faces("fay") == []  # the faces it gave were taken back
+    assert "duplicates" in client.get("/api/v1/identities").json()
+
+
+def test_a_store_from_before_familiar_existed_is_migrated(tmp_path: Path) -> None:
+    from vidette.people import identities as module
+
+    root = tmp_path / "ids"
+    root.mkdir()
+    with sqlite3.connect(root / module.DB_FILE) as conn:
+        conn.executescript(module._V1)
+        conn.execute(
+            "INSERT INTO identities (name, status, created_at, updated_at)"
+            " VALUES ('Postman', 'ignored', 1, 1)"
+        )
+        conn.execute("PRAGMA user_version=1")
+    store = IdentityStore(root)
+    row = store.require(1)
+    assert row.status == "familiar" and row.name == "Postman"
+    with sqlite3.connect(root / module.DB_FILE) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == module.SCHEMA_VERSION

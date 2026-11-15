@@ -495,7 +495,8 @@ def _default_identities_dir() -> Path:
 
 
 class IdentitiesConfig(StrictModel):
-    """Anonymous identities for unknown faces (`people.track_unknown`, ADR-0014).
+    """Anonymous identities for faces nobody enrolled (`people.track_unknown`, ADR-0014,
+    ADR-0016): every person whose face the check found gets one.
 
     The folder holds face embeddings and crops of people who never agreed to anything:
     outside any git repository, owner-only, and pruned after `retention_days`."""
@@ -503,8 +504,9 @@ class IdentitiesConfig(StrictModel):
     dir: Path = Field(default_factory=_default_identities_dir)
     match: float = Field(default=0.5, ge=0.3, le=0.95)  # SFace cosine to join an identity
     margin: float = Field(default=0.06, ge=0.0, le=0.3)  # over the next-closest identity
-    min_face_px: int = Field(default=64, ge=40, le=400)  # smaller faces never count
-    near_known: float = Field(default=0.3, ge=0.0, le=0.95)  # closer to an enrolled person
+    # readable faces smaller than this start a weak identity (joined by hand only)
+    min_face_px: int = Field(default=40, ge=16, le=400)
+    near_known: float = Field(default=0.3, ge=0.0, le=0.95)  # probably them: never raises
     retention_days: int = Field(default=30, ge=1, le=3650)  # unnamed, unflagged ones
 
     @model_validator(mode="after")
@@ -528,6 +530,10 @@ class PeopleConfig(StrictModel):
     frames_per_second: float = Field(default=2.0, gt=0, le=10)  # sampled from each clip
     max_frames: int = Field(default=24, ge=1, le=120)
     max_faces_per_person: int = Field(default=60, ge=5, le=500)
+    # A second look around every face found, for its sharpest moment (ADR-0016): this many
+    # frames a second, at most `extra_frames` more frames a clip (0 turns it off).
+    extra_fps: float = Field(default=6.0, gt=0, le=30)
+    extra_frames: int = Field(default=24, ge=0, le=240)
     # Anonymous identities for faces nobody enrolled (docs/people.md, ADR-0014): off by
     # default; biometric data of passers-by, local only, pruned after retention_days.
     track_unknown: bool = False

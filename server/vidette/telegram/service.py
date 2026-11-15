@@ -26,6 +26,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -43,11 +44,12 @@ from vidette.core.config import (
 from vidette.core.events import EventState, InProcessEventBus, Subscription
 from vidette.db import Database, EventRow, TelegramMessageRow
 from vidette.label.feedback import FeedbackError, LiveVerdict, record
-from vidette.people.check import confirm
+from vidette.people import decisions
+from vidette.people.decisions import FaceContext, IdentityChoice
 from vidette.people.engine import FaceEngine
-from vidette.people.identities import IdentityStore
+from vidette.people.identities import IdentityError, IdentityStore, SightingContext
 from vidette.people.recurrence import was_raised
-from vidette.people.report import PeopleReport
+from vidette.people.report import STRANGER, PeopleReport
 from vidette.people.store import PeopleStore, StoreError
 from vidette.telegram import text as say
 from vidette.telegram.api import TelegramApi, TelegramError, Upload
@@ -145,6 +147,9 @@ class TelegramService:
         self._people_store = people_store
         self._face_engine = face_engine
         self._identities = identities
+        # name prompts waiting for a reply: (chat, prompt message id) → (alert row, face,
+        # status). In memory: after a restart the person taps the button again.
+        self._prompts: dict[tuple[int, int], tuple[int, int, str]] = {}
         self._judge_status = judge_status
         self._clock = clock
         self._sleep = sleep
@@ -539,29 +544,55 @@ class TelegramService:
             return []
         return [int(message["message_id"]) for message in sent]
 
-    def _keyboard(self, row_id: int, row: EventRow, *, picker: bool = False) -> dict[str, Any]:
+    def _keyboard(self, row_id: int, row: EventRow, *, keyboard: str = "main") -> dict[str, Any]:
         def button(text: str, code: str) -> dict[str, str]:
             return {"text": text, "callback_data": f"a:{row_id}:{code}"}
 
-        if picker:
-            report = self._report(row)
+        report = self._report(row)
+        faces = [] if report is None else report.seen[:3]
+        if keyboard == "picker" and len(faces) == 1:
+            keyboard = f"face:{faces[0].n}"
+        if keyboard == "picker":
+            rows = [
+                [button(f"Лицо {face.n}: {self._face_word(face)}", f"f:{face.n}")] for face in faces
+            ]
+            rows.append([button("← Назад", "back")])
+            return {"inline_keyboard": rows}
+        if keyboard.startswith("face:") and report is not None:
+            n = int(keyboard.removeprefix("face:"))
+            face = report.get(n)
             people = self._people_store.people() if self._people_store is not None else []
-            rows: list[list[dict[str, str]]] = []
-            faces = [] if report is None else report.seen[:3]
-            for face in faces:
-                label = f"{face.n}: " if len(faces) > 1 else ""
-                rows.append(
-                    [
-                        button(f"{label}{p.name}", f"p:{face.n}:{i}")
-                        for i, p in enumerate(people[:6])
+            rows = []
+            if self.tg.names and people:
+                ours = [button(f"Свой: {p.name}", f"p:{n}:{i}") for i, p in enumerate(people[:6])]
+                rows += [ours[i : i + 2] for i in range(0, len(ours), 2)]
+            if self._identities is not None:
+                if self.tg.names:
+                    familiar = [r for r in self._identities.entries(status="familiar") if r.name][
+                        :4
                     ]
+                    known = [button(f"Знакомый: {r.name}", f"i:{n}:{r.id}") for r in familiar]
+                    rows += [known[i : i + 2] for i in range(0, len(known), 2)]
+                rows.append(
+                    [button("Новый знакомый…", f"nf:{n}"), button("Новая личность…", f"ni:{n}")]
                 )
+            rows.append([button("Чужой", f"s:{n}")])
+            if face is not None and face.confirmed:
+                rows.append([button("Отменить решение", f"u:{n}")])
             rows.append([button("← Назад", "back")])
             return {"inline_keyboard": rows}
         second = [button("Не знаю", "unk")]
         if self._can_say_ours(row):
-            second.insert(0, button("Это свой", "own"))
+            second.insert(0, button("Кто это?", "own"))
         return {"inline_keyboard": [[button("👍 верно", "ok"), button("👎 ложная", "no")], second]}
+
+    @staticmethod
+    def _face_word(face: Any) -> str:
+        if face.status == "known":
+            return str(face.name or face.person)
+        if face.identity is not None:
+            return face.identity.name or f"№{face.identity.id}"
+        return "мелкое" if face.status == "unclear" else "незнакомое"
 
     def _report(self, row: EventRow) -> PeopleReport | None:
         try:
@@ -570,14 +601,12 @@ class TelegramService:
             return None
 
     def _can_say_ours(self, row: EventRow) -> bool:
+        """«Кто это?» when a face was found and there is something to say about it: an
+        enrolled person (with `names`), or anonymous identities."""
         report = self._report(row)
-        return (
-            self.tg.names
-            and report is not None
-            and bool(report.seen)
-            and self._people_store is not None
-            and bool(self._people_store.people())
-        )
+        if report is None or not report.seen or self._people_store is None:
+            return False
+        return self._identities is not None or (self.tg.names and bool(self._people_store.people()))
 
     async def _render(
         self, row_id: int, *, keyboard: str = "main", answer: str | None = None
@@ -595,7 +624,7 @@ class TelegramService:
             message.chat_id,
             message.message_id,
             say.alert_text(facts, now=self._clock()),
-            reply_markup=self._keyboard(row_id, event, picker=keyboard == "picker"),
+            reply_markup=self._keyboard(row_id, event, keyboard=keyboard),
         )
 
     # --- updates: commands and buttons -----------------------------------------------------
@@ -644,6 +673,8 @@ class TelegramService:
             return
         message = update.get("message")
         if isinstance(message, Mapping):
+            if await self._prompt_reply(message):
+                return
             await self._command(message)
 
     async def _command(self, message: Mapping[str, Any]) -> None:
@@ -711,8 +742,115 @@ class TelegramService:
         elif code == "p" and len(parts) == 5 and parts[3].isdigit() and parts[4].isdigit():
             toast = await self.answer(row, "ours", face=int(parts[3]), person_index=int(parts[4]))
             await self.api.answer_callback_query(callback_id, toast)
+        elif code == "f" and len(parts) == 4 and parts[3].isdigit():
+            await self._render(row.id, keyboard=f"face:{parts[3]}")
+            await self.api.answer_callback_query(callback_id, f"Лицо {parts[3]}: кто это?")
+        elif code in ("i", "s", "u") and len(parts) >= 4 and parts[3].isdigit():
+            face = int(parts[3])
+            choice: str | IdentityChoice | None = STRANGER if code == "s" else None
+            if code == "i" and len(parts) == 5 and parts[4].isdigit():
+                choice = IdentityChoice(identity=int(parts[4]))
+            toast = await self.face_decision(row, face, choice)
+            await self.api.answer_callback_query(callback_id, toast)
+        elif code in ("nf", "ni") and len(parts) == 4 and parts[3].isdigit():
+            await self._ask_name(row, int(parts[3]), "familiar" if code == "nf" else "unknown")
+            await self.api.answer_callback_query(callback_id, "Ответьте именем на сообщение бота")
         else:
             await self.api.answer_callback_query(callback_id)
+
+    # --- decisions about one face (ADR-0016) -----------------------------------------------
+
+    def _face_context(self, event: EventRow) -> FaceContext:
+        if self._people_store is None:
+            raise StoreError("known people are off here")
+        sighting = SightingContext(
+            at=event.started_at,
+            camera=event.camera,
+            source=event.source or "event",
+            source_id=event.source_ref or event.id,
+            clip=event.clip_path,
+        )
+        return FaceContext(
+            self._people_store,
+            self._face_engine,
+            self.config.storage.media_dir,
+            f"event:{event.id}",
+            self._identities,
+            sighting,
+        )
+
+    async def face_decision(
+        self, message: TelegramMessageRow, face: int, choice: str | IdentityChoice | None
+    ) -> str:
+        """A stranger, an identity (existing or new), or `None` to take the decision back;
+        marks the alert and returns the toast."""
+        assert message.event_id is not None
+        event = await self.db.get_event(message.event_id)
+        report = None if event is None else self._report(event)
+        if event is None or report is None:
+            return "Событие или лицо уже недоступно"
+        try:
+            ctx = self._face_context(event)
+            if choice is None:
+                done = await asyncio.to_thread(decisions.undo, report, face, ctx)
+            else:
+                done = await asyncio.to_thread(decisions.decide, report, face, choice, ctx)
+        except (StoreError, IdentityError) as exc:
+            return f"Не вышло: {exc}"[:190]
+        intent = dict(event.intent or {})
+        intent["people"] = report.model_dump(mode="json")
+        await self.db.update_event(event.id, intent=intent)
+        seen = report.get(face)
+        mark = say.face_mark_line(
+            None if seen is None else seen.model_dump(mode="json"), names=self.tg.names
+        )
+        data = dict(message.data)
+        data["mark"] = mark
+        await self.db.update_telegram_message(message.id, data=data)
+        await self._render(message.id, keyboard="main")
+        self.status.answers += 1
+        return mark.removeprefix("✅ ")[:190] if done.answer else "Решение отменено"
+
+    async def _ask_name(self, message: TelegramMessageRow, face: int, status: str) -> None:
+        word = "знакомого" if status == "familiar" else "эту личность"
+        sent = await self.api.send_message(
+            message.chat_id,
+            f"Как назвать {word} (лицо {face})? Ответьте на это сообщение одним словом или "
+            "фразой; «-» без имени.",
+            thread_id=message.thread_id,
+            reply_markup={
+                "force_reply": True,
+                "selective": True,
+                "input_field_placeholder": "Соседка" if status == "familiar" else "Имя",
+            },
+        )
+        prompt_id = sent.get("message_id")
+        if isinstance(prompt_id, int):
+            self._prompts[(message.chat_id, prompt_id)] = (message.id, face, status)
+
+    async def _prompt_reply(self, message: Mapping[str, Any]) -> bool:
+        """A reply to a name prompt: the face becomes a new identity with that name."""
+        chat = (message.get("chat") or {}).get("id")
+        replied = message.get("reply_to_message")
+        text = message.get("text")
+        if not self.allowed(chat) or not isinstance(replied, Mapping) or not isinstance(text, str):
+            return False
+        assert isinstance(chat, int)
+        key = (chat, replied.get("message_id"))
+        if not isinstance(key[1], int) or key not in self._prompts:
+            return False
+        row_id, face, status = self._prompts.pop((chat, key[1]))
+        row = await self.db.get_telegram_message(row_id)
+        if row is None or row.event_id is None:
+            return True
+        name = " ".join(text.split())[:40]
+        choice = IdentityChoice(name=None if name in ("", "-") else name, status=status)
+        toast = await self.face_decision(row, face, choice)
+        thread = message.get("message_thread_id")
+        await self.api.send_message(
+            chat, f"Готово: {escape(toast)}", thread_id=thread if isinstance(thread, int) else None
+        )
+        return True
 
     async def answer(
         self,
@@ -805,15 +943,7 @@ class TelegramService:
             raise StoreError("that person is no longer enrolled")
         person = people[person_index]
         await asyncio.to_thread(
-            confirm,
-            report,
-            face,
-            person.id,
-            store=store,
-            engine=self._face_engine,
-            media_root=self.config.storage.media_dir,
-            where=f"event:{event.id}",
-            identities=self._identities,
+            decisions.decide, report, face, person.id, self._face_context(event)
         )
         intent = dict(event.intent or {})
         intent["people"] = report.model_dump(mode="json")

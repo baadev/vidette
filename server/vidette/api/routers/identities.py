@@ -10,6 +10,9 @@ biometric data of people who never agreed to anything.
     POST   /api/v1/identities/{id}/merge              {"into": other id}
     POST   /api/v1/identities/{id}/split              {"sightings": [ids]} → a new identity
     POST   /api/v1/identities/{id}/promote            {"person": name} → a known person
+    POST   /api/v1/identities/{id}/demote             take a promotion back
+    POST   /api/v1/identities/merge                   {"identities": [ids], "into": id}
+    POST   /api/v1/identities/sightings/{s}/move      {"into"?, "name"?, "status"?, "person"?}
     DELETE /api/v1/identities/{id}                    every embedding, crop and sighting
     GET    /api/v1/identities/sightings/{s}.jpg       the face crop of one sighting
     GET    /api/v1/identities/sightings/{s}/clip.mp4  its clip (from a clip folder or media)
@@ -46,7 +49,7 @@ router = APIRouter(prefix="/api/v1", tags=["identities"])
 _READ = require_scope("read:config")
 _WRITE = require_scope("write:config")
 _HEADERS = {"Cache-Control": "private, no-store"}
-Status = Literal["unknown", "suspicious", "ignored", "known"]
+Status = Literal["unknown", "suspicious", "familiar", "known"]
 
 
 class IdentityOut(BaseModel):
@@ -60,7 +63,16 @@ class IdentityOut(BaseModel):
     first_seen: float | None
     last_seen: float | None
     cameras: list[str]
-    face: str | None  # URL of the largest face crop
+    face: str | None  # URL of the best face crop
+    weak: bool = False  # only unclear faces: joined by hand only
+    near_known: bool = False  # came close to someone enrolled
+
+
+class DuplicateOut(BaseModel):
+    a: int
+    b: int
+    score: float
+    weak: bool  # the score involves unclear faces: a hint
 
 
 class IdentitiesOut(BaseModel):
@@ -70,6 +82,7 @@ class IdentitiesOut(BaseModel):
     retention_days: int
     match: float
     identities: list[IdentityOut]
+    duplicates: list[DuplicateOut] = Field(default_factory=list)
     warnings: list[str]
 
 
@@ -82,6 +95,9 @@ class SightingOut(BaseModel):
     face: str | None
     clip: str | None  # URL, when the clip is still there
     event: str | None  # the event this sighting belongs to, when there is one
+    manual: bool = False  # added by a person
+    weak: bool = False  # only unclear faces
+    near_known: bool = False  # this sighting came close to someone enrolled
 
 
 class SimilarOut(BaseModel):
@@ -89,6 +105,7 @@ class SimilarOut(BaseModel):
     label: str
     score: float
     face: str | None
+    weak: bool = False
 
 
 class IdentityDetailOut(IdentityOut):
@@ -98,7 +115,7 @@ class IdentityDetailOut(IdentityOut):
 
 class IdentityPatch(BaseModel):
     name: str | None = Field(default=None, max_length=200)
-    status: Literal["unknown", "suspicious", "ignored"] | None = None
+    status: Literal["unknown", "suspicious", "familiar"] | None = None
     clear_name: bool = False
 
 
@@ -112,6 +129,18 @@ class SplitIn(BaseModel):
 
 class PromoteIn(BaseModel):
     person: str = Field(min_length=1, max_length=40)
+
+
+class MergeManyIn(BaseModel):
+    identities: list[int] = Field(min_length=1, max_length=500)
+    into: int
+
+
+class MoveIn(BaseModel):
+    into: int | None = None  # an existing identity; none: a new one (or `person`)
+    name: str | None = Field(default=None, max_length=40)
+    status: Literal["unknown", "suspicious", "familiar"] = "unknown"
+    person: str | None = Field(default=None, max_length=40)  # a known person instead
 
 
 class PromoteOut(BaseModel):
@@ -165,6 +194,8 @@ def _out(row: IdentityRow) -> IdentityOut:
         last_seen=row.last_seen,
         cameras=row.cameras,
         face=_face(row.cover),
+        weak=row.weak,
+        near_known=row.near_known,
     )
 
 
@@ -194,6 +225,9 @@ async def _sighting_out(rt: AppRuntime, sighting: SightingRow) -> SightingOut:
         face=_face(sighting.id) if sighting.has_crop else None,
         clip=clip,
         event=None if event is None else event.id,
+        manual=sighting.manual,
+        weak=sighting.weak,
+        near_known=sighting.known_score >= rt.config.people.identities.near_known,
     )
 
 
@@ -213,6 +247,7 @@ async def _detail(rt: AppRuntime, store: IdentityStore, identity: int) -> Identi
                 label=label(others[s.id]),
                 score=s.score,
                 face=_face(others[s.id].cover),
+                weak=s.weak,
             )
             for s in similar
             if s.id in others
@@ -232,6 +267,7 @@ async def list_identities(
     store = rt.identities
     settings = rt.config.people.identities
     rows = [] if store is None else await asyncio.to_thread(store.entries)
+    pairs = [] if store is None else await asyncio.to_thread(store.duplicates)
     return IdentitiesOut(
         enabled=store is not None,
         reason=_reason(rt),
@@ -239,6 +275,7 @@ async def list_identities(
         retention_days=settings.retention_days,
         match=settings.match,
         identities=[_out(row) for row in rows],
+        duplicates=[DuplicateOut(a=d.a, b=d.b, score=d.score, weak=d.weak) for d in pairs],
         warnings=[] if store is None else store.permission_warnings(),
     )
 
@@ -320,6 +357,62 @@ async def promote_identity(
     except (IdentityError, StoreError) as exc:
         raise _fail(exc) from exc
     return PromoteOut(identity=_out(row), person=person.name, faces_added=added)
+
+
+@router.post("/identities/{identity}/demote")
+async def demote_identity(
+    identity: int, request: Request, principal: Annotated[Principal, Depends(_WRITE)]
+) -> IdentityDetailOut:
+    """Not that person after all: the faces the promotion added are taken back."""
+    rt = _runtime(request)
+    store = _store(rt)
+    try:
+        await asyncio.to_thread(store.demote, identity, rt.people_store)
+    except IdentityError as exc:
+        raise _fail(exc) from exc
+    return await _detail(rt, store, identity)
+
+
+@router.post("/identities/merge")
+async def merge_identities(
+    body: MergeManyIn, request: Request, principal: Annotated[Principal, Depends(_WRITE)]
+) -> IdentityDetailOut:
+    """Merge several identities into one (the list's bulk merge)."""
+    rt = _runtime(request)
+    store = _store(rt)
+    try:
+        await asyncio.to_thread(store.merge_many, body.identities, body.into)
+    except IdentityError as exc:
+        raise _fail(exc) from exc
+    return await _detail(rt, store, body.into)
+
+
+@router.post("/identities/sightings/{sighting}/move")
+async def move_sighting(
+    sighting: int,
+    body: MoveIn,
+    request: Request,
+    principal: Annotated[Principal, Depends(_WRITE)],
+) -> IdentityDetailOut:
+    """One sighting to another identity, a new one, or a known person (a new identity
+    promoted to them, which can be taken back on its page)."""
+    rt = _runtime(request)
+    store = _store(rt)
+    try:
+        if body.person is not None:
+            people = rt.people_store
+            if people is None:
+                raise IdentityError("known people are not available here")
+            person = await asyncio.to_thread(people.create, body.person)
+            target, _created = await asyncio.to_thread(store.move_sighting, sighting, None)
+            await asyncio.to_thread(promote, store, target, people, person.id)
+        else:
+            target, _created = await asyncio.to_thread(
+                store.move_sighting, sighting, body.into, name=body.name, status=body.status
+            )
+    except (IdentityError, StoreError) as exc:
+        raise _fail(exc) from exc
+    return await _detail(rt, store, target)
 
 
 @router.delete("/identities/{identity}", status_code=204)

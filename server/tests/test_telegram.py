@@ -614,11 +614,11 @@ async def test_this_is_one_of_us_confirms_the_face(tmp_path: Path) -> None:
                            people=report.model_dump(mode="json"), persons=2)  # fmt: skip
     [row] = await alert(b, event_id)
     buttons = b.fake.last("sendMessage").params["reply_markup"]["inline_keyboard"]
-    assert buttons[1][0]["text"] == "Это свой"
+    assert buttons[1][0]["text"] == "Кто это?"
 
-    await b.service.handle_update(callback(b, row, "own"))
+    await b.service.handle_update(callback(b, row, "own"))  # one face: straight to its menu
     picker = b.fake.last("editMessageText").params["reply_markup"]["inline_keyboard"]
-    assert picker[0][0]["text"] == "Sam" and picker[-1][0]["text"] == "← Назад"
+    assert picker[0][0]["text"] == "Свой: Sam" and picker[-1][0]["text"] == "← Назад"
     await b.service.handle_update(callback(b, row, "p:1:0", update_id=2))
     assert "свой (Sam)" in b.fake.last("editMessageText").params["text"]
     assert store.view(store.require("sam")).confirmed == 1

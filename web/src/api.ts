@@ -50,7 +50,8 @@ export type EventInfo = {
 /** One person seen in an event: faces grouped across frames. */
 export type SeenPerson = {
   n: number;
-  status: "known" | "unknown";
+  /** "unclear": a face followed through frames but never clear enough to compare. */
+  status: "known" | "unknown" | "unclear";
   person: string | null;
   name: string | null;
   score: number;
@@ -64,6 +65,12 @@ export type SeenPerson = {
   identity?: number | null;
   /** How often it had been seen when this event was checked. */
   identity_note?: string | null;
+  identity_name?: string | null;
+  identity_status?: IdentityStatus | null;
+  /** An unknown face's nearest enrolled person (a suggestion only). */
+  closest?: string | null;
+  /** Under 64 px or unclear: it may not be recognized next time. */
+  small?: boolean;
 };
 
 export type EventPeople = {
@@ -113,7 +120,7 @@ export type UploadResult = {
 
 export type ConfirmResult = { message: string; people: EventPeople };
 
-export type IdentityStatus = "unknown" | "suspicious" | "ignored" | "known";
+export type IdentityStatus = "unknown" | "suspicious" | "familiar" | "known";
 
 /** An anonymous identity: a face nobody enrolled, seen again (docs/people.md, ADR-0014). */
 export type Identity = {
@@ -129,9 +136,15 @@ export type Identity = {
   first_seen: number | null;
   last_seen: number | null;
   cameras: string[];
-  /** URL of the largest face crop. */
+  /** URL of the best face crop. */
   face: string | null;
+  /** Only unclear faces: joined by hand only. */
+  weak?: boolean;
+  /** Came close to someone enrolled: probably them. */
+  near_known?: boolean;
 };
+
+export type Duplicate = { a: number; b: number; score: number; weak: boolean };
 
 export type IdentitiesState = {
   enabled: boolean;
@@ -140,6 +153,7 @@ export type IdentitiesState = {
   retention_days: number;
   match: number;
   identities: Identity[];
+  duplicates: Duplicate[];
   warnings: string[];
 };
 
@@ -154,11 +168,14 @@ export type Sighting = {
   clip: string | null;
   /** The event this sighting belongs to, when there is one. */
   event: string | null;
+  manual?: boolean;
+  weak?: boolean;
+  near_known?: boolean;
 };
 
 export type IdentityDetail = Identity & {
   sightings_list: Sighting[];
-  similar: { id: number; label: string; score: number; face: string | null }[];
+  similar: { id: number; label: string; score: number; face: string | null; weak?: boolean }[];
 };
 
 export type UpstreamFacts = {
@@ -438,7 +455,7 @@ export const api = {
 
   async changeIdentity(
     id: number,
-    change: { name?: string; clear_name?: boolean; status?: "unknown" | "suspicious" | "ignored" },
+    change: { name?: string; clear_name?: boolean; status?: "unknown" | "suspicious" | "familiar" },
   ): Promise<IdentityDetail> {
     const response = await send(`${BASE}/identities/${id}`, {
       method: "PATCH",
@@ -461,6 +478,43 @@ export const api = {
     person: string,
   ): Promise<{ identity: Identity; person: string; faces_added: number }> {
     return postJson(`${BASE}/identities/${id}/promote`, { person });
+  },
+
+  mergeIdentities(identities: number[], into: number): Promise<IdentityDetail> {
+    return postJson<IdentityDetail>(`${BASE}/identities/merge`, { identities, into });
+  },
+
+  /** One sighting to another identity, a new one (`into` null), or a known person. */
+  moveSighting(
+    sighting: number,
+    target: { into?: number | null; name?: string; status?: "unknown" | "suspicious" | "familiar"; person?: string },
+  ): Promise<IdentityDetail> {
+    return postJson<IdentityDetail>(`${BASE}/identities/sightings/${sighting}/move`, target);
+  },
+
+  demoteIdentity(id: number): Promise<IdentityDetail> {
+    return postJson<IdentityDetail>(`${BASE}/identities/${id}/demote`, {});
+  },
+
+  /** Put face `n` of an event in an identity, or in a new one with a name and status. */
+  faceIdentity(
+    eventId: string,
+    n: number,
+    choice: { identity?: number; name?: string; status?: "unknown" | "familiar" | "suspicious" },
+  ): Promise<ConfirmResult> {
+    return postJson<ConfirmResult>(
+      `${BASE}/events/${encodeURIComponent(eventId)}/people/${n}/identity`,
+      choice,
+    );
+  },
+
+  /** Take the decision about face `n` of an event back. */
+  async undoFace(eventId: string, n: number): Promise<ConfirmResult> {
+    const response = await send(`${BASE}/events/${encodeURIComponent(eventId)}/people/${n}`, {
+      method: "DELETE",
+      headers: { accept: "application/json" },
+    });
+    return (await response.json()) as ConfirmResult;
   },
 
   async deleteIdentity(id: number): Promise<void> {

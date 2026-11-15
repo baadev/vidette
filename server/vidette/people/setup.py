@@ -63,6 +63,11 @@ def check_for(
     return PeopleCheck(
         store_for(config, root=root),
         engine_for(config, download=download, say=say),
-        CheckSettings(fps=config.frames_per_second, max_frames=config.max_frames),
+        CheckSettings(
+            fps=config.frames_per_second,
+            max_frames=config.max_frames,
+            extra_fps=config.extra_fps,
+            extra_frames=config.extra_frames,
+        ),
         identities,
     )

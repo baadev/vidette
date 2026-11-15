@@ -7,7 +7,10 @@ A test "photo" is plain text naming the faces in it, one token each:
 - `face:<identity>/<variant>` is a readable face. Its embedding is a fixed random
   direction for the identity plus noise for the variant, so two variants of one
   identity score about 0.75 and two identities about 0.
-- `small` is a face too small to tell; `side` one turned away.
+- `small` is a face too small to tell; `side` one turned away. Like the real engine,
+  they come with a crop and an embedding (`readable=False`); `small` faces sit in one
+  corner of the picture and `side` ones in another, so the check can follow them from
+  frame to frame by where they are.
 
 Crops are tiny text blobs (`crop:<identity>/<variant>`) that `embed_crop` reads back.
 Nothing here is an image of a person.
@@ -54,10 +57,24 @@ class FakeFaceEngine:
         out: list[DetectedFace] = []
         for index, token in enumerate(text.split()):
             box = (10 * index, 10, 80, 100)
-            if token == "small":
-                out.append(DetectedFace(box, 0.9, 20, readable=False, unclear_reason="too small"))
-            elif token == "side":
-                out.append(DetectedFace(box, 0.9, 90, readable=False, unclear_reason="turned away"))
+            if token in ("small", "side"):
+                small = token == "small"
+                corner = (
+                    (600 + 10 * index, 600, 20, 20) if small else (300 + 10 * index, 300, 80, 90)
+                )
+                out.append(
+                    DetectedFace(
+                        corner,
+                        0.9,
+                        20 if small else 90,
+                        readable=False,
+                        unclear_reason="too small" if small else "turned away",
+                        embedding=identity_vector(token, str(self.calls)),
+                        crop=f"crop:{token}/{self.calls}".encode(),
+                        sharpness=20.0,
+                        frontal=0.1 if not small else 0.4,
+                    )
+                )
             elif token.startswith("face:"):
                 identity, _, variant = token.removeprefix("face:").partition("/")
                 out.append(
@@ -68,6 +85,8 @@ class FakeFaceEngine:
                         readable=True,
                         embedding=identity_vector(identity, variant or "0"),
                         crop=f"crop:{identity}/{variant or '0'}".encode(),
+                        sharpness=200.0,
+                        frontal=0.45,
                     )
                 )
             elif token == "nothing":

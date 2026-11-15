@@ -15,6 +15,12 @@ quality verdict before anyone compares it with a person:
 YuNet is trained on faces of about 10 to 300 px, so each frame is searched at full size
 and, when it is large, at half size too (a face filling the lens at arm's length); the
 two sets of boxes are merged.
+
+Every face also gets the signals that choose the best moment of a person in a clip
+(ADR-0016): how frontal it is, SFace's feature norm, and the sharpness of its aligned
+crop (variance of the Laplacian). Unclear faces get a crop and an embedding too, marked
+by `readable=False`: the crop is something a person can look at and the embedding a hint
+for suggesting merges, never a match.
 """
 
 from __future__ import annotations
@@ -54,8 +60,24 @@ class DetectedFace:
     face_px: int  # face height in the image as given
     readable: bool
     unclear_reason: str | None = None  # "too small", "turned away", "uncertain"
-    embedding: Vector | None = None  # readable faces only
-    crop: bytes | None = None  # aligned 112×112 JPEG, readable faces only
+    embedding: Vector | None = None  # readable faces; unclear ones too (a hint, never a match)
+    crop: bytes | None = None  # aligned 112×112 JPEG
+    frontal: float = 0.0  # eye distance / face width (about 0.45 for a face looking ahead)
+    quality: float = 0.0  # SFace's raw feature norm
+    sharpness: float = 0.0  # variance of the Laplacian of the aligned crop, grey levels²
+
+
+SHARP_REF = 150.0  # a crop this sharp or sharper counts as fully sharp in `moment_score`
+
+
+def moment_score(face: DetectedFace) -> float:
+    """How good this face is as *the* picture of a person, 0 to about 1: detector
+    confidence × sharpness × size × frontalness. Readable faces always rank above unclear
+    ones (+1). Used to pick the crop, the embedding and the preview of a person."""
+    sharp = min(1.0, face.sharpness / SHARP_REF)
+    size = min(1.0, face.face_px / 112)
+    frontal = min(1.0, face.frontal / 0.45)
+    return face.score * sharp * size * frontal + (1.0 if face.readable else 0.0)
 
 
 class FaceEngine(Protocol):
@@ -175,6 +197,11 @@ class OpenCvFaceEngine:
                 face_px = round(box_h / scale)
                 eye = math.hypot(float(row[4]) - float(row[6]), float(row[5]) - float(row[7]))
                 frontal = eye / float(row[2]) if float(row[2]) > 0 else 0.0
+                aligned = self._recognizer.alignCrop(picture, row)
+                feature = self._recognizer.feature(aligned)
+                quality = float(self._np.linalg.norm(feature))
+                grey = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
+                sharpness = float(cv2.Laplacian(grey, cv2.CV_64F).var())
                 reason = None
                 if face_px < limits.min_face_px:
                     reason = "too small"
@@ -182,41 +209,21 @@ class OpenCvFaceEngine:
                     reason = "uncertain"
                 elif frontal < limits.min_frontal:
                     reason = "turned away"
-                if reason is not None:
-                    out.append(
-                        DetectedFace(
-                            box=box,
-                            score=score,
-                            face_px=face_px,
-                            readable=False,
-                            unclear_reason=reason,
-                        )
-                    )
-                    continue
-                aligned = self._recognizer.alignCrop(picture, row)
-                feature = self._recognizer.feature(aligned)
-                quality = float(self._np.linalg.norm(feature))
-                if quality < limits.min_quality:
-                    out.append(
-                        DetectedFace(
-                            box=box,
-                            score=score,
-                            face_px=face_px,
-                            readable=False,
-                            unclear_reason="low quality",
-                        )
-                    )
-                    continue
+                elif quality < limits.min_quality:
+                    reason = "low quality"
                 ok, encoded = cv2.imencode(".jpg", aligned, [cv2.IMWRITE_JPEG_QUALITY, 95])
-
                 out.append(
                     DetectedFace(
                         box=box,
                         score=score,
                         face_px=face_px,
-                        readable=True,
+                        readable=reason is None,
+                        unclear_reason=reason,
                         embedding=normalize(float(v) for v in feature.flatten()),
                         crop=bytes(encoded.tobytes()) if ok else None,
+                        frontal=round(frontal, 3),
+                        quality=round(quality, 2),
+                        sharpness=round(sharpness, 1),
                     )
                 )
         return out

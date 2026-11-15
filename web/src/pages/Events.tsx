@@ -3,9 +3,11 @@ import {
   UNAUTHORIZED_EVENT,
   api,
   wsUrl,
+  type ConfirmResult,
   type EventGeometry,
   type EventInfo,
   type EventPeople,
+  type Identity,
   type SeenPerson,
 } from "../api";
 import "./pages.css";
@@ -68,10 +70,27 @@ function geometryBadges(geometry: EventGeometry): string[] {
 
 type Enrolled = { id: string; name: string };
 
-function answerLabel(answer: string, enrolled: Enrolled[]): string {
-  if (answer === "stranger") return "a stranger";
+const STATUS_WORD: Record<string, string> = {
+  familiar: "familiar",
+  suspicious: "suspicious",
+  known: "known",
+};
+
+function identityLabel(seen: SeenPerson): string | null {
+  if (!seen.identity) return null;
+  const name = seen.identity_name ? `${seen.identity_name} · ` : "";
+  return `${name}#${seen.identity}`;
+}
+
+function answerLabel(seen: SeenPerson, enrolled: Enrolled[]): string {
+  const answer = seen.confirmed ?? "";
+  if (answer === "stranger") return seen.identity ? `a stranger (#${seen.identity})` : "a stranger";
   if (answer === "unsure") return "not sure";
-  return enrolled.find((person) => person.id === answer)?.name ?? answer;
+  if (answer.startsWith("identity:")) {
+    const status = seen.identity_status ? STATUS_WORD[seen.identity_status] : undefined;
+    return `${identityLabel(seen) ?? answer}${status ? ` (${status})` : ""}`;
+  }
+  return `this is ${enrolled.find((person) => person.id === answer)?.name ?? answer}`;
 }
 
 type FaceRowProps = {
@@ -81,32 +100,56 @@ type FaceRowProps = {
   onChanged: (people: EventPeople) => void;
 };
 
+type Naming = null | "familiar" | "unknown";
+
 /**
- * One face seen in an event: its crop, who it matched, and the answers that teach the
- * matcher. "This is Sam" adds the crop to Sam's references; "Stranger" after a wrong
- * match makes that person's match stricter; "Not sure" only records the answer.
+ * One face seen in an event: its crop, who it matched, and every answer about it. Each
+ * answer can be changed or taken back (ADR-0016): "This is Sam" adds the crop to Sam's
+ * references, "Stranger" keeps it as an anonymous identity, "Familiar…" names it as a
+ * neighbour who should not wake anyone, "Add to…" puts it in an existing identity.
  */
 function FaceRow({ eventId, seen, enrolled, onChanged }: FaceRowProps) {
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(!seen.confirmed);
+  const [naming, setNaming] = useState<Naming>(null);
+  const [name, setName] = useState("");
+  const [choices, setChoices] = useState<Identity[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const answer = async (value: string) => {
+  const run = async (action: () => Promise<ConfirmResult>) => {
     setBusy(true);
     setError(null);
     try {
-      const result = await api.confirmEventFace(eventId, seen.n, value);
+      const result = await action();
       setMessage(result.message);
       onChanged(result.people);
+      setOpen(false);
+      setNaming(null);
+      setName("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
   };
+  const answer = (value: string) => run(() => api.confirmEventFace(eventId, seen.n, value));
+  const toIdentity = (choice: { identity?: number; name?: string; status?: "unknown" | "familiar" }) =>
+    run(() => api.faceIdentity(eventId, seen.n, choice));
+  const loadChoices = () => {
+    if (choices !== null) return;
+    api
+      .identities()
+      .then((state) => setChoices(state.identities.filter((identity) => identity.status !== "known")))
+      .catch(() => setChoices([]));
+  };
 
-  const label =
-    seen.status === "known" ? `${seen.name ?? seen.person} ${seen.score.toFixed(2)}` : "Unknown face";
+  let label: string;
+  if (seen.status === "known") label = `${seen.name ?? seen.person} ${seen.score.toFixed(2)}`;
+  else if (seen.identity) label = seen.identity_name ?? `Stranger #${seen.identity}`;
+  else label = seen.status === "unclear" ? "Small face" : "Unknown face";
+  const disposition = seen.identity_status && STATUS_WORD[seen.identity_status];
+  const closest = seen.closest ? enrolled.find((person) => person.id === seen.closest) : undefined;
   return (
     <li className="face-row">
       {seen.crop ? (
@@ -116,36 +159,119 @@ function FaceRow({ eventId, seen, enrolled, onChanged }: FaceRowProps) {
       )}
       <div className="face-info">
         <span className={`face-label${seen.status === "known" ? " face-known" : ""}`}>
-          {seen.identity ? <a href={`#/identities/${seen.identity}`}>Stranger #{seen.identity}</a> : label}
+          {seen.identity ? <a href={`#/identities/${seen.identity}`}>{label}</a> : label}
+          {seen.identity && seen.identity_name ? <span className="muted"> #{seen.identity}</span> : null}
+          {disposition && seen.identity_status !== "known" ? (
+            <span className={`id-status id-status-${seen.identity_status}`}>{disposition}</span>
+          ) : null}
         </span>
         <span className="muted face-meta">
           {seen.faces} frame{seen.faces === 1 ? "" : "s"} · {seen.face_px}px
           {seen.identity_note ? ` · ${seen.identity_note}` : ""}
         </span>
-        {seen.confirmed ? (
-          <span className="face-confirmed">✓ {answerLabel(seen.confirmed, enrolled)}</span>
-        ) : (
-          enrolled.length > 0 && (
-            <div className="face-answers" role="group" aria-label="Who is this?">
-              {enrolled.map((person) => (
-                <button
-                  key={person.id}
-                  type="button"
-                  className={`ghost${seen.person === person.id ? " face-suggested" : ""}`}
-                  disabled={busy}
-                  onClick={() => void answer(person.id)}
-                >
-                  This is {person.name}
-                </button>
+        {seen.small && (
+          <span className="muted face-meta face-small">
+            Small face: it may not be recognized next time.
+          </span>
+        )}
+        {seen.confirmed && (
+          <span className="face-decided">
+            <span className="face-confirmed">✓ {answerLabel(seen, enrolled)}</span>
+            <button type="button" className="ghost" disabled={busy} onClick={() => setOpen((on) => !on)}>
+              {open ? "Close" : "Change"}
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              disabled={busy}
+              onClick={() => void run(() => api.undoFace(eventId, seen.n))}
+            >
+              Undo
+            </button>
+          </span>
+        )}
+        {open && (
+          <div className="face-answers" role="group" aria-label="Who is this?">
+            {enrolled.map((person) => (
+              <button
+                key={person.id}
+                type="button"
+                className={`ghost${seen.person === person.id || closest?.id === person.id ? " face-suggested" : ""}`}
+                disabled={busy}
+                onClick={() => void answer(person.id)}
+              >
+                This is {person.name}
+              </button>
+            ))}
+            <button type="button" className="ghost" disabled={busy} onClick={() => void answer("stranger")}>
+              Stranger
+            </button>
+            <button type="button" className="ghost" disabled={busy} onClick={() => void answer("unsure")}>
+              Not sure
+            </button>
+            <button
+              type="button"
+              className={`ghost${naming === "familiar" ? " face-suggested" : ""}`}
+              disabled={busy}
+              onClick={() => setNaming(naming === "familiar" ? null : "familiar")}
+            >
+              Familiar…
+            </button>
+            <button
+              type="button"
+              className={`ghost${naming === "unknown" ? " face-suggested" : ""}`}
+              disabled={busy}
+              onClick={() => setNaming(naming === "unknown" ? null : "unknown")}
+            >
+              New identity…
+            </button>
+            <select
+              className="face-pick"
+              aria-label="Add to an identity"
+              disabled={busy}
+              value=""
+              onFocus={loadChoices}
+              onPointerDown={loadChoices}
+              onChange={(event) => {
+                const id = Number(event.target.value);
+                if (id) void toIdentity({ identity: id });
+              }}
+            >
+              <option value="">Add to…</option>
+              {(choices ?? []).map((identity) => (
+                <option key={identity.id} value={identity.id}>
+                  {identity.label}
+                  {identity.status !== "unknown" ? ` (${identity.status})` : ""} · ×{identity.sightings}
+                </option>
               ))}
-              <button type="button" className="ghost" disabled={busy} onClick={() => void answer("stranger")}>
-                Stranger
-              </button>
-              <button type="button" className="ghost" disabled={busy} onClick={() => void answer("unsure")}>
-                Not sure
-              </button>
-            </div>
-          )
+            </select>
+          </div>
+        )}
+        {open && naming && (
+          <form
+            className="face-name"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void toIdentity({ name: name.trim() || undefined, status: naming });
+            }}
+          >
+            <input
+              value={name}
+              maxLength={40}
+              autoFocus
+              placeholder={naming === "familiar" ? "Who is it? e.g. Neighbour" : "Name (optional)"}
+              aria-label="Name"
+              onChange={(event) => setName(event.target.value)}
+            />
+            <button type="submit" className="primary" disabled={busy || (naming === "familiar" && !name.trim())}>
+              {naming === "familiar" ? "Save familiar" : "Create"}
+            </button>
+            {naming === "familiar" && (
+              <span className="muted face-meta">
+                Familiar people do not wake anyone, like the household; critical events still do.
+              </span>
+            )}
+          </form>
         )}
         {message && <span className="muted face-meta">{message}</span>}
         {error && <span className="error face-meta">{error}</span>}
@@ -252,10 +378,9 @@ function EventCard({
           )}
           {event.people && event.people.seen.length === 0 && event.people.frames_checked > 0 && (
             <p className="event-summary muted">
-              Faces: none clear enough to tell
               {event.people.unclear_frames > 0
-                ? ` (${event.people.unclear_frames} frame${event.people.unclear_frames === 1 ? "" : "s"} with a small or unclear face)`
-                : ""}
+                ? `No face to link: ${event.people.unclear_frames} frame${event.people.unclear_frames === 1 ? "" : "s"} with a face too small or brief to follow`
+                : "No face found: nobody can be linked to an identity from this clip"}
             </p>
           )}
           {event.summary && <p className="event-summary">{event.summary}</p>}

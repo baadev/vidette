@@ -11,7 +11,8 @@ The anonymous identities (`vidette.people.identities`) reach a decision two ways
    face was seen `sightings` times within `within`, or on `cameras` cameras within
    `cameras_within`, a verdict that named a scenario of a lower level is raised to
    `raise_to`. An identity someone marked suspicious raises on every sighting
-   (`suspicious: true`); one marked ignored or promoted to a known person never does.
+   (`suspicious: true`); one marked familiar or promoted to a known person never does,
+   nor one whose face came close to someone enrolled (probably them; ADR-0016).
 
 The rule is a nudge with a ceiling, not a verdict: it never turns `other` or an
 abstention into an alert, never lowers a level, and the scenario the judge named stays
@@ -33,10 +34,12 @@ from vidette.verdicts.base import Case, Judge, PolicyText, Verdict
 
 def rule_met(rule: RecurrenceConfig, brief: IdentityBrief) -> str | None:
     """Why this identity meets the rule, in a few words; None when it does not."""
-    if brief.status in ("ignored", "known"):
+    if brief.status in ("familiar", "known"):
         return None
     if brief.status == "suspicious" and rule.suspicious:
         return "marked suspicious"
+    if brief.near_known:
+        return None  # probably someone enrolled on a bad frame: never raises by itself
     seen = len(brief.within(rule.within_s))
     if seen >= rule.sightings:
         return f"{seen} sightings within {rule.within}"

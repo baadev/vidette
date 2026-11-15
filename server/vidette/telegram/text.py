@@ -47,24 +47,35 @@ def plural(count: int, one: str, few: str, many: str) -> str:
     return f"{count} {word}"
 
 
-def stranger_phrase(
-    raw: object, *, names: bool, camera_name: Callable[[str], str] | None = None
-) -> str:
-    """One unknown face: «незнакомец» or, when it belongs to an anonymous identity
-    (ADR-0014), «незнакомец №12, 3-й раз за сегодня (Улица, Двор за час)». A name someone
-    gave the identity is shown only with `names`."""
+def _brief(raw: object) -> IdentityBrief | None:
     try:
-        brief = IdentityBrief.model_validate(raw)
+        return IdentityBrief.model_validate(raw)
     except ValidationError:
-        return "незнакомец"
+        return None
+
+
+def stranger_phrase(
+    raw: object,
+    *,
+    names: bool,
+    camera_name: Callable[[str], str] | None = None,
+    small: bool = False,
+) -> str:
+    """One face that is not enrolled: «незнакомец» or, when it belongs to an anonymous
+    identity (ADR-0014), «незнакомец №12, 3-й раз за сегодня (Улица, Двор за час)». A
+    name someone gave the identity is shown only with `names`; `small`: a face too small
+    to compare («лицо мелкое»)."""
+    brief = _brief(raw)
+    if brief is None:
+        return "лицо мелкое" if small else "незнакомец"
     if names and brief.name:
         who = f"{escape(brief.name)} (№{brief.id})"
     elif brief.status == "suspicious":
         who = f"⚠️ подозрительный №{brief.id}"
     else:
         who = f"незнакомец №{brief.id}"
-    if brief.status == "ignored":
-        return f"{who} (не важен)"
+    if small:
+        who += " (лицо мелкое)"
     today = brief.today()
     if brief.sightings <= 1:
         count = "впервые"
@@ -79,6 +90,11 @@ def stranger_phrase(
     return f"{who}, {count}"
 
 
+def _familiar(person: Mapping[str, Any]) -> bool:
+    brief = _brief(person.get("identity"))
+    return brief is not None and brief.status == "familiar"
+
+
 def who_line(
     people: Mapping[str, Any] | None,
     persons: int | None,
@@ -86,15 +102,17 @@ def who_line(
     names: bool,
     camera_name: Callable[[str], str] | None = None,
 ) -> str:
-    """«свой: Имя» / «незнакомец №12, 3-й раз за сегодня» / «лицо не видно», from the
-    event's face report."""
+    """«свой: Имя» / «знакомый: Соседка» / «незнакомец №12, 3-й раз за сегодня» /
+    «лицо не найдено», from the event's face report."""
     if people is None or "seen" not in people:
         if persons == 0:
             return "людей не видно"
         return "лица не проверялись"
     seen = [p for p in people.get("seen") or [] if isinstance(p, Mapping)]
     known = [p for p in seen if p.get("status") == "known"]
-    unknown = [p for p in seen if p.get("status") == "unknown"]
+    familiar = [p for p in seen if p.get("status") != "known" and _familiar(p)]
+    unknown = [p for p in seen if p.get("status") == "unknown" and not _familiar(p)]
+    unclear = [p for p in seen if p.get("status") == "unclear" and not _familiar(p)]
     parts: list[str] = []
     if known:
         if names:
@@ -102,22 +120,29 @@ def who_line(
             parts.append(f"свой: {listed}")
         else:
             parts.append("свои" if len(known) > 1 else "свой")
-    if unknown:
-        phrases = [
-            stranger_phrase(p.get("identity"), names=names, camera_name=camera_name)
-            for p in unknown
-        ]
-        if len(unknown) == 1:
-            parts.append(phrases[0])
-        elif all(phrase == "незнакомец" for phrase in phrases):
-            parts.append(f"незнакомцы: {len(unknown)}")
+    if familiar:
+        named = [b.name for p in familiar if (b := _brief(p.get("identity"))) and b.name]
+        if names and named:
+            parts.append(f"знакомый: {escape(', '.join(named))}")
         else:
-            parts.append(f"незнакомцы: {len(unknown)} ({'; '.join(phrases)})")
+            parts.append("знакомые" if len(familiar) > 1 else "знакомый")
+    others = [(p, False) for p in unknown] + [(p, True) for p in unclear]
+    if others:
+        phrases = [
+            stranger_phrase(p.get("identity"), names=names, camera_name=camera_name, small=small)
+            for p, small in others
+        ]
+        if len(others) == 1:
+            parts.append(phrases[0])
+        elif all(phrase in ("незнакомец", "лицо мелкое") for phrase in phrases):
+            parts.append(f"незнакомцы: {len(others)}")
+        else:
+            parts.append(f"незнакомцы: {len(others)} ({'; '.join(phrases)})")
     if parts:
         return " и ".join(parts)
     if persons == 0:
         return "людей не видно"
-    return "лицо не видно"
+    return "лицо не найдено"
 
 
 @dataclass(frozen=True)
@@ -230,9 +255,11 @@ def latency_text(timeline: Mapping[str, Any], *, sent_at: float | None) -> str |
         previous_key = key
     start = stamps.get("person_seen") or stamps.get("first_frame")
     if start is not None and "sent" in stamps:
-        lines.append(f"От человека в кадре до тревоги: {span(stamps['sent'] - start)}"
-                     if "person_seen" in stamps
-                     else f"От первого кадра до тревоги: {span(stamps['sent'] - start)}")
+        lines.append(
+            f"От человека в кадре до тревоги: {span(stamps['sent'] - start)}"
+            if "person_seen" in stamps
+            else f"От первого кадра до тревоги: {span(stamps['sent'] - start)}"
+        )
     return "\n".join(lines)
 
 
@@ -268,6 +295,31 @@ def mark_line(answer: Answer, *, person: str | None = None, problem: str | None 
     if problem:
         line += f"\n<i>метка в датасет не записана: {escape(problem)}</i>"
     return line
+
+
+def face_mark_line(seen: Mapping[str, Any] | None, *, names: bool) -> str:
+    """What was decided about one face (ADR-0016): «✅ Отмечено: знакомый «Соседка»
+    (№5)», «✅ Отмечено: чужой (№12)», or that the decision was taken back."""
+    if seen is None or not seen.get("confirmed"):
+        return "↩️ Решение по лицу отменено"
+    brief = _brief(seen.get("identity"))
+    number = f" (№{brief.id})" if brief is not None else ""
+    name = brief.name if brief is not None and brief.name and names else None
+    confirmed = str(seen.get("confirmed"))
+    if confirmed == "stranger":
+        word = f"чужой{number}"
+    elif confirmed == "unsure":
+        word = "не знаю"
+    elif confirmed.startswith("identity:") and brief is not None:
+        if brief.status == "familiar":
+            word = f"знакомый «{escape(name)}»{number}" if name else f"знакомый{number}"
+        elif brief.status == "suspicious":
+            word = f"подозрительный{number}"
+        else:
+            word = f"личность №{brief.id}" + (f" «{escape(name)}»" if name else "")
+    else:
+        word = "свой"
+    return f"✅ Отмечено: {word}"
 
 
 def truncate(text: str, limit: int = MAX_TEXT) -> str:
