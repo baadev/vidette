@@ -730,6 +730,25 @@ class IdentityStore:
             ).fetchall()
         return [self._sighting_row(r) for r in rows]
 
+    def same_face(self, source: str, source_id: str, embedding: Vector, floor: float) -> int | None:
+        """The sighting this clip already gave for this face (an event checked before
+        it was tracked, then backfilled): the one whose faces are closest, at `floor` or
+        above."""
+        if not self.db_path.exists():
+            return None
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT r.sighting, r.embedding FROM refs r JOIN sightings s ON s.id = r.sighting"
+                " WHERE s.source = ? AND s.source_id = ?",
+                (source, source_id),
+            ).fetchall()
+        best: tuple[float, int] | None = None
+        for row in rows:
+            score = cosine(embedding, _unpack(row["embedding"]))
+            if score >= floor and (best is None or score > best[0]):
+                best = (score, int(row["sighting"]))
+        return None if best is None else best[1]
+
     def sighting_crop(self, sighting: int) -> Path | None:
         with self._connect() as conn:
             row = conn.execute("SELECT crop FROM sightings WHERE id = ?", (sighting,)).fetchone()

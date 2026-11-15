@@ -951,3 +951,22 @@ def test_a_store_from_before_familiar_existed_is_migrated(tmp_path: Path) -> Non
     assert row.status == "familiar" and row.name == "Postman"
     with sqlite3.connect(root / module.DB_FILE) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == module.SCHEMA_VERSION
+
+
+def test_a_face_checked_before_it_was_tracked_reuses_the_backfilled_sighting(
+    tmp_path: Path,
+) -> None:
+    from vidette.people.decisions import IdentityChoice, decide, undo
+
+    people, ids, media, ctx = decision_setup(tmp_path)
+    ids.assign([face("dave", "1")], at(0, clip="ev"))  # what the backfill gave the clip
+    report = build_report(
+        [frame("face:dave/1")], people.gallery(), engine="fake", threshold=0.4,
+        crops=crop_writer(media, "faces/ev"),
+    )  # fmt: skip
+    assert report.seen[0].identity is None  # the event was checked before tracking
+    done = decide(report, 1, IdentityChoice(name="Anna", status="familiar"), ctx)
+    assert "moved to #2" in done.message and ids.sightings(1) == []
+    assert ids.stats()["sightings"] == 1  # no second sighting of the same face
+    undo(report, 1, ctx)
+    assert len(ids.sightings(1)) == 1 and ids.get(2) is None

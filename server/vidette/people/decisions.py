@@ -43,6 +43,7 @@ IDENTITY = "identity:"
 # Faces of 64 px and more matched the same person at a median 0.59 on a test deployment
 # (ADR-0014); smaller ones often fall below the 0.5 an identity needs.
 RELIABLE_FACE_PX = 64
+SAME_CLIP_FACE = 0.45  # a face this close to a sighting of the same clip is that sighting
 SMALL_NOTE = (
     "a small face ({px} px): it may not be recognized next time; a clearer face of the same "
     "person, added the same way, helps"
@@ -181,6 +182,12 @@ def _to_identity(
     """Put the face's sighting in the chosen identity; (identity, message)."""
     ids, where = _identities(ctx)
     current = seen.identity.sighting if seen.identity is not None else None
+    crop: bytes | None = None
+    embedding = None
+    if current is None:  # checked before it was tracked: the backfill may have it already
+        crop = _crop(seen, n, ctx)
+        embedding = _engine(ctx).embed_crop(crop)
+        current = ids.same_face(where.source, where.source_id, embedding, SAME_CLIP_FACE)
     if current is not None and ids.sighting(current) is not None:
         previous = ids.sighting(current)
         assert previous is not None
@@ -195,8 +202,8 @@ def _to_identity(
         )  # fmt: skip
         _refresh_identity(seen, ctx, identity, current)
         return identity, f"moved to #{identity}"
-    crop = _crop(seen, n, ctx)
-    embedding = _engine(ctx).embed_crop(crop)
+    crop = crop if crop is not None else _crop(seen, n, ctx)
+    embedding = embedding if embedding is not None else _engine(ctx).embed_crop(crop)
     weak = seen.status == "unclear" or seen.face_px < ids.settings.min_face_px
     small = weak or seen.face_px < RELIABLE_FACE_PX
     identity, sighting, created = ids.add_manual(
