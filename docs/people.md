@@ -137,11 +137,12 @@ and keeps the report with the event.
 
 A person who walks past once and a person who walks past four times in an afternoon,
 stops at the gate and later shows up in the yard look the same to the judge, clip by
-clip. With `track_unknown`, an unknown face that is big and clear enough is compared with
-the faces seen before, and becomes an anonymous identity: "stranger #12", seen 3 times
-today, on two cameras. Nobody is named; you may give an identity a name, mark it, merge
-or split it, or say it is someone you know. Design and guardrails:
-[ADR-0014](architecture/adr/0014-anonymous-identities.md).
+clip. With `track_unknown`, everyone whose face the check finds and who is not enrolled
+gets an anonymous identity: "stranger #12", seen 3 times today, on two cameras. Nobody
+is named; you may give an identity a name, mark it familiar or suspicious, merge or split
+it, or say it is someone you know, and take any of that back. Design and guardrails:
+[ADR-0014](architecture/adr/0014-anonymous-identities.md),
+[ADR-0016](architecture/adr/0016-every-face-reversible-decisions.md).
 
 Status: 🚧 built and tested with a fake engine; backfilled over real
 clips. No accuracy figure: there is no labelled identity set yet.
@@ -157,9 +158,11 @@ people:
     dir: ~/vidette-data/identities # default $VIDETTE_DATA/identities; never in a git tree
     match: 0.5                     # SFace cosine for a face to join an identity
     margin: 0.06                   # ...and no other identity this close to it
-    min_face_px: 64                # smaller faces never start or join an identity
-    near_known: 0.3                # this close to someone enrolled: probably them, skipped
+    min_face_px: 40                # readable faces smaller than this start a weak identity
+    near_known: 0.3                # this close to someone enrolled: marked, never raises
     retention_days: 30             # unnamed, unflagged identities go after this long
+  extra_fps: 6                     # a second look around every face, for its best moment
+  extra_frames: 24                 # at most this many more frames a clip (0: off)
 
 policies:
   - name: home
@@ -174,22 +177,56 @@ policies:
 
 ### How a face becomes an identity
 
-- Only faces the check already calls readable count, and of those only faces at least
-  `min_face_px` tall (64 px; the check's own floor is 40). A 20 px face at the gate never
-  starts an identity.
-- Known people come first: a face that matched someone enrolled is theirs, and an unknown
-  face within `near_known` (0.30) of someone enrolled is left alone.
-- A sighting (the faces of one person in one clip) joins the identity it resembles at
-  `match` (0.50) or above, when no other identity is within `margin` (0.06); close to two
-  identities, it joins neither. Otherwise it starts a new identity.
+- Wherever the check finds a face, it looks at the clip again around it (6 frames a
+  second, at most 24 more frames) and keeps the best moment of each person: detector
+  confidence × sharpness × size × frontalness. That moment is the crop you see, the crop
+  and the embedding an identity keeps. On ten real clips with faces this found 142
+  readable faces instead of 40, and the kept crop got sharper in 8 of 10.
+- Known people come first: a face that matched someone enrolled is theirs.
+- A readable face (40 px and more, clear and frontal enough) joins the identity it
+  resembles at `match` (0.50) or above, when no other identity is within `margin` (0.06);
+  close to two identities, it joins neither. Otherwise it starts a new identity. A face
+  within `near_known` (0.30) of someone enrolled gets one too, marked "close to someone
+  enrolled": it never raises a level, and the card offers that person first.
+- A face too small or blurred to compare is followed from frame to frame by where it is
+  and starts a **weak** identity (marked "small face"): nothing joins it automatically;
+  you merge it by hand. A person whose face was never found gets no identity, and the
+  card says "No face found".
 - The thresholds are strict on purpose. Two strangers in one identity invent visits that
   never happened; one person split in two only undercounts, and a merge fixes it. On the
   real clips the same person scored 0.56 to 0.66 with faces of 90 px and more, two
   different people at most 0.29; small faces score lower, so a person seen only from
-  afar mostly gets a new number each time.
+  afar mostly gets a new number each time. Expect duplicates; the Identities view
+  suggests them.
 - Nothing about how anyone looks is used: no age, gender, skin colour or clothing, not in
   matching, not in the judge's facts, not in rules. Only the face embedding, the time and
   the camera.
+
+### Change your mind
+
+Every answer about a face can be changed or taken back, on the event card (**Change**,
+**Undo**) and in Telegram (**Отменить решение**): the answer remembers what it changed (a
+reference added to Sam, a raised threshold, a sighting added or moved, an identity
+promoted) and takes back exactly that.
+
+| Answer | What happens |
+|---|---|
+| This is Sam | the face becomes one of Sam's references; its identity, if any, becomes Sam |
+| Stranger | the face is kept as an identity (a new one if it had none) |
+| Not sure | recorded only |
+| Familiar… | a new identity with the name you type, marked familiar |
+| New identity… | a new identity, a name optional |
+| Add to… | into an identity you pick |
+
+A face of any size can be put in an identity by hand; one under 64 px says it may not
+be recognized next time, because small faces rarely match even the same person.
+
+**Familiar** («знакомый, не тревожить») is for people who are neither household nor
+strangers: a neighbour, the postman. For alerts they count like the household: an event
+where everyone recognized is household or familiar goes to the digest at an
+`unless_known` level, a `known_people: quiet` policy tells the judge they need no alert,
+and they never raise a level by recurrence. The critical list (`wake: always`) still
+wakes, exactly as for the household.
 
 ### What the judge and the bot hear
 
@@ -207,25 +244,32 @@ A cloud judge hears the same counts and camera names, never a crop, an embedding
 name you gave. A policy's `recurrence` rule raises a verdict that named a scenario of a
 lower level (a `passer_by` at a `never` level, say) to `raise_to` when the same identity
 was seen `sightings` times within `within`, or on `cameras` cameras within
-`cameras_within`. An identity you marked suspicious raises on any sighting; ignored and
-known ones never do. `other`, an abstention and anything already at or above `raise_to`
+`cameras_within`. An identity you marked suspicious raises on any sighting; familiar and
+known ones never do, nor one close to someone enrolled. `other`, an abstention and anything already at or above `raise_to`
 stay as the judge said; nothing is lowered. `vidette eval` does not apply the rule.
 
 The Telegram alert says who: `👤 незнакомец №12, 3-й раз за сегодня (Улица, Двор за час)`,
-and `· уровень поднят: приходит не первый раз` when the rule raised it. **Это свой** on
-such an alert makes the whole identity that person: its best faces from every sighting
-become their references. Identity crops are never sent to Telegram or anywhere else.
+`знакомый: Соседка`, `незнакомец №40 (лицо мелкое)`, `лицо не найдено`, and `· уровень
+поднят: приходит не первый раз` when the rule raised it. **Кто это?** under the alert
+opens a menu per face: **Свой: …** (an enrolled person: the whole identity becomes them),
+**Знакомый: …** (a familiar identity), **Новый знакомый…** and **Новая личность…** (the bot
+asks for a name: reply to its message), **Чужой**, **Отменить решение**. Identity crops
+are never sent to Telegram or anywhere else.
 
 ### The Identities view
 
-People → **Identities** in the web app lists every identity with its largest face, how
-many times and on how many days it was seen, when last and on which cameras; a filter by
-status (suspicious, unknown, ignored, known). An identity's page shows every sighting
-with its face and its clip, and identities that look alike. From there: a name (only you
-and a local judge see it), **Mark suspicious**, **Ignore** (a neighbour, the postman),
-**Merge into this**, **Split…** (select the sightings that are someone else), **Known**
-(an enrolled person or a new one), **Delete identity**. Reading needs `read:config`,
-changes `write:config`, like the People page.
+People → **Identities** in the web app lists every identity with its best face, how many
+times and on how many days it was seen, when last and on which cameras; a filter by
+status (suspicious, unknown, familiar, known). **Maybe the same person** shows pairs
+whose faces are alike enough to ask (0.35 and more, small faces marked) with **Same
+person** to merge them in one tap; **Select…** merges several at once into the one seen
+most. An identity's page shows every sighting with its face and its clip, and identities
+that look alike. From there: a name (only you and a local judge see it), **Familiar:
+don't alert**, **Mark suspicious**, **Same person** (merge), **Split…** (select the
+sightings that are someone else), **Move to…** on one sighting (another identity, a new
+one, or a known person), **Known** (an enrolled person or a new one; **Not … : take
+back** undoes it), **Delete identity**. Reading needs `read:config`, changes
+`write:config`, like the People page.
 
 ### Fill it from the clips you have
 
@@ -261,7 +305,7 @@ started one or neither (too small, close to someone enrolled, close to two ident
   nothing is sent anywhere. A cloud judge gets counts and camera names only.
 - **Retention.** An identity nobody named or flagged is deleted 30 days
   (`retention_days`) after it was last seen, with all its crops and embeddings. Named,
-  suspicious, ignored and known identities stay until you delete them; deleting removes
+  suspicious, familiar and known identities stay until you delete them; deleting removes
   everything the identity holds (SQLite `secure_delete`, the log truncated). The folder
   can be wiped as a whole: `rm -r ~/vidette-data/identities`.
 - **Keep it out of backups you do not control**, like the people folder.
@@ -291,6 +335,7 @@ and angle match much better than selfies).
 | Storage | 39 MB of models; about 5 KB per face crop; a person with 60 faces and two photos is under 1 MB |
 | Latency | the check runs before the VLM call and adds 1 to 2 s to a verdict |
 | Identities (`track_unknown`) | matching in plain Python over at most 40 references per identity: about 20 to 35 ms per sighting (database write included) at a few hundred identities, measured on a busy Apple-silicon Mac; about 5 KB of crop and 1.5 KB of embeddings per sighting; a backfill costs one face check per clip (about 1.3 s) |
+| Second look (`extra_frames`) | for a clip with a face, about 23 more frames (232 over ten clips with faces): roughly as much again as the first pass, 1 to 2 s more before the judge; nothing for clips without a face |
 
 ## Privacy notes
 

@@ -22,11 +22,25 @@ images published from it.
   on several cameras within minutes, and on any sighting of an identity marked
   suspicious. Telegram: «незнакомец №12, 3-й раз за сегодня»; "Это свой" and "This is …"
   promote the identity to a known person. Web: People → Identities with every sighting
-  and its clip; rename, mark suspicious or ignored, merge, split, promote, delete. One
+  and its clip; rename, mark suspicious or familiar, merge, split, promote, delete. One
   SQLite file and one crop per sighting in `~/vidette-data/identities` (0700/0600,
   refused in a git tree, `secure_delete`), 30-day retention for unnamed, unflagged
   identities; `vidette people identities list | backfill | expire | delete`. No
   appearance attribute anywhere.
+- **Every face, its best moment, answers that can be taken back**
+  ([ADR-0016](docs/architecture/adr/0016-every-face-reversible-decisions.md)): with
+  `track_unknown`, everyone whose face is found gets an identity (readable faces from
+  40 px join or start one; faces too small to compare start a weak one, merged by hand;
+  a face close to someone enrolled gets one marked so, and never raises a level). A
+  second look around every face (6 frames a second, at most 24 more frames) keeps the
+  sharpest, most frontal moment as the crop and embedding: on ten clips with faces, 142
+  readable faces instead of 40 and a sharper crop in 8 of 10. Every answer about a face
+  records what it changed and can be changed or taken back (web: Change, Undo,
+  Familiar…, New identity…, Add to…; Telegram: «Кто это?» with Свой, Знакомый, Новый
+  знакомый…, Новая личность…, Чужой, Отменить решение, a name by reply). "Familiar"
+  (formerly "ignored") counts like the household for `unless_known` and `known_people:
+  quiet`; the critical list still wakes. Identities: likely duplicates with one-tap
+  merge, bulk merge, moving one sighting, taking a promotion back.
 - **Telegram bot** ([docs/telegram.md](docs/telegram.md),
   [ADR-0013](docs/architecture/adr/0013-telegram-bot.md)): `notifications.telegram` in
   `vidette serve`, long polling only (no webhook, no open port). An alert is an album of

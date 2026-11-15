@@ -139,7 +139,7 @@ language (the rest of the prompt stays English).
 👤 незнакомец
 💬 Человек в капюшоне дважды дёргает ручку двери.
 [👍 верно] [👎 ложная]
-[Это свой] [Не знаю]
+[Кто это?] [Не знаю]
 ```
 
 - Above the text, an album: up to `frames` key frames (4) and the clip when it is at most
@@ -156,9 +156,11 @@ face that matched nobody), `лицо не видно` (no readable face), `лю�
 judge counted nobody), `лица не проверялись` (known people are off). With anonymous
 identities ([people.md](people.md#strangers-who-come-back)): `незнакомец №12, 3-й раз за
 сегодня` (`впервые`, `4-й раз за 3 дня`; the cameras when two or more saw it within the
-hour), `⚠️ подозрительный №12` for one you marked, the name you gave it only with
-`names: true`, and `· уровень поднят: приходит не первый раз` when a policy's
-`recurrence` rule raised the level; no face crop of an identity is ever sent. A line
+hour), `⚠️ подозрительный №12` for one you marked, `знакомый: Соседка` for a familiar
+person (the name only with `names: true`), `незнакомец №40 (лицо мелкое)` for a face too
+small to compare, `лицо не найдено` when the judge saw someone whose face was never found,
+and `· уровень поднят: приходит не первый раз` when a policy's `recurrence` rule raised
+the level; no face crop of an identity is ever sent. A line
 `📼 Запись прерывалась: 38 пауз, до 13 с` says the video paused (the clip's
 [stream health](collect.md#stream-health)); the judge was told where.
 
@@ -195,7 +197,9 @@ own, the target is 20 to 30 s from the person appearing.
 | 👍 верно | feedback `up` | `N <the scenario the judge named>`, reviewed | |
 | 👎 ложная | feedback `down` | `N other` (none of the policy's scenarios), reviewed | |
 | Не знаю | | `N ?`: unlabelled, reviewed, not scored | |
-| Это свой → a name | | `N household_member`, unless the level wakes `always` | the face is confirmed as that person (`vidette people confirm`); a face of an anonymous identity promotes the whole identity |
+| Кто это? → Свой: a name | | `N household_member`, unless the level wakes `always` | the face is confirmed as that person (`vidette people confirm`); a face of an anonymous identity promotes the whole identity |
+| Кто это? → Знакомый: a name, Новый знакомый…, Новая личность…, Чужой | | | the face goes into that identity, a new familiar or unknown one (the bot asks for its name: reply to its message), or stays a stranger with an identity ([people.md](people.md#change-your-mind)) |
+| Кто это? → Отменить решение | | | the answer about that face is taken back, exactly |
 
 - The bot edits the alert ("✅ Отмечено: ложная") and keeps the buttons, so a wrong tap
   can be corrected; the last answer wins, as with `vidette label apply`.
@@ -204,9 +208,12 @@ own, the target is 20 to 30 s from the person appearing.
   the dataset's vocabulary if missing. `labels.yaml` is created from the starter template
   if the folder has none. Everything goes through the same code as
   [`vidette label apply`](label.md) and is validated before the file is replaced.
-- "Это свой" appears only with `names: true`, when the face check found a readable face
-  and someone is enrolled. It shows the enrolled people; with several faces, one row per
-  face.
+- "Кто это?" appears when the face check found a face and there is something to say
+  about it: anonymous identities are on, or (with `names: true`) someone is enrolled.
+  With several faces it asks which one first ("Лицо 1: …"). Enrolled people and named
+  familiar identities are listed by name only with `names: true`. A name typed in reply
+  to the bot's question is read only in an allowed chat and only as a reply to that
+  question; after a restart of the service, tap the button again.
 - `labels: false` keeps the feedback on the event only.
 
 ## The digest and the commands

@@ -211,9 +211,11 @@ people:
     dir: ~/vidette-data/identities  # default $VIDETTE_DATA/identities; never in a git tree
     match: 0.5                    # SFace cosine for a sighting to join an identity
     margin: 0.06                  # ...when no other identity is this close
-    min_face_px: 64               # smaller faces never start or join one
-    near_known: 0.3               # an unknown face this close to someone enrolled: skipped
+    min_face_px: 40               # readable faces smaller than this start a weak identity
+    near_known: 0.3               # this close to someone enrolled: marked, never raises
     retention_days: 30            # unnamed, unflagged identities go after this long
+  extra_fps: 6                    # a second look around every face found (ADR-0016)
+  extra_frames: 24                # at most this many more frames a clip; 0 turns it off
 ```
 
 Policies are judged live by the verdict worker once a VLM backend is selected

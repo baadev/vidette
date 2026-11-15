@@ -70,6 +70,8 @@ function geometryBadges(geometry: EventGeometry): string[] {
 
 type Enrolled = { id: string; name: string };
 
+const NEAR_KNOWN = 0.3; // people.identities.near_known's default (docs/people.md)
+
 const STATUS_WORD: Record<string, string> = {
   familiar: "familiar",
   suspicious: "suspicious",
@@ -149,7 +151,11 @@ function FaceRow({ eventId, seen, enrolled, onChanged }: FaceRowProps) {
   else if (seen.identity) label = seen.identity_name ?? `Stranger #${seen.identity}`;
   else label = seen.status === "unclear" ? "Small face" : "Unknown face";
   const disposition = seen.identity_status && STATUS_WORD[seen.identity_status];
-  const closest = seen.closest ? enrolled.find((person) => person.id === seen.closest) : undefined;
+  // the nearest enrolled person is a suggestion only when the face came close (near_known)
+  const closest =
+    seen.closest && seen.score >= NEAR_KNOWN
+      ? enrolled.find((person) => person.id === seen.closest)
+      : undefined;
   return (
     <li className="face-row">
       {seen.crop ? (
