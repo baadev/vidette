@@ -55,7 +55,7 @@ def test_the_judge_is_told_frame_times_and_the_stall_between_them() -> None:
     )  # fmt: skip
     text = timing_text(frames)
     assert text is not None
-    assert "1: 1.0 s, 2: 3.5 s, 3: 11.0 s, 4: 12.5 s (picked where the picture changed)" in text
+    assert "1: 1.0 s, 2: 3.5 s, 3: 11.0 s, 4: 12.5 s (where the picture changed)" in text
     assert "stalled between frames 2 and 3 (3.5 to 10.9 s)" in text
     assert "interrupted: 1 stall(s), up to 7.4 s" in text
     assert timing_text(FrameSet([Path("a.jpg")])) is None  # images without times

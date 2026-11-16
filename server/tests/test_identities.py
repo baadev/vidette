@@ -359,14 +359,14 @@ def test_the_judge_hears_recurrence_as_counts_and_names_only_locally() -> None:
     assert "unknown face #12 (the household calls them 'the courier'): this is the 3rd" in local
     assert "3rd time today, 5 times in total on 2 days" in local
     assert "cameras in the last hour: street, front_door" in local
-    assert "the courier" in local and "does not prove intent" in local
+    assert "the courier" in local and "proves no intent" in local
     cloud = people_line(report, names=False)
     assert "the courier" not in cloud and "#12" in cloud and "3rd time today" in cloud
     first = people_line(report_with(brief(sightings=1, recent=[(T0 + 3600, "yard")])), names=True)
-    assert "not seen before" in first
+    assert "first time seen" in first
     familiar = people_line(report_with(brief(status="familiar", name="Anna")), names=True)
     assert "familiar to the household" in familiar and "Anna" in familiar
-    assert "3rd time" not in familiar and "match nobody enrolled: 0" in familiar
+    assert "3rd time" not in familiar and "matching nobody enrolled: 0" in familiar
     familiar_cloud = people_line(report_with(brief(status="familiar", name="Anna")), names=False)
     assert "Anna" not in familiar_cloud and "marked as familiar" in familiar_cloud
     quiet = people_line(report_with(brief(status="familiar")), names=True, quiet=True)
@@ -375,7 +375,7 @@ def test_the_judge_hears_recurrence_as_counts_and_names_only_locally() -> None:
     assert "possibly a household member" in near
     suspicious = people_line(report_with(brief(status="suspicious")), names=False)
     assert "marked this person as suspicious" in suspicious
-    assert "compared with earlier clips" not in people_line(report_with(None), names=True)
+    assert "against earlier clips" not in people_line(report_with(None), names=True)
     for line in (local, cloud):  # behaviour only: nothing about how anyone looks
         for word in ("age", "gender", "skin", "male", "female", "ethnic"):
             assert f" {word}" not in line.lower()

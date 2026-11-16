@@ -350,7 +350,7 @@ async def test_a_policy_with_levels_asks_for_a_scenario_and_derives_the_alert(
     assert "touching_equipment" in schema["properties"]["scenario"]["enum"]
     prompt = json.dumps(body["messages"], ensure_ascii=False)
     assert "Level critical (an alert)" in prompt and "in Russian" in prompt
-    assert "subject_frames" in schema["required"] and "not a guessed gender" in prompt
+    assert "subject_frames" in schema["required"] and "never a guessed gender" in prompt
     await http.aclose()
 
 

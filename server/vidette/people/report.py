@@ -214,15 +214,12 @@ def people_line(report: PeopleReport | None, *, names: bool, quiet: bool = False
             )
     parts = [
         found,
-        f"faces that match nobody enrolled: {len(report.strangers)}",
-        f"no clear face in {report.frames_without_readable_face} of "
-        f"{report.frames_checked} frames (too small, turned away or absent)",
+        f"faces matching nobody enrolled: {len(report.strangers)}",
+        f"no clear face in {report.frames_without_readable_face} of {report.frames_checked} frames",
     ]
     lines = [
-        "Local face check (a separate model on this machine, over frames of the whole "
-        "clip): " + "; ".join(parts) + ".",
-        "An unrecognized or unseen face is not evidence of a stranger; judge people by "
-        "what they do.",
+        "Local face check over the whole clip: " + "; ".join(parts) + ".",
+        "An unrecognized or unseen face is not evidence of a stranger; judge what people do.",
     ]
     if quiet and (known or familiar):
         lines.append(
@@ -234,6 +231,7 @@ def people_line(report: PeopleReport | None, *, names: bool, quiet: bool = False
 
 
 _SUFFIXES = {1: "st", 2: "nd", 3: "rd"}
+MAX_IDENTITY_FACTS = 3  # unknown faces described one by one in the judge's facts
 
 
 def _ordinal(count: int) -> str:
@@ -254,7 +252,7 @@ def recurrence_lines(report: PeopleReport, *, names: bool) -> list[str]:
         if names and brief.name:
             who += f" (the household calls them {brief.name!r})"
         if brief.sightings <= 1:
-            text = f"{who}: not seen before by this system"
+            text = f"{who}: first time seen"
         else:
             today = brief.today()
             text = f"{who}: this is the {_ordinal(today)} time today"
@@ -272,9 +270,11 @@ def recurrence_lines(report: PeopleReport, *, names: bool) -> list[str]:
         facts.append(text + ".")
     if not facts:
         return []
+    if len(facts) > MAX_IDENTITY_FACTS:  # a crowd: the slot's room goes to the frames
+        more = len(facts) - MAX_IDENTITY_FACTS
+        facts = [*facts[:MAX_IDENTITY_FACTS], f"And {_plural(more, 'more unknown face')}."]
     return [
-        "Unknown faces compared with earlier clips on this machine (anonymous, by face only): "
-        + " ".join(facts),
-        "Someone who keeps coming back, or looks at one place and then another, deserves more "
-        "attention than a single pass; that alone does not prove intent.",
+        "Unknown faces against earlier clips (anonymous, by face only): " + " ".join(facts),
+        "Coming back, or looking at one place then another, deserves more attention than a "
+        "single pass; alone it proves no intent.",
     ]

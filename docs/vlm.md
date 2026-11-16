@@ -154,10 +154,24 @@ Every request counts against the day's budget, including failed ones (providers 
 them).
 
 A server with a small context per request rejects the call before the model sees it
-(`HTTP 400 … exceeds the available context size`), and the judge abstains. Measured on a
-llama-server with 2048 tokens per slot and a Qwen vision model: four frames at 768 px plus
-a policy with levels came to 2101 tokens; at 640 px, 1565. Lower `max_image_side` (or
-`frames_per_call`) until it fits; small details far from the camera are the first to go. Command-line tools keep their count in `~/.local/state/vidette/vlm-usage.json`; the
+(`HTTP 400 … exceeds the available context size`); the judge then tries once more with the
+frames 20 % smaller, and abstains if that fails too. Every first attempt that fails costs a
+call and leaves the judge with the smaller frames, so fit the first one. Where the tokens
+go, measured on a llama-server with 2048 tokens per slot and a Qwen3 vision model (about
+32 × 32 px per image token, four frames):
+
+| Part | Tokens |
+|---|---|
+| system prompt | 197 |
+| a policy with 14 scenarios on three levels (description and levels) | 600 to 750 |
+| the clip's facts: camera, time, frame times, the face check's line | 110 to 180 |
+| answer instructions | 84 |
+| four frames at 640 × 360 px / 576 × 324 px | 888 / 728 |
+
+Keep the policy's words short (each scenario said once; the judge reads the whole list on
+every call), then lower `max_image_side` until the first attempt fits with room for the
+answer (about 100 tokens). Fewer `frames_per_call` is the last resort: it removes moments,
+not pixels. Command-line tools keep their count in `~/.local/state/vidette/vlm-usage.json`; the
 server keeps its own in its database.
 
 ## Comparing local and cloud

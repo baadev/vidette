@@ -249,7 +249,7 @@ def test_the_judge_hears_names_only_from_a_local_check_and_never_who_is_enrolled
     report = report_with(SAM, UNKNOWN)
     local = people_line(report, names=True)
     assert "recognized Sam (0.83)" in local
-    assert "match nobody enrolled: 1" in local and "no clear face in 7 of 10 frames" in local
+    assert "matching nobody enrolled: 1" in local and "no clear face in 7 of 10 frames" in local
     assert "robin" not in local.lower()  # the nearest enrolled name of a stranger: never
     assert "not evidence of a stranger" in local
     cloud = people_line(report, names=False)

@@ -36,23 +36,21 @@ from vidette.vlm.client import VlmClient, VlmError
 
 logger = logging.getLogger(__name__)
 
+# Every token here is paid on every call, and a shared llama.cpp slot may hold only 2048
+# with four frames taking about 900 of them: every rule is kept, each said once and short.
 SYSTEM_PROMPT = (
-    "You review footage from a home security camera on behalf of the person who lives "
-    "there. You get a few frames from one event, in time order, and their alert policy in "
-    "their own words. Decide whether, under that policy, this event deserves an alert on "
-    "their phone. Judge only what the frames show; do not assume intent you cannot see. "
-    "Night frames are often grey infrared images. If the frames do not show enough to "
-    "decide, answer \"unsure\" rather than guessing. "
-    "A person whose position changes between frames is walking, not lingering. How long "
-    "someone stayed can only be judged from frames with no stall between them: a stall "
-    "freezes the picture and hides how much time passed. "
-    "Ordinary use is not an attempt: opening a car or a door and getting in or out, "
-    "loading or unloading a car, unlocking a door and walking in, is someone using it. An "
-    "attempt needs something visibly wrong: a handle pulled that stays shut, several doors "
-    "or cars tried one after another, force, tools, a broken window. Name a scenario that "
-    "alerts only when the frames themselves show it; when you would have to assume it, "
-    "name the closest scenario that does not alert. Describe what people do, not how they "
-    "look: say a person, not a guessed gender, age or ethnicity."
+    "You review frames from one event of a home security camera, in time order, for the "
+    "person who lives there, under their alert policy. Decide if it deserves an alert. "
+    "Judge only what the frames show; never assume intent. Night frames are often grey "
+    "infrared. If they do not show enough, answer unsure; do not guess. "
+    "A person whose position changes between frames is walking, not lingering; how long "
+    "someone stayed shows only across frames with no stall between them (a stall freezes "
+    "the picture). Ordinary use is not an attempt: getting into or out of a car or a door, "
+    "loading a car, unlocking a door and walking in. An attempt needs something visibly "
+    "wrong: a handle pulled that stays shut, several doors or cars tried in turn, force, "
+    "tools, broken glass. Name an alerting scenario only when the frames show it, else the "
+    "closest one that does not alert. Describe actions, not looks: a person, never a "
+    "guessed gender, age or ethnicity."
 )
 
 VERDICT_SCHEMA: dict[str, Any] = {
@@ -77,15 +75,12 @@ def describe_case(case: Case, frames: int, timing: FrameSet | None = None) -> st
         lines.append(f"Local time: {at:%A %H:%M}.")
     duration = incident.duration_s or (timing.duration_s if timing is not None else None)
     if duration:
-        lines.append(
-            f"The recording covers about {duration:.0f} s (how long the camera recorded, "
-            "not how long anyone stayed)."
-        )
+        lines.append(f"Recording: about {duration:.0f} s (not how long anyone stayed).")
     detected = ", ".join(incident.objects)
     if detected:
         where = f" in zones {', '.join(incident.zones)}" if incident.zones else ""
         lines.append(f"The camera's detector reported: {detected}{where}.")
-    lines.append(f"{frames} frame(s) follow, in time order.")
+    lines.append(f"{frames} frame(s) follow.")
     text = " ".join(lines)
     told = timing_text(timing) if timing is not None else None
     return f"{text}\n{told}" if told else text
@@ -104,7 +99,7 @@ def timing_text(frames: FrameSet) -> str | None:
     times = [float(t) for t in timed if t is not None]
     text = "Frame times: " + ", ".join(f"{n}: {_s(t)}" for n, t in enumerate(times, start=1))
     if frames.method == "activity":
-        text += " (picked where the picture changed)"
+        text += " (where the picture changed)"
     lines = [text + "."]
     health = frames.health
     if health is not None:
@@ -159,10 +154,7 @@ def levels_schema(policy: PolicyText) -> dict[str, Any]:
 
 def levels_block(policy: PolicyText) -> str:
     """The scenarios a policy with levels asks the judge to choose from."""
-    lines = [
-        "Scenarios, highest level first. Pick the one that fits what the frames show; if "
-        "several fit, pick the one from the highest level."
-    ]
+    lines = ["Scenarios by level, highest first; if several fit, take the highest."]
     for level in policy.levels:
         kind = "an alert" if level.alerts else "not an alert"
         lines.append(f"Level {level.name} ({kind}):")
@@ -263,12 +255,11 @@ class VlmJudge:
             text = (
                 f'Policy "{policy.name}": {" ".join(policy.description.split())}\n\n'
                 f"{levels_block(policy)}\n\n{facts}\n\n"
-                "Answer with JSON: scenario (one id from the list, or unsure when the frames "
-                f"do not show enough), description ({sentence}), persons (how many different "
-                "people are visible over all frames, 0 if none), first_person_frame (the "
-                "number of the first frame showing a person, 0 if none), subject_frames (the "
-                "numbers of the frames that clearly show the person, animal or vehicle your "
-                "scenario is about, the clearest first; [] when none does), confidence (0 to 1)."
+                "Answer with JSON: scenario (an id above, or unsure), description "
+                f"({sentence}), persons (different people over all frames, 0 if none), "
+                "first_person_frame (first frame with a person, 0 if none), subject_frames "
+                "(frames that clearly show your scenario's person, animal or vehicle, clearest "
+                "first; [] if none), confidence (0 to 1)."
             )
             schema, schema_name = levels_schema(policy), "level_verdict"
         else:

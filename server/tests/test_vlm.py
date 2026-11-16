@@ -218,11 +218,11 @@ def test_frames_spread_keeps_first_and_last() -> None:
 
 
 def durations_answer(table: dict[int, dict[str, Any]]) -> Any:
-    """Answer by the clip length the judge reports ("covers about 33 s"), which is unique
+    """Answer by the clip length the judge reports ("Recording: about 33 s"), which is unique
     per sample entry and independent of the machine's time zone."""
 
     def answer(text: str, images: list[bytes], body: dict[str, Any]) -> dict[str, Any]:
-        match = re.search(r"covers about (\d+) s", text)
+        match = re.search(r"Recording: about (\d+) s", text)
         seconds = int(match.group(1)) if match else -1
         default = {"decision": "silent", "label": "nothing", "description": "-", "confidence": 0.6}
         return table.get(seconds, default)

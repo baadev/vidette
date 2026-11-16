@@ -6,9 +6,9 @@ people a household enrolls: each incident's frames go through a face check on yo
 machine, and the judge gets one line of facts, for example
 
 ```
-Local face check (a separate model on this machine, over frames of the whole clip):
-recognized Sam (0.71); faces that match nobody enrolled: 0; no clear face in 21 of 24
-frames (too small, turned away or absent).
+Local face check over the whole clip: recognized Sam (0.71); faces matching nobody
+enrolled: 0; no clear face in 21 of 24 frames.
+An unrecognized or unseen face is not evidence of a stranger; judge what people do.
 ```
 
 Then you confirm or correct what was recognized, and those answers become references.
@@ -233,11 +233,11 @@ wakes, exactly as for the household.
 The face check's line gets one more sentence:
 
 ```
-Unknown faces compared with earlier clips on this machine (anonymous, by face only):
-unknown face #12: this is the 3rd time today, 5 times in total on 2 days; cameras in the
-last hour: street, front_door.
-Someone who keeps coming back, or looks at one place and then another, deserves more
-attention than a single pass; that alone does not prove intent.
+Unknown faces against earlier clips (anonymous, by face only): unknown face #12: this is
+the 3rd time today, 5 times in total on 2 days; cameras in the last hour: street,
+front_door.
+Coming back, or looking at one place then another, deserves more attention than a single
+pass; alone it proves no intent.
 ```
 
 A cloud judge hears the same counts and camera names, never a crop, an embedding or a

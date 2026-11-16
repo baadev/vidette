@@ -166,10 +166,7 @@ def clip_facts(case: Case, frames: FrameSet) -> str:
         lines.append(f"Local time: {datetime.fromtimestamp(incident.started_at):%A %H:%M}.")
     duration = incident.duration_s or frames.duration_s
     if duration:
-        lines.append(
-            f"The recording covers about {duration:.0f} s (how long the camera recorded, "
-            "not how long anyone stayed)."
-        )
+        lines.append(f"Recording: about {duration:.0f} s (not how long anyone stayed).")
     text = " ".join(lines)
     told = timing_text(frames)
     return f"{text}\n{told}" if told else text
