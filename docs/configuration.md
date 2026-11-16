@@ -291,7 +291,9 @@ notifications:
     max_video_mb: 20              # bigger clips are linked (clip_url), not sent
     collapse: 5m                  # one camera's alerts within this edit the first one
     digest_at: "21:00"            # the day's digest, local time; null: only on request
+    digest_until: "23:30"         # a late or retried digest still goes until then; null: midnight
     quiet_for: 1h                 # /quiet
+    late_alerts_for: 2h           # alerts Telegram could not take go late for this long; 0: never
     labels: true                  # answers become reviewed labels in the clip's dataset
     camera_names: {}              # camera → name in messages
     clip_url: null                # default server.base_url

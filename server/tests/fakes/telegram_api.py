@@ -4,7 +4,9 @@ It answers the methods the bot uses the way Telegram documents them (`{"ok": tru
 "result": …}`, `{"ok": false, "error_code": 429, "parameters": {"retry_after": 3}}`),
 keeps every call (method, parameters, uploaded files) for assertions, and hands out
 queued updates to `getUpdates` honouring `offset`. Uploads arrive as multipart and are
-parsed with the standard library.
+parsed with the standard library. Network trouble too: `offline` refuses every
+connection (`httpx.ConnectError`, nothing arrives), `lose_answer(method)` lets the next
+call of a method arrive and be kept, then loses its answer (`httpx.ReadTimeout`).
 
 Use it in-process (`transport()`, an httpx transport) or as a real HTTP server on
 127.0.0.1 (`serve()`) when the code under test builds its own client from a config.
@@ -42,6 +44,9 @@ class FakeTelegram:
     updates: list[dict[str, Any]] = field(default_factory=list)
     errors: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # method → bodies
     next_id: int = 100
+    offline: bool = False  # every connection is refused
+    refused: int = 0  # requests refused while offline
+    lost: list[str] = field(default_factory=list)  # methods whose next answer is lost
 
     def methods(self) -> list[str]:
         return [call.method for call in self.calls]
@@ -51,6 +56,9 @@ class FakeTelegram:
 
     def all(self, method: str) -> list[Call]:
         return [call for call in self.calls if call.method == method]
+
+    def lose_answer(self, method: str) -> None:
+        self.lost.append(method)
 
     def fail(
         self, method: str, code: int, description: str, retry_after: int | None = None
@@ -72,6 +80,17 @@ class FakeTelegram:
         }
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        if self.offline:
+            self.refused += 1
+            raise httpx.ConnectError("connection refused", request=request)
+        response = self._answer(request)
+        method = request.url.path.rpartition("/")[2]
+        if method in self.lost:
+            self.lost.remove(method)
+            raise httpx.ReadTimeout("the answer was lost", request=request)
+        return response
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
         prefix, _sep, method = request.url.path.rpartition("/")
         if prefix != f"/bot{self.token}":
             return httpx.Response(

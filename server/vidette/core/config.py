@@ -127,6 +127,12 @@ class FrigateConfig(StrictModel):
         return self
 
 
+def _local_minutes(value: str | None) -> int | None:
+    """ "21:00" as minutes after local midnight; None when empty or not a time."""
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", (value or "").strip())
+    return None if match is None else int(match.group(1)) * 60 + int(match.group(2))
+
+
 def _duration(value: str, where: str) -> float:
     from vidette.units import parse_duration
 
@@ -738,10 +744,18 @@ class TelegramConfig(StrictModel):
     # The day's digest, once, silently, at this local time ("HH:MM"), and only when it has
     # something that needs a look; null: only on request (/status, or asking the bot).
     digest_at: str | None = "21:00"
+    # A digest that could not go at `digest_at` (the service was down, Telegram could not
+    # be reached) is still sent until this local time the same evening, then not at all;
+    # null, or a time not after `digest_at`: until midnight.
+    digest_until: str | None = "23:30"
     # Removed (the hourly digest was noise): accepted and ignored, `vidette validate` says so.
     digest_every: str | None = None
     digest_settle: str | None = None
     quiet_for: str = "1h"  # /quiet
+    # An alert Telegram could not take (no connection, 429, 5xx) waits and is sent when it
+    # answers again, marked as late, for this long after it was due; "0": dropped at once,
+    # as before (the digest lists it).
+    late_alerts_for: str = "2h"
     labels: bool = True  # answers become reviewed labels in the clip's dataset
     camera_names: dict[str, str] = Field(default_factory=dict)  # camera → name in messages
     clip_url: str | None = None  # base URL for clips too big to send; default server.base_url
@@ -785,13 +799,26 @@ class TelegramConfig(StrictModel):
                 raise ValueError(
                     "notifications.telegram.topics names a chat that is not in allowed_chats"
                 )
-        for key in ("collapse", "quiet_for"):
+        for key in ("collapse", "quiet_for", "late_alerts_for"):
             _duration(getattr(self, key), f"notifications.telegram.{key}")
         if self.digest_at is not None and self.digest_minutes is None:
             raise ValueError(
                 "notifications.telegram.digest_at must be a local time like 21:00, or null "
                 "for a digest only on request"
             )
+        if self.digest_until is not None:
+            until = _local_minutes(self.digest_until)
+            if until is None:
+                raise ValueError(
+                    "notifications.telegram.digest_until must be a local time like 23:30, or "
+                    "null for until midnight"
+                )
+            at = self.digest_minutes
+            if "digest_until" in self.model_fields_set and at is not None and until <= at:
+                raise ValueError(
+                    "notifications.telegram.digest_until must be later than digest_at, the "
+                    "same evening (or null for until midnight)"
+                )
         _check_http_url(self.api_url, "notifications.telegram.api_url")
         self.api_url = self.api_url.rstrip("/")
         if self.clip_url is not None:
@@ -799,14 +826,20 @@ class TelegramConfig(StrictModel):
             self.clip_url = self.clip_url.rstrip("/")
         return self
 
-    def seconds(self, key: Literal["collapse", "quiet_for"]) -> float:
+    def seconds(self, key: Literal["collapse", "quiet_for", "late_alerts_for"]) -> float:
         return _duration(getattr(self, key), key)
 
     @property
     def digest_minutes(self) -> int | None:
         """`digest_at` as minutes after local midnight; None when off or malformed."""
-        match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", (self.digest_at or "").strip())
-        return None if match is None else int(match.group(1)) * 60 + int(match.group(2))
+        return _local_minutes(self.digest_at)
+
+    @property
+    def digest_until_minutes(self) -> int:
+        """Until when (minutes after local midnight) a late digest still goes: `digest_until`,
+        or midnight (1440) when it is null or not after `digest_at`."""
+        until = _local_minutes(self.digest_until)
+        return until if until is not None and until > (self.digest_minutes or 0) else 24 * 60
 
     @property
     def recipient_chats(self) -> list[int]:

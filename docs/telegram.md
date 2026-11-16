@@ -297,9 +297,13 @@ All day: 410 clips: passers-by 90, cars 60, animals 4.
 Not checked by the judge: 150 (the queue did not reach it).
 ```
 
-The day is written down before the message goes out, so a restart never sends it twice; a
-service that was down at 21:00 sends it when it is back the same day. `/status` answers
-with the same lines for today so far, always, also when nothing happened.
+The day is written down before the message goes out, so a restart never sends it twice. A
+service that was down at 21:00 sends it when it is back, and a digest Telegram did not take
+(no connection, `429`, `5xx`) is tried again after 30 s, then 1, 2, 4, 8 minutes and every
+10 minutes, at once when the bot hears Telegram again; both only until `digest_until`
+(23:30, the same evening). A digest whose answer was lost after it went out may have
+arrived, and is not sent again. `/status` answers with the same lines for today so far,
+always, also when nothing happened.
 
 | Command | What it does | Who |
 |---|---|---|
@@ -351,9 +355,27 @@ no stage here can see that lag.
   incident first, so a backlog delays old clips rather than the current one, and drops
   incidents that ended more than 15 minutes ago.
 - **Telegram's limits:** a `429` is waited out as Telegram asks (up to 60 s) and retried;
-  network errors and 5xx back off 1, 2, 4 s. An upload that may have arrived is never
-  repeated. Failures become `telegram.failed` system events (rate-limited, without the
-  token).
+  network errors and 5xx back off 1, 2, 4 s. An upload or a digest that may have arrived
+  (its answer was lost after it went out) is never repeated. Failures become
+  `telegram.failed` system events (rate-limited, without the token).
+- **Telegram out of reach** (no connection, or a `429`/`5xx` after those retries):
+  - An alert waits in the database (a restart keeps it) and goes when the bot hears
+    Telegram again (the long poll is the probe; otherwise after 30 s, doubling to 5 min),
+    with "⏳ Sent late: Telegram could not be reached at 21:14:05" under the camera and
+    the time. The usual rules hold, by the time it was due: one alert per event and chat;
+    a camera's alerts within `collapse` become one message; an early alert the whole clip
+    then called ordinary is not sent; an album that already went out is not sent again.
+  - An alert older than `late_alerts_for` (2 h) is not sent any more: the chat gets one
+    line ("⏳ 3 alerts from 21:14 to 22:05 were not sent: …") and the digest lists them
+    under "No alert, but worth a look". `late_alerts_for: 0` drops them at once, as
+    before this existed.
+  - An edit of an alert (another alert folded into it, the whole clip after an early
+    alert) waits the same way and is redone.
+  - No answer at all for 3 minutes: the bot's HTTP client is replaced by a new one (new
+    connections, DNS and proxy settings read again), again every 3 minutes while it
+    lasts, said once in the log. A long-running service once failed to connect for over
+    an hour while the machine itself reached Telegram, and a restart fixed it; this does
+    what the restart did.
 - **Two pollers** (a second Vidette with the same token, or a webhook set on the bot)
   make Telegram answer `409`; the bot waits 30 s and tries again, and says so.
 

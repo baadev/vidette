@@ -310,6 +310,19 @@ released; no images published from it; the last release is v0.1.3.
   adapters; camera, stream, recording and export API routes; Live, Review, Cameras and
   Setup pages. Dependencies `numpy` and `onnxruntime`.
 
+### Fixed
+- **A Telegram outage no longer loses the evening digest or the alerts.** A digest
+  Telegram did not take (no connection, `429`, `5xx`) is tried again with a growing pause,
+  at once when the bot hears Telegram again, until `notifications.telegram.digest_until`
+  (23:30), and never twice: one that may have arrived is not repeated. Alerts Telegram
+  could not take wait in the database and go when it answers again, marked as late with
+  the time they were due, for `late_alerts_for` (2 h); older ones are counted in one line
+  and listed in the digest. Edits of alerts wait the same way. After 3 minutes without
+  any answer the HTTP client is replaced by a new one (a long-running service once failed
+  to connect for over an hour while the machine reached Telegram, and a restart fixed
+  it). Every Bot API error now says whether the request may have arrived
+  ([docs/telegram.md](docs/telegram.md#limits-and-failures)).
+
 ## [0.1.3] — 2026-07-09
 
 Two live-tile fixes chasing the burst-publishing camera from v0.1.2 (its RTSP stream

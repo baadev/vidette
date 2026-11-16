@@ -839,13 +839,18 @@ class Database:
         camera: str | None = None,
         *,
         since: float = 0.0,
+        until: float | None = None,
         tests: bool = True,
     ) -> TelegramMessageRow | None:
         """The newest alert (not a collapsed one) in a chat (any chat: None), optionally
-        for one camera, sent at or after `since`; `tests=False` skips test alerts."""
+        for one camera, sent at or after `since` (and at or before `until`); `tests=False`
+        skips test alerts."""
         kinds = "('alert', 'test')" if tests else "('alert')"
         clauses = [f"kind IN {kinds}", "created_at >= ?", "message_id IS NOT NULL"]
         params: list[Any] = [since]
+        if until is not None:
+            clauses.append("created_at <= ?")
+            params.append(until)
         if chat_id is not None:
             clauses.append("chat_id = ?")
             params.append(chat_id)
@@ -889,6 +894,16 @@ class Database:
             "SELECT * FROM telegram_messages WHERE event_id = ?"
             " AND kind IN ('alert', 'collapsed') ORDER BY id",
             (event_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_telegram_message(row) for row in rows]
+
+    async def pending_telegram_messages(self) -> list[TelegramMessageRow]:
+        """Alerts (and edits of alerts) that wait for Telegram to answer again
+        (`data.pending`), the oldest first."""
+        async with self._db.execute(
+            "SELECT * FROM telegram_messages WHERE kind IN ('alert', 'collapsed')"
+            " AND json_extract(data, '$.pending') IS NOT NULL ORDER BY created_at, id"
         ) as cur:
             rows = await cur.fetchall()
         return [_telegram_message(row) for row in rows]

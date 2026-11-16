@@ -111,6 +111,8 @@ notifications:
   #   language: en           # en | ru: messages, buttons, the digest (docs/telegram.md)
   #   names: false           # names of recognized people go to Telegram when true
   #   digest_at: "21:00"     # the day's digest, only when something needs a look
+  #   digest_until: "23:30"  # Telegram out of reach: the digest is retried until then
+  #   late_alerts_for: 2h    # and alerts are sent late, marked as such, for this long
   rules:
     - when: event.confirmed  # an event the judge confirmed (docs/vlm.md)
       channels: [push, telegram, hooks]

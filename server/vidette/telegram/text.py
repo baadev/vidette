@@ -164,6 +164,7 @@ class AlertFacts:
     mark: str | None = None  # "✅ Marked: false alarm"
     video_note: str | None = None  # a link when the clip was too big to send
     stream_note: str | None = None  # "The recording paused…" (stream_note())
+    late: float | None = None  # sent late: when it was due, and Telegram could not be reached
 
 
 def alert_text(facts: AlertFacts, *, now: float) -> str:
@@ -176,6 +177,8 @@ def alert_text(facts: AlertFacts, *, now: float) -> str:
     else:
         lines.append(t("alert.not_alert"))
     lines.append(f"📍 {escape(facts.camera)}, {clock(facts.started_at, now=now, seconds=True)}")
+    if facts.late is not None:
+        lines.append(f"<i>{t('alert.late', time=clock(facts.late, now=now, seconds=True))}</i>")
     lines.append(f"👤 {facts.who}")
     if facts.description:
         lines.append(f"💬 {escape(facts.description)}")
@@ -275,6 +278,17 @@ def stream_note(stream: object) -> str | None:
     if isinstance(longest, int | float) and longest >= 1:
         parts.append(t("stream.up_to", n=f"{longest:.0f}"))
     return t("stream.interrupted") + (": " + ", ".join(parts) if parts else "")
+
+
+def dropped_text(times: list[float], *, now: float) -> str:
+    """Alerts that waited for Telegram longer than `late_alerts_for` and were not sent."""
+    first, last = min(times), max(times)
+    if len(times) == 1:
+        return t("late.dropped_one", time=clock(first, now=now))
+    return t(
+        "late.dropped_many", alerts=plural(len(times), "n.alerts"),
+        first=clock(first, now=now), last=clock(last, now=now),
+    )  # fmt: skip
 
 
 def extra_line(started_at: float, description: str | None, *, now: float) -> str:

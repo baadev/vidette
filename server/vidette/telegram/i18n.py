@@ -101,6 +101,11 @@ EN: dict[str, str] = {
     "alert.judge_unsure": "The judge is not sure: {why}",
     "alert.label_failed": "the label was not written to the dataset: {problem}",
     "alert.frames_failed": " The frames were not sent.",
+    "alert.late": "⏳ Sent late: Telegram could not be reached at {time}.",
+    "late.dropped_one": "⏳ The alert at {time} was not sent: Telegram could not be "
+    "reached for too long. /status shows the day.",
+    "late.dropped_many": "⏳ {alerts} from {first} to {last} were not sent: Telegram "
+    "could not be reached for too long. /status shows the day.",
     "note.early": "From the first seconds of the recording; the whole clip will follow in "
     "this message.",
     "note.clip_not_alert": "Checked against the whole clip: not an alert.",
@@ -204,6 +209,7 @@ EN: dict[str, str] = {
     "n.waiting": "alert waits|alerts wait",
     "n.disputed": "disputed clip went|disputed clips went",
     "n.times": "time|times",
+    "n.alerts": "alert|alerts",
     "unjudged.queue": "the queue did not reach it",
     "unjudged.none": "no verdict",
     "unjudged.context": "the frames do not fit the judge's model",
@@ -387,6 +393,11 @@ RU: dict[str, str] = {
     "alert.judge_unsure": "Судья не уверен: {why}",
     "alert.label_failed": "метка в датасет не записана: {problem}",
     "alert.frames_failed": " Кадры не отправились.",
+    "alert.late": "⏳ С опозданием: в {time} Telegram был недоступен.",
+    "late.dropped_one": "⏳ Тревога в {time} не отправлена: Telegram слишком долго был "
+    "недоступен. День целиком: /status.",
+    "late.dropped_many": "⏳ {alerts} с {first} до {last} не отправлены: Telegram слишком "
+    "долго был недоступен. День целиком: /status.",
     "note.early": "По первым секундам записи; весь ролик пришлю в это сообщение.",
     "note.clip_not_alert": "Уточнено по всему ролику: это не тревога.",
     "note.clip_unjudged": "Весь ролик судья не оценил; тревога по первым секундам.",
@@ -479,6 +490,7 @@ RU: dict[str, str] = {
     "n.waiting": "тревога ждёт|тревоги ждут|тревог ждут",
     "n.disputed": "спорный ушёл|спорных ушли|спорных ушли",
     "n.times": "раз|раза|раз",
+    "n.alerts": "тревога|тревоги|тревог",
     "unjudged.queue": "не дошла очередь",
     "unjudged.none": "нет вердикта",
     "unjudged.context": "кадры не помещаются в модель судьи",

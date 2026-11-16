@@ -15,6 +15,14 @@
 Guards, as everywhere: nothing here can crash or stall the verdict worker. Failures become
 rate-limited `telegram.*` system events (never with the token, never with names). An
 event without a verdict never alerts; it is counted in the digest as "no verdict".
+
+When Telegram cannot be reached (no connection, 429, 5xx: `TelegramError.transient`):
+    an alert ─▶ its row stays, `data.pending` ─▶ sent when the poller hears Telegram
+                again (or after a growing pause), marked late, for `late_alerts_for`;
+                older ones: one line saying how many, the digest lists them
+    an edit of an alert (collapse, the whole clip) ─▶ the same queue, redone then
+    the evening digest ─▶ the day is marked `<day>:unsent` and tried again until
+                `digest_until`; one that may have arrived is never sent twice
 """
 
 from __future__ import annotations
@@ -72,6 +80,10 @@ EmitCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 OFFSET_KEY = "telegram.offset"
 QUIET_KEY = "telegram.quiet_until:{chat}"
 DIGEST_DAY_KEY = "telegram.digest_day:{chat}"  # the day the evening digest went out
+DIGEST_UNSENT = ":unsent"  # after the day: Telegram never got that digest, it may go again
+DIGEST_RETRY_S = (30.0, 600.0)  # a digest Telegram did not take: first pause, longest pause
+RESEND_RETRY_S = (30.0, 300.0)  # the same for alerts waiting in the queue
+_REDO_RANK = {"edit": 0, "refresh": 1, "send": 2}  # what waits in the queue: more covers less
 COMMAND_MAX_AGE_S = 600.0  # commands sent while the bot was down longer ago are ignored
 ALERT_TOPIC = "event.confirmed"
 REFRESH_TOPICS = frozenset({"event.updated", "event.dismissed"})  # the whole clip, judged
@@ -111,6 +123,13 @@ def subject_frames(row: EventRow) -> list[Path]:
         return []
     paths = [f.get("path") for f in listed if isinstance(f, Mapping)]
     return [Path(path) for path in paths if isinstance(path, str) and Path(path).is_file()]
+
+
+def _midnight(now: float) -> float:
+    """Local midnight before `now`, as epoch seconds."""
+    return (
+        datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    )
 
 
 def unjudged_reason(summary: str | None) -> str:
@@ -178,6 +197,11 @@ class TelegramService:
         self._question_lock = asyncio.Lock()  # one question at a time, any chat
         self._asking_chat: int | None = None  # whose question is being answered
         self._assistant: Assistant | None = assistant
+        self._online = asyncio.Event()  # cleared while the poller cannot reach Telegram
+        self._online.set()
+        self._queued = asyncio.Event()  # something was put in the resend queue
+        self._kept = 0  # how many sends and edits went to the queue since the start
+        self._dropped: dict[int, list[float]] = {}  # chat → when its too-late alerts were due
         if assistant is None and config.assistant.enabled:
             tools = Tools(
                 config, db, identities=identities, camera_name=self.camera_name,
@@ -199,6 +223,7 @@ class TelegramService:
             asyncio.create_task(self._alerts(self._subscription), name="telegram:alerts"),
             asyncio.create_task(self._poll(), name="telegram:poll"),
             asyncio.create_task(self._digests(), name="telegram:digest"),
+            asyncio.create_task(self._resend(), name="telegram:resend"),
         ]
 
     async def stop(self) -> None:
@@ -225,6 +250,41 @@ class TelegramService:
                     "telegram.failed",
                     {"what": what, "error": str(exc)[:300], "count": self.status.failures},
                 )
+
+    async def _pause(self, seconds: float) -> None:
+        """Wait `seconds` before trying Telegram again; while the poller cannot reach it,
+        only until it can (whichever comes first)."""
+        if self._online.is_set():
+            await self._sleep(seconds)
+            return
+        sleeper = asyncio.ensure_future(self._sleep(seconds))
+        online = asyncio.ensure_future(self._online.wait())
+        try:
+            await asyncio.wait({sleeper, online}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (sleeper, online):
+                task.cancel()
+
+    def _may_wait(self, test: bool = False) -> bool:
+        """Whether what Telegram could not take waits in the queue (`late_alerts_for`)."""
+        return not test and self.tg.seconds("late_alerts_for") > 0
+
+    async def _keep(self, row_id: int, what: str, exc: TelegramError) -> None:
+        """Telegram could not take an edit of an alert (`edit`: render it again; `refresh`:
+        the whole clip's verdict): redo it when it answers again. What already waits and
+        does more stays: a send renders everything, a refresh renders too."""
+        message = await self.db.get_telegram_message(row_id)
+        if message is None:
+            return
+        data = dict(message.data)
+        waiting = data.get("pending")
+        before = waiting.get("what") if isinstance(waiting, Mapping) else None
+        if _REDO_RANK.get(str(before), -1) < _REDO_RANK[what]:
+            data["pending"] = {"what": what, "at": self._clock()}
+            await self.db.update_telegram_message(row_id, data=data)
+        self._kept += 1
+        self._queued.set()
+        await self._failed(f"{what} (kept to redo)", exc)
 
     # --- settings and small lookups ------------------------------------------------------
 
@@ -290,10 +350,16 @@ class TelegramService:
             for message in await self.db.telegram_alerts_for_event(row.id):
                 if message.chat_id not in self.tg.recipient_chats:
                     continue
-                try:
-                    await self._refresh_one(message, row)
-                except Exception as exc:
-                    await self._failed("refresh", exc)
+                await self._refresh_or_keep(message, row)
+
+    async def _refresh_or_keep(self, message: TelegramMessageRow, row: EventRow) -> None:
+        try:
+            await self._refresh_one(message, row)
+        except Exception as exc:
+            if isinstance(exc, TelegramError) and exc.transient and self._may_wait():
+                await self._keep(message.id, "refresh", exc)  # redone when Telegram answers
+            else:
+                await self._failed("refresh", exc)
 
     async def _refresh_one(self, message: TelegramMessageRow, row: EventRow) -> None:
         target = message
@@ -454,6 +520,7 @@ class TelegramService:
             ),
             video_note=data.get("video_note"),
             stream_note=say.stream_note((row.intent or {}).get("stream")),
+            late=float(data["late"]) if isinstance(data.get("late"), int | float) else None,
         )
 
     async def _alert(
@@ -474,39 +541,67 @@ class TelegramService:
             if last is not None and last.event_id != row.id and last.data.get("rank", 99) <= rank:
                 return await self._collapse(chat, last, row, verdict)
         thread = self._thread(chat, "alerts")
+        data: dict[str, Any] = {"rank": rank, "test": test, "note": note}
         try:
             row_id = await self.db.insert_telegram_message(
                 chat, "test" if test else "alert", thread_id=thread, event_id=row.id,
-                camera=row.camera, level=verdict.get("level"),
-                data={"rank": rank, "test": test, "note": note},
+                camera=row.camera, level=verdict.get("level"), data=data,
             )  # fmt: skip
         except ValueError:
             return None  # this chat already has this event: one alert per event
-        data: dict[str, Any] = {"rank": rank, "test": test, "note": note}
         if (row.intent or {}).get("phase") == "early" and note is None:
             data["note"] = t("note.early")
+        if not await self._deliver(row_id, chat, thread, row, verdict, policy, data):
+            return None
+        return await self.db.get_telegram_message(row_id)
+
+    async def _deliver(
+        self,
+        row_id: int,
+        chat: int,
+        thread: int | None,
+        row: EventRow,
+        verdict: Mapping[str, Any],
+        policy: PolicyConfig | None,
+        data: dict[str, Any],
+    ) -> bool:
+        """Send one alert row: its album (unless that went out already), then the text
+        with the buttons. When Telegram could not take it (`TelegramError.transient`), the
+        row stays with `data.pending` and goes when Telegram answers again
+        (`resend_pending`); any other failure deletes it, and the digest lists the event
+        instead. True when it was sent."""
+        may_wait = self._may_wait(bool(data.get("test")))
         try:
-            album = await self._send_album(chat, thread, row, data)
+            if not isinstance(data.get("album"), list):
+                data["album"] = await self._send_album(chat, thread, row, data, may_wait=may_wait)
+            album = [m for m in data["album"] if isinstance(m, int)]
             facts = self._facts(row, verdict, policy, data)
             sent = await self.api.send_message(
                 chat,
-                say.alert_text(facts, now=now),
+                say.alert_text(facts, now=self._clock()),
                 thread_id=thread,
                 reply_markup=self._keyboard(row_id, row),
                 reply_to=album[0] if album else None,
             )
         except Exception as exc:
+            if isinstance(exc, TelegramError) and exc.transient and may_wait:
+                data["pending"] = {"what": "send", "at": self._clock()}
+                await self.db.update_telegram_message(row_id, data=data)
+                self._kept += 1
+                self._queued.set()
+                await self._failed("alert (kept to send late)", exc)
+                return False
             await self.db.delete_telegram_message(row_id)  # the digest will count it instead
             await self._failed("alert", exc)
-            return None
-        data["album"] = album
+            return False
+        data.pop("pending", None)
         data["sent_at"] = self._clock()
         clip = row.clip_path or ""
         data["early"] = EARLY_MARK in Path(clip).parts
         data["clip_attached"] = bool(clip) and not data["early"]
         await self.db.update_telegram_message(row_id, message_id=int(sent["message_id"]), data=data)
         self.status.alerts_sent += 1
-        return await self.db.get_telegram_message(row_id)
+        return True
 
     async def _collapse(
         self, chat: int, last: TelegramMessageRow, row: EventRow, verdict: Mapping[str, Any]
@@ -524,8 +619,17 @@ class TelegramService:
         data["extra"] = [*(data.get("extra") or []), line]
         await self.db.update_telegram_message(last.id, data=data)
         self.status.collapsed += 1
-        await self._render(last.id, keyboard="main")
+        await self._edit(last.id)
         return await self.db.get_telegram_message(last.id)
+
+    async def _edit(self, row_id: int) -> None:
+        """Render an alert again; when Telegram cannot be reached, it waits in the queue."""
+        try:
+            await self._render(row_id, keyboard="main")
+        except TelegramError as exc:
+            if not (exc.transient and self._may_wait()):
+                raise
+            await self._keep(row_id, "edit", exc)
 
     def _media_for(self, row: EventRow) -> tuple[list[Path], Path | None]:
         """The album's frames and the clip. Frames that show the subject (`intent.album`:
@@ -564,8 +668,17 @@ class TelegramService:
         return spread(frames, self.tg.frames), clip if clip and clip.is_file() else None
 
     async def _send_album(
-        self, chat: int, thread: int | None, row: EventRow, data: dict[str, Any]
+        self,
+        chat: int,
+        thread: int | None,
+        row: EventRow,
+        data: dict[str, Any],
+        *,
+        may_wait: bool = False,
     ) -> list[int]:
+        """The album above an alert; [] when there is nothing to show or it failed (the
+        text then says the frames were not sent). With `may_wait`, a failure that says
+        Telegram cannot be reached is raised instead: the whole alert waits for it."""
         frames, clip = self._media_for(row)
         media: list[dict[str, Any]] = []
         files: dict[str, Upload] = {}
@@ -601,6 +714,8 @@ class TelegramService:
                 chat, media, files, thread_id=thread, silent=True
             )
         except TelegramError as exc:
+            if exc.transient and may_wait:
+                raise
             await self._failed("album", exc)
             data["note"] = (data.get("note") or "") + t("alert.frames_failed")
             return []
@@ -751,9 +866,12 @@ class TelegramService:
             try:
                 updates = await self.api.get_updates(offset)
                 self.status.polling = True
+                self._online.set()  # what waits for Telegram goes now (_pause)
                 delay = 1.0
             except TelegramError as exc:
                 self.status.polling = False
+                if exc.code is None or exc.transient:
+                    self._online.clear()
                 await self._failed("poll", exc)
                 if exc.code in (401, 404):
                     delay = 600.0  # a revoked token will not come back by itself
@@ -1318,52 +1436,205 @@ class TelegramService:
         )
         return True
 
+    # --- what waits for Telegram to answer again ------------------------------------------
+
+    async def _resend(self) -> None:
+        """The queue's worker: idle until something is queued (or finds what a restart
+        left), then tries after a growing pause, at once when the poller hears Telegram
+        again, until nothing waits."""
+        first, longest = RESEND_RETRY_S
+        delay = first
+        while True:
+            self._queued.clear()  # before looking: a send queued meanwhile wakes us again
+            try:
+                waiting = bool(self._dropped or await self.db.pending_telegram_messages())
+            except Exception as exc:
+                await self._failed("resend", exc)
+                waiting = False
+            if not waiting:
+                delay = first
+                await self._queued.wait()
+                continue
+            await self._pause(delay)
+            try:
+                done = await self.resend_pending()
+            except Exception as exc:
+                await self._failed("resend", exc)
+                done = False
+            delay = first if done else min(delay * 2, longest)
+
+    async def resend_pending(self) -> bool:
+        """Everything that waits for Telegram, oldest first: alerts go out marked as late
+        (the time they were due in the text), under the usual rules (one camera's alerts
+        within `collapse` of each other, by the time they were due, become one message);
+        edits of alerts are redone. An alert older than `late_alerts_for`, or whose event
+        is no longer an alert, is not sent: the chat gets one line saying how many were
+        not, the digest lists them. Stops at the first failure that says Telegram is still
+        out of reach. True when nothing waits any more."""
+        window = self.tg.seconds("late_alerts_for")
+        async with self._send_lock:
+            for message in await self.db.pending_telegram_messages():
+                waiting = message.data.get("pending")
+                what = str(waiting.get("what")) if isinstance(waiting, Mapping) else "send"
+                at = waiting.get("at") if isinstance(waiting, Mapping) else None
+                # claimed before it goes: a crash during the send never sends it twice
+                data = {k: v for k, v in message.data.items() if k != "pending"}
+                await self.db.update_telegram_message(message.id, data=data)
+                event = (
+                    None if message.event_id is None else await self.db.get_event(message.event_id)
+                )
+                now = self._clock()
+                kept = self._kept
+                if what == "send":
+                    alert = event is not None and event.state == EventState.confirmed.value
+                    if event is None or not alert or now - message.created_at > window:
+                        await self.db.delete_telegram_message(message.id)
+                        if alert:
+                            logger.warning(
+                                "telegram: the alert for %s waited longer than "
+                                "late_alerts_for; not sent",
+                                message.event_id,
+                            )
+                            self._dropped.setdefault(message.chat_id, []).append(message.created_at)
+                        continue
+                    try:
+                        await self._send_late(message, event, data)
+                    except Exception as exc:  # a collapse whose edit failed for good
+                        await self._failed("late alert", exc)
+                else:
+                    since = float(at) if isinstance(at, int | float) else message.created_at
+                    fresh = await self.db.get_telegram_message(message.id)
+                    if event is None or fresh is None or now - since > window:
+                        continue  # the message stays as it was
+                    if what == "refresh":
+                        await self._refresh_or_keep(fresh, event)
+                    else:
+                        try:
+                            await self._edit(fresh.id)
+                        except Exception as exc:
+                            await self._failed("edit", exc)
+                if self._kept != kept:
+                    break  # still out of reach: the rest waits for the next try
+            for chat, times in list(self._dropped.items()):
+                if await self._say_dropped(chat, times):
+                    del self._dropped[chat]
+        return not self._dropped and not await self.db.pending_telegram_messages()
+
+    async def _send_late(
+        self, message: TelegramMessageRow, event: EventRow, data: dict[str, Any]
+    ) -> None:
+        verdict = alerting_verdict(event.intent, event.policy)
+        policy = self._policy(event.policy or verdict.get("policy"))
+        rank = level_rank(policy, verdict.get("level"))
+        last = await self.db.last_telegram_alert(
+            message.chat_id, event.camera, since=message.created_at - self.tg.seconds("collapse"),
+            until=message.created_at, tests=False,
+        )  # fmt: skip
+        if last is not None and last.event_id != event.id and last.data.get("rank", 99) <= rank:
+            await self.db.delete_telegram_message(message.id)
+            await self._collapse(message.chat_id, last, event, verdict)
+            return
+        data["rank"] = rank
+        data["late"] = message.created_at
+        await self._deliver(
+            message.id, message.chat_id, message.thread_id, event, verdict, policy, data
+        )
+
+    async def _say_dropped(self, chat: int, times: list[float]) -> bool:
+        """One line about alerts that waited too long; False while Telegram cannot take it
+        (it is tried again with the queue, until a restart)."""
+        try:
+            await self.api.send_message(
+                chat,
+                say.dropped_text(times, now=self._clock()),
+                thread_id=self._thread(chat, "alerts"),
+            )
+        except TelegramError as exc:
+            await self._failed("late alerts note", exc)
+            return not exc.transient
+        return True
+
     # --- digest and status ---------------------------------------------------------------
 
     async def _digests(self) -> None:
         """The day's digest at `digest_at`, once per chat and day. The day is written down
         before the message goes, so a restart never sends it twice; a service that was
-        down at that time sends it when it is back, the same evening."""
+        down at that time sends it when it is back. One Telegram did not take (no
+        connection, 429, 5xx) is tried again after a growing pause, at once when the poller
+        hears Telegram again. Late or retried, only until `digest_until`."""
         minutes = self.tg.digest_minutes
         if minutes is None:
             return
+        first, longest = DIGEST_RETRY_S
+        delay = first
         while True:
             now = self._clock()
-            midnight = (
-                datetime.fromtimestamp(now)
-                .replace(hour=0, minute=0, second=0, microsecond=0)
-                .timestamp()
-            )
+            midnight = _midnight(now)
             due = midnight + minutes * 60
+            until = midnight + self.tg.digest_until_minutes * 60
             if now < due:
                 await self._sleep(max(1.0, due - now))
                 continue
-            for chat in self.tg.recipient_chats:
-                try:
-                    await self.evening_digest(chat)
-                except Exception as exc:
-                    await self._failed("digest", exc)
+            owed = False
+            if now < until:
+                for chat in self.tg.recipient_chats:
+                    try:
+                        await self.evening_digest(chat)
+                    except Exception as exc:
+                        await self._failed("digest", exc)
+                    owed = owed or await self._digest_owed(chat, now)
+            else:
+                await self._digest_too_late(now)
+            if owed:
+                await self._pause(min(delay, max(1.0, until - now)))
+                delay = min(delay * 2, longest)
+                continue
+            delay = first
             await self._sleep(max(60.0, midnight + 86400 + 60 - self._clock()))  # next day
+
+    async def _digest_owed(self, chat: int, now: float) -> bool:
+        """Today's digest for `chat` has not reached Telegram and may still go."""
+        today = datetime.fromtimestamp(now).date().isoformat()
+        return await self.db.get_meta(DIGEST_DAY_KEY.format(chat=chat)) == today + DIGEST_UNSENT
+
+    async def _digest_too_late(self, now: float) -> None:
+        """Past `digest_until`: a digest still owed is not sent any more; said once."""
+        today = datetime.fromtimestamp(now).date().isoformat()
+        for chat in self.tg.recipient_chats:
+            if await self._digest_owed(chat, now):
+                await self.db.set_meta(DIGEST_DAY_KEY.format(chat=chat), today)
+                logger.warning(
+                    "telegram: today's digest did not reach Telegram by %s; not sent",
+                    self.tg.digest_until or "midnight",
+                )
 
     async def evening_digest(self, chat: int) -> bool:
         """Today's digest for `chat` once: nothing when it was already sent today or has
-        nothing that needs a look (only ordinary events, every alert answered)."""
+        nothing that needs a look (only ordinary events, every alert answered). When
+        Telegram did not take it, the day is marked `<day>:unsent` so that it may go again;
+        a digest that may have arrived (the answer was lost after it went out) stays
+        marked as sent: never twice."""
         now = self._clock()
         today = datetime.fromtimestamp(now).date().isoformat()
         key = DIGEST_DAY_KEY.format(chat=chat)
         if await self.db.get_meta(key) == today:
             return False
         await self.db.set_meta(key, today)  # before sending: never twice
-        midnight = (
-            datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
-        ).timestamp()
+        midnight = _midnight(now)
         minutes = self.tg.digest_minutes or 0
         # deep analysis may find something in last night's clips after yesterday's digest
         day = await self.day(chat, late_since=midnight - 86400 + minutes * 60)
         if not day.substance:
             return False
         text = say.day_digest_text(day, now=now, evening=True)
-        await self.api.send_message(chat, text, thread_id=self._thread(chat, "digest"), silent=True)
+        try:
+            await self.api.send_message(
+                chat, text, thread_id=self._thread(chat, "digest"), silent=True, once=True
+            )
+        except TelegramError as exc:
+            if exc.transient:  # Telegram never got it: it may go again (_digests)
+                await self.db.set_meta(key, today + DIGEST_UNSENT)
+            raise
         self.status.digests_sent += 1
         return True
 

@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import stat
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -116,12 +118,12 @@ class Bot:
 
 async def bot(tmp_path: Path, *, store: Any = None, **telegram: Any) -> Bot:
     config = make_config(tmp_path, **telegram)
-    db = Database(config.storage.database)
+    clock = [time.time()]
+    db = Database(config.storage.database, clock=lambda: clock[0])  # one clock for both
     await db.connect()
     fake = FakeTelegram()
     api = TelegramApi(TOKEN, base_url="http://telegram.test", transport=fake.transport(),
                       sleep=no_sleep)  # fmt: skip
-    clock = [time.time()]
     service = TelegramService(
         config, db, InProcessEventBus(), emit=_noop, api=api, people_store=store,
         face_engine=FakeFaceEngine(), clock=lambda: clock[0], sleep=no_sleep,
@@ -865,6 +867,422 @@ async def test_the_poller_handles_updates_and_remembers_the_offset(tmp_path: Pat
     assert await b.db.get_meta("telegram.offset") == "42"
     assert "setMyCommands" in b.fake.methods()
     assert "Я присылаю тревоги" in b.fake.last("sendMessage").params["text"]
+    await b.db.close()
+
+
+# --- when Telegram cannot be reached ------------------------------------------------------
+
+
+class StaleTransports:
+    """Transports for TelegramApi's clients: the first `stale` never connect (a pool that
+    went bad while the machine itself reaches Telegram), the later ones reach the fake."""
+
+    def __init__(self, fake: FakeTelegram, stale: int) -> None:
+        self.fake, self.stale, self.made = fake, stale, 0
+
+    def __call__(self) -> httpx.AsyncBaseTransport:
+        self.made += 1
+        if self.made <= self.stale:
+
+            def refuse(request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("connection refused", request=request)
+
+            return httpx.MockTransport(refuse)
+        return self.fake.transport()
+
+
+async def until(check: Any, what: str) -> None:
+    for _ in range(300):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"never happened: {what}")
+
+
+def today_at(hour: int, minute: int = 0, second: int = 0) -> float:
+    at = datetime.now().replace(hour=hour, minute=minute, second=second, microsecond=0)
+    return at.timestamp()
+
+
+class StopLoop(Exception):  # noqa: N818 (not an error: the end of a test)
+    """Ends a scheduler loop in a test: it asked to sleep until tomorrow."""
+
+
+async def test_errors_say_whether_telegram_may_have_got_the_message() -> None:
+    fake = FakeTelegram()
+    api = TelegramApi(TOKEN, base_url="http://telegram.test", transport=fake.transport(),
+                      sleep=no_sleep)  # fmt: skip
+    fake.offline = True
+    with pytest.raises(TelegramError) as caught:
+        await api.send_message(OWNER, "hi", once=True)
+    assert caught.value.unsent and caught.value.transient and caught.value.code is None
+    assert fake.refused == 4, "it never left: tried again, safely"
+    assert TOKEN not in str(caught.value)
+
+    fake.offline = False
+    fake.lose_answer("sendMessage")
+    with pytest.raises(TelegramError) as caught:
+        await api.send_message(OWNER, "hi", once=True)
+    assert not caught.value.unsent and not caught.value.transient
+    assert len(fake.all("sendMessage")) == 1, "it may have arrived: never repeated"
+    fake.lose_answer("sendMessage")
+    await api.send_message(OWNER, "hi")
+    assert len(fake.all("sendMessage")) == 3, "an ordinary message is tried again, as before"
+    fake.lose_answer("sendMediaGroup")
+    with pytest.raises(TelegramError):
+        await api.send_media_group(OWNER, [{"type": "photo", "media": "attach://a"}] * 2,
+                                   {"a": ("a.jpg", b"jpeg", "image/jpeg")})  # fmt: skip
+    assert len(fake.all("sendMediaGroup")) == 1, "an upload that may have arrived: never twice"
+
+    for _ in range(4):
+        fake.fail("sendMessage", 502, "Bad Gateway")
+    with pytest.raises(TelegramError) as caught:
+        await api.send_message(OWNER, "hi")
+    assert caught.value.transient, "Telegram answered with a server error: it can go later"
+    fake.fail("sendMessage", 400, "Bad Request: chat not found")
+    with pytest.raises(TelegramError) as caught:
+        await api.send_message(OWNER, "hi")
+    assert caught.value.unsent and not caught.value.transient, "will not fix itself"
+    await api.aclose()
+
+
+async def test_a_client_without_an_answer_for_minutes_is_replaced_and_it_is_said_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="vidette.telegram.api")
+    fake = FakeTelegram()
+    transports = StaleTransports(fake, stale=3)
+    now = [1000.0]
+    api = TelegramApi(TOKEN, base_url="http://telegram.test", transport_factory=transports,
+                      sleep=no_sleep, clock=lambda: now[0], reconnect_after=180)  # fmt: skip
+    with pytest.raises(TelegramError):
+        await api.get_me()
+    assert api.reconnects == 0, "a short outage keeps the client"
+    for _ in range(2):  # still no answer: a new client every 3 minutes
+        now[0] += 200
+        with pytest.raises(TelegramError):
+            await api.get_me()
+    assert api.reconnects == 2
+    now[0] += 200
+    assert (await api.get_me())["username"] == "fake_vidette_bot", "the fourth client works"
+    assert api.reconnects == 3 and transports.made == 4
+    said = [r.getMessage() for r in caplog.records]
+    assert sum("replaced by a new one" in line for line in said) == 1, "logged once"
+    assert any("answers again" in line for line in said)
+    assert TOKEN not in caplog.text
+
+    now[0] += 3600  # answers all along: nothing to replace
+    await api.get_me()
+    assert api.reconnects == 3
+    await api.aclose()
+
+
+async def test_a_new_client_never_cuts_a_request_in_flight() -> None:
+    fake = FakeTelegram()
+    release = asyncio.Event()
+
+    class Slow(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            await release.wait()
+            return fake.handle(request)
+
+    made: list[httpx.AsyncBaseTransport] = []
+
+    def transport() -> httpx.AsyncBaseTransport:
+        made.append(Slow() if not made else fake.transport())
+        return made[-1]
+
+    api = TelegramApi(TOKEN, base_url="http://telegram.test", transport_factory=transport,
+                      sleep=no_sleep)  # fmt: skip
+    poll = asyncio.create_task(api.get_updates(None, timeout=1))
+    await asyncio.sleep(0.02)
+    old = api._client
+    await api.reconnect()
+    assert not old.is_closed, "the long poll still runs on it"
+    assert (await api.get_me())["is_bot"], "new requests take the new client"
+    release.set()
+    assert await poll == []
+    assert old.is_closed, "closed when its last request was over"
+    await api.aclose()
+
+
+async def test_a_digest_goes_again_only_when_telegram_never_got_it(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+    b.clock[0] = today_at(21, 0, 1)
+    await event(b, "20261114-170400", level="elevated", scenario="person_at_house",
+                people=known_people("known"), started=b.clock[0] - 600)  # fmt: skip
+    key = f"telegram.digest_day:{OWNER}"
+    today = datetime.fromtimestamp(b.clock[0]).date().isoformat()
+    b.fake.offline = True
+    with pytest.raises(TelegramError) as caught:
+        await b.service.evening_digest(OWNER)
+    assert caught.value.transient
+    assert await b.db.get_meta(key) == f"{today}:unsent", "Telegram never got it: owed"
+    b.fake.offline = False
+    assert await b.service.evening_digest(OWNER) is True
+    assert await b.db.get_meta(key) == today
+    assert await b.service.evening_digest(OWNER) is False, "once"
+    assert len(b.fake.all("sendMessage")) == 1
+
+    # the next evening the answer is lost after the digest went out: it may have arrived
+    b.clock[0] += 86400
+    await event(b, "20261115-170400", level="elevated", scenario="person_at_house",
+                people=known_people("known"), started=b.clock[0] - 600)  # fmt: skip
+    b.fake.lose_answer("sendMessage")
+    with pytest.raises(TelegramError) as caught:
+        await b.service.evening_digest(OWNER)
+    assert not caught.value.transient
+    tomorrow = datetime.fromtimestamp(b.clock[0]).date().isoformat()
+    assert await b.db.get_meta(key) == tomorrow, "marked as sent: never twice"
+    assert await b.service.evening_digest(OWNER) is False
+    assert len(b.fake.all("sendMessage")) == 2, "it reached Telegram once and is not repeated"
+    await b.db.close()
+
+
+async def test_the_evening_digest_is_retried_until_it_lands(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+    start = today_at(21, 0, 1)
+    b.clock[0] = start
+    await event(b, "20261114-170400", level="elevated", scenario="person_at_house",
+                people=known_people("known"), started=start - 600)  # fmt: skip
+    b.fake.offline = True
+    pauses: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        if seconds > 600:
+            raise StopLoop  # longer than any pause between tries: until tomorrow
+        pauses.append(seconds)
+        b.clock[0] += seconds
+        b.fake.offline = b.clock[0] < start + 400  # Telegram is back after ~7 minutes
+
+    b.service._sleep = sleep
+    with pytest.raises(StopLoop):
+        await b.service._digests()
+    assert pauses == [30, 60, 120, 240], "a growing pause between tries"
+    [digest] = b.fake.all("sendMessage")
+    assert "Итог дня" in digest.params["text"] and digest.params["message_thread_id"] == DIGEST
+    await b.db.close()
+
+
+async def test_a_digest_that_cannot_go_by_digest_until_is_not_sent_late(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    b = await bot(tmp_path)
+    start = today_at(21, 0, 1)
+    b.clock[0] = start
+    await event(b, "20261114-170400", level="elevated", scenario="person_at_house",
+                people=known_people("known"), started=start - 600)  # fmt: skip
+    b.fake.offline = True
+    pauses: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        if seconds > 600:
+            raise StopLoop
+        pauses.append(seconds)
+        b.clock[0] += seconds
+
+    b.service._sleep = sleep
+    with pytest.raises(StopLoop):
+        await b.service._digests()
+    assert max(pauses) == 600, "the pause grows to ten minutes"
+    assert b.clock[0] == today_at(23, 30), "the last try was at 23:30 sharp"
+    assert not b.fake.all("sendMessage") and b.fake.refused > 0
+    today = datetime.fromtimestamp(start).date().isoformat()
+    assert await b.db.get_meta(f"telegram.digest_day:{OWNER}") == today, "given up for today"
+    assert "did not reach Telegram by 23:30" in caplog.text
+
+    # back at 23:40 (a restart, or Telegram again): not sent late any more
+    b.fake.offline = False
+    b.clock[0] = today_at(23, 40)
+    with pytest.raises(StopLoop):
+        await b.service._digests()
+    assert not b.fake.all("sendMessage")
+    await b.db.close()
+
+
+def test_digest_until_is_checked(tmp_path: Path) -> None:
+    tg = make_config(tmp_path, digest_at="23:45").notifications.telegram
+    assert tg is not None and tg.digest_until_minutes == 24 * 60, "the default is not before it"
+    tg = make_config(tmp_path, digest_until=None).notifications.telegram
+    assert tg is not None and tg.digest_until_minutes == 24 * 60
+    tg = make_config(tmp_path).notifications.telegram
+    assert tg is not None and tg.digest_until_minutes == 23 * 60 + 30
+    with pytest.raises(ValueError, match="digest_until must be later than digest_at"):
+        make_config(tmp_path, digest_at="22:00", digest_until="21:30")
+    with pytest.raises(ValueError, match="digest_until must be a local time"):
+        make_config(tmp_path, digest_until="late")
+    with pytest.raises(ValueError, match="late_alerts_for"):
+        make_config(tmp_path, late_alerts_for="soon")
+
+
+async def test_an_alert_telegram_could_not_take_goes_late_once(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+    b.clock[0] = today_at(12)
+    event_id = await event(b, "20260115-101500", people=known_people("unknown"))
+    b.fake.offline = True
+    assert await alert(b, event_id) == []
+    [waiting] = await b.db.pending_telegram_messages()
+    assert waiting.message_id is None and waiting.data["pending"]["what"] == "send"
+    assert b.service.status.failures == 1
+    assert await alert(b, event_id) == [], "still one alert per event and chat"
+    assert await b.service.resend_pending() is False, "still out of reach: it keeps waiting"
+    assert len(await b.db.pending_telegram_messages()) == 1
+
+    # an hour later Telegram answers again; the service was restarted meanwhile
+    restarted = await bot(tmp_path)
+    restarted.clock[0] = b.clock[0] + 3600
+    assert await restarted.service.resend_pending() is True
+    media = json.loads(restarted.fake.last("sendMediaGroup").params["media"])
+    assert [m["type"] for m in media] == ["photo"] * 3 + ["video"]
+    message = restarted.fake.last("sendMessage").params
+    due = datetime.fromtimestamp(waiting.created_at).strftime("%H:%M:%S")
+    assert f"С опозданием: в {due} Telegram был недоступен." in message["text"]
+    assert "Тревога: критично" in message["text"] and message["message_thread_id"] == ALERTS
+    assert message["reply_parameters"]["message_id"] == 101, "the text answers the album"
+    sent = await restarted.db.get_telegram_message(waiting.id)
+    assert sent is not None and sent.message_id is not None and "pending" not in sent.data
+    assert await restarted.service.resend_pending() is True
+    assert len(restarted.fake.all("sendMessage")) == 1, "once"
+
+    await restarted.service.handle_update(callback(restarted, sent, "ok"))
+    assert "С опозданием" in restarted.fake.last("editMessageText").params["text"]
+    await restarted.db.close()
+    await b.db.close()
+
+
+async def test_alerts_that_waited_too_long_are_not_sent_and_the_chat_hears_it(
+    tmp_path: Path,
+) -> None:
+    b = await bot(tmp_path, late_alerts_for="30m")
+    b.clock[0] = today_at(12)
+    first = await event(b, "20260115-101500")
+    b.fake.offline = True
+    await alert(b, first)
+    b.clock[0] += 600  # past `collapse`
+    second = await event(b, "20261114-170301")
+    await alert(b, second)
+    assert len(await b.db.pending_telegram_messages()) == 2
+    b.clock[0] += 3600
+    assert await b.service.resend_pending() is False, "the line about them waits too"
+    assert await b.db.pending_telegram_messages() == []
+    b.fake.offline = False
+    assert await b.service.resend_pending() is True
+    [note] = b.fake.all("sendMessage")
+    assert "2 тревоги с 12:00 до 12:10 не отправлены" in note.params["text"], "when they were due"
+    assert note.params["message_thread_id"] == ALERTS and not b.fake.all("sendMediaGroup")
+    day = await b.service.day(OWNER)
+    assert len(day.notable) == 2 and day.alerts == 0, "the digest lists them"
+    await b.db.close()
+
+
+async def test_late_alerts_and_edits_follow_the_usual_rules(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+    b.clock[0] = today_at(12)
+    # the album went out, the text did not: later only the text goes, answering the album
+    first = await event(b, "20260115-101500")
+    for _ in range(4):
+        b.fake.fail("sendMessage", 502, "Bad Gateway")
+    assert await alert(b, first) == []
+    [waiting] = await b.db.pending_telegram_messages()
+    assert waiting.data["album"] == [101, 102, 103, 104]
+    # a lower level on the same camera, due within `collapse`, while Telegram is away
+    b.fake.offline = True
+    b.clock[0] += 60
+    second = await event(b, "20261114-170301", level="elevated", scenario="person_at_house")
+    assert await alert(b, second) == []
+    # an early alert the whole clip then called ordinary: not sent at all
+    b.clock[0] += 900
+    third = await event(b, "20261114-171800", extra={"phase": "early"})
+    assert await alert(b, third) == []
+    await b.db.update_event(third, state="dismissed")
+
+    b.fake.offline = False
+    b.clock[0] += 600
+    assert await b.service.resend_pending() is True
+    assert len(b.fake.all("sendMediaGroup")) == 1, "the album is not sent twice"
+    [late] = [c.params for c in b.fake.all("sendMessage") if "С опозданием" in c.params["text"]]
+    assert late["reply_parameters"]["message_id"] == 101
+    edit = b.fake.last("editMessageText").params["text"]
+    assert "Ещё на этой камере: 1\n＋ 12:00:00" in edit, "folded in, as it would have been"
+    assert len(b.fake.all("sendMessage")) == 5, "four refused tries and one late alert"
+    alerted = await b.db.telegram_alerted_events(OWNER, since=0)
+    assert alerted == {first, second}, "the ordinary one went nowhere"
+    await b.db.close()
+
+
+async def test_edits_of_alerts_wait_for_telegram_too(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+    b.clock[0] = today_at(12)
+    early_clip = b.root / ".early" / "20260115-101500.mp4"
+    early_clip.parent.mkdir(parents=True, exist_ok=True)
+    early_clip.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    event_id = await event(b, "20260115-101500", extra={"phase": "early"})
+    await b.db.update_event(event_id, clip_path=str(early_clip))
+    (sent,) = await alert(b, event_id)
+
+    b.fake.offline = True
+    # another alert on the camera folds into this one: its edit waits
+    other = await event(b, "20261114-170301", level="elevated", scenario="person_at_house")
+    await alert(b, other)
+    # and the whole clip, judged meanwhile, cannot reach the alert either
+    row = await b.db.get_event(event_id)
+    assert row is not None
+    intent = dict(row.intent or {}, phase="final")
+    await b.db.update_event(event_id, clip_path=str(row.source_ref), intent=intent)
+    row = await b.db.get_event(event_id)
+    assert row is not None
+    await b.service.refresh_event(row)
+    [waiting] = await b.db.pending_telegram_messages()
+    assert waiting.id == sent.id and waiting.data["pending"]["what"] == "refresh"
+
+    b.fake.offline = False
+    assert await b.service.resend_pending() is True
+    text = b.fake.last("editMessageText").params["text"]
+    assert "Уточнено по всему ролику." in text and "Ещё на этой камере: 1" in text
+    assert len(b.fake.all("editMessageMedia")) == 1, "the whole clip is attached"
+    assert len(b.fake.all("sendMessage")) == 1, "no second buzz"
+    await b.db.close()
+
+
+async def test_the_queue_goes_out_as_soon_as_telegram_answers_again(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+    forever = asyncio.Event()
+
+    async def long_pause(_seconds: float) -> None:
+        await forever.wait()
+
+    b.service._sleep = long_pause  # the pause between tries outlasts the test
+    b.fake.offline = True
+    await alert(b, await event(b, "20260115-101500"))
+    b.service._online.clear()  # what the poller does when it cannot reach Telegram
+    worker = asyncio.create_task(b.service._resend())
+    await asyncio.sleep(0.05)
+    assert not b.fake.all("sendMessage")
+    b.fake.offline = False
+    b.service._online.set()  # the poller heard Telegram again
+    await until(lambda: bool(b.fake.all("sendMessage")), "the late alert")
+    assert "С опозданием" in b.fake.last("sendMessage").params["text"]
+    worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+    await b.db.close()
+
+
+async def test_the_poller_says_when_telegram_is_out_of_reach_and_back(tmp_path: Path) -> None:
+    b = await bot(tmp_path)
+
+    async def tick(_seconds: float) -> None:
+        await asyncio.sleep(0)
+
+    b.service._sleep = tick
+    b.fake.offline = True
+    task = asyncio.create_task(b.service._poll())
+    await until(lambda: not b.service._online.is_set(), "offline")
+    b.fake.offline = False
+    await until(lambda: b.service._online.is_set(), "online again")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     await b.db.close()
 
 
