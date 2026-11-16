@@ -120,7 +120,7 @@ and keeps the report with the event.
 | Where | "This is Sam" | "A stranger" | "Not sure" |
 |---|---|---|---|
 | Web app, event card | the **This is Sam** button | **Stranger** | **Not sure** |
-| Telegram alert ([telegram.md](telegram.md)) | **Это свой** → Sam | | |
+| Telegram alert ([telegram.md](telegram.md)) | **Who is it?** → **One of us: Sam** | **Stranger** | |
 | Contact-sheet reply | `5 Sam` (`5.2 Sam` for face 2) | `5 stranger` (`чужой`) | `5.2 ?` |
 | Command line | `vidette people confirm CLIP 2 Sam` | `… 2 stranger` | `… 2 unsure` |
 
@@ -205,7 +205,7 @@ policies:
 ### Change your mind
 
 Every answer about a face can be changed or taken back, on the event card (**Change**,
-**Undo**) and in Telegram (**Отменить решение**): the answer remembers what it changed (a
+**Undo**) and in Telegram (**Take it back**): the answer remembers what it changed (a
 reference added to Sam, a raised threshold, a sighting added or moved, an identity
 promoted) and takes back exactly that.
 
@@ -221,7 +221,7 @@ promoted) and takes back exactly that.
 A face of any size can be put in an identity by hand; one under 64 px says it may not
 be recognized next time, because small faces rarely match even the same person.
 
-**Familiar** («знакомый, не тревожить») is for people who are neither household nor
+**Familiar** ("familiar, do not alert") is for people who are neither household nor
 strangers: a neighbour, the postman. For alerts they count like the household: an event
 where everyone recognized is household or familiar goes to the digest at an
 `unless_known` level, a `known_people: quiet` policy tells the judge they need no alert,
@@ -248,12 +248,13 @@ was seen `sightings` times within `within`, or on `cameras` cameras within
 known ones never do, nor one close to someone enrolled. `other`, an abstention and anything already at or above `raise_to`
 stay as the judge said; nothing is lowered. `vidette eval` does not apply the rule.
 
-The Telegram alert says who: `👤 незнакомец №12, 3-й раз за сегодня (Улица, Двор за час)`,
-`знакомый: Соседка`, `незнакомец №40 (лицо мелкое)`, `лицо не найдено`, and `· уровень
-поднят: приходит не первый раз` when the rule raised it. **Кто это?** under the alert
-opens a menu per face: **Свой: …** (an enrolled person: the whole identity becomes them),
-**Знакомый: …** (a familiar identity), **Новый знакомый…** and **Новая личность…** (the bot
-asks for a name: reply to its message), **Чужой**, **Отменить решение**. Identity crops
+The Telegram alert says who: `👤 stranger #12, 3rd time today (Street, Yard within the
+hour)`, `familiar: Neighbour`, `stranger #40 (small face)`, `no face found`, and `· level
+raised: not the first visit` when the rule raised it. **Who is it?** under the alert
+opens a menu per face: **One of us: …** (an enrolled person: the whole identity becomes
+them), **Familiar: …** (a familiar identity), **New familiar…** and **New identity…** (the
+bot asks for a name: reply to its message), **Stranger**, **Take it back**. With
+`language: ru` the same reads «незнакомец №12, 3-й раз за сегодня», «Кто это?». Identity crops
 are never sent to Telegram or anywhere else.
 
 ### The Identities view

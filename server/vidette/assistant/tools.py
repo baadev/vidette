@@ -7,9 +7,10 @@ purpose: a shared local model has about 2000 tokens a conversation.
 
 Privacy: names (of enrolled people and of identities someone named) appear in results
 only with `names=True`, which the caller sets for a local model with the household's
-`notifications.telegram.names` on. A cloud model or an MCP client gets "свой" and
-"№12". No tool returns a face crop, an embedding or a frame; videos go to the chat, never
-to the model.
+`notifications.telegram.names` on. A cloud model or an MCP client gets "one of us" and
+"#12". Values are plain English for the model; errors a person may read are in the bot's
+language (vidette.telegram.i18n). No tool returns a face crop, an embedding or a frame;
+videos go to the chat, never to the model.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from vidette.ffmpeg import MediaToolError
 from vidette.linked import Linked, describe, find_around, find_linked, mosaic
 from vidette.people.identities import IdentityStore
 from vidette.telegram import text as say
+from vidette.telegram.i18n import t
 from vidette.telegram.routing import alerting_verdict
 
 MAX_EVENTS = 12
@@ -160,7 +162,7 @@ def parse_when(text: str, *, now: float) -> float:
         if at.timestamp() > now + 600:  # "23:10" asked after midnight: yesterday
             at -= timedelta(days=1)
         return at.timestamp()
-    raise ToolError(f"не понял время «{text}»: нужно HH:MM, YYYY-MM-DD HH:MM или -2h")
+    raise ToolError(t("tool.bad_time", text=text))
 
 
 def hms(ts: float, *, now: float | None = None) -> str:
@@ -211,7 +213,7 @@ class Tools:
         }
         handler = handlers.get(name)
         if handler is None:
-            raise ToolError(f"нет инструмента {name}")
+            raise ToolError(t("tool.unknown", name=name))
         return await handler(args)
 
     # --- helpers -----------------------------------------------------------------------
@@ -223,9 +225,9 @@ class Tools:
         verdict = alerting_verdict(row.intent, row.policy)
         label = verdict.get("label")
         if not label:
-            return "без вердикта"
+            return "no verdict"
         if label == OTHER_SCENARIO:
-            return "ничего из правил"
+            return "none of the rules"
         policy = self._policy(row.policy or verdict.get("policy"))
         found = policy.scenario_configs().get(str(label)) if policy is not None else None
         return found.title if found is not None and found.title else str(label)
@@ -240,25 +242,25 @@ class Tools:
             brief = face.get("identity")
             if face.get("status") == "known":
                 name = face.get("name") if self.names else None
-                out.append(f"свой: {name}" if name else "свой")
+                out.append(f"one of us: {name}" if name else "one of us")
             elif isinstance(brief, Mapping) and isinstance(brief.get("id"), int):
                 status = brief.get("status")
-                word = {"familiar": "знакомый", "suspicious": "подозрительный"}.get(
-                    str(status), "незнакомец"
+                word = {"familiar": "familiar", "suspicious": "suspicious"}.get(
+                    str(status), "stranger"
                 )
                 name = brief.get("name") if self.names else None
-                out.append(f"{word} №{brief['id']}" + (f" ({name})" if name else ""))
+                out.append(f"{word} #{brief['id']}" + (f" ({name})" if name else ""))
             else:
-                out.append("лицо мелкое")
+                out.append("small face")
         return out
 
     async def _event(self, event_id: object) -> EventRow:
         wanted = self.current if event_id in (None, "", CURRENT) else str(event_id)
         if not wanted:
-            raise ToolError("событие не указано: ответьте на сообщение с тревогой или дайте id")
+            raise ToolError(t("tool.no_event"))
         row = await self.db.get_event(wanted)
         if row is None:
-            raise ToolError(f"нет события {wanted}")
+            raise ToolError(t("tool.event_missing", id=wanted))
         return row
 
     def _brief(self, row: EventRow) -> dict[str, Any]:
@@ -277,7 +279,7 @@ class Tools:
         if faces:
             brief["faces"] = faces
         if row.feedback:
-            brief["owner"] = "верно" if row.feedback == "up" else "ложная"
+            brief["owner"] = "right" if row.feedback == "up" else "false alarm"
             if isinstance(review, Mapping) and review.get("reason"):
                 brief["owner"] += f" ({review['reason']})"
         return brief
@@ -308,7 +310,8 @@ class Tools:
             ]  # fmt: skip
         identity = args.get("identity")
         if isinstance(identity, int):
-            rows = [r for r in rows if any(f"№{identity}" in f for f in self._faces(r))]
+            mark = re.compile(rf"#{identity}\b")
+            rows = [r for r in rows if any(mark.search(f) for f in self._faces(r))]
         total = len(rows)
         listed = [self._brief(r) for r in rows[:MAX_EVENTS]]
         return Result({"total": total, "shown": len(listed), "events": listed})
@@ -321,7 +324,7 @@ class Tools:
         detail["level"] = verdict.get("level")
         stream = (row.intent or {}).get("stream")
         if isinstance(stream, Mapping) and stream.get("interrupted"):
-            detail["recording"] = "прерывалась"
+            detail["recording"] = "interrupted"
         detail["clip"] = bool(row.clip_path and Path(row.clip_path).is_file())
         return Result(detail)
 
@@ -339,9 +342,9 @@ class Tools:
             if clip.same_person:
                 item["same_person_by_face"] = True
             elif clip.persons:
-                item["person"] = "есть, лицо не сравнить"
+                item["person"] = "yes, no face to compare"
             if clip.approximate:
-                item["time"] = "примерно"
+                item["time"] = "approximate"
             if clip.event_id:
                 item["event_id"] = clip.event_id
             clips.append(item)
@@ -367,16 +370,16 @@ class Tools:
 
     async def identity_sightings(self, args: Mapping[str, Any]) -> Result:
         if self.identities is None:
-            raise ToolError("личности по лицам выключены (people.track_unknown)")
+            raise ToolError(t("tool.identities_off"))
         number = args.get("identity")
         if not isinstance(number, int):
-            raise ToolError("нужен номер личности, например 12")
+            raise ToolError(t("tool.identity_number"))
         current_id = await asyncio.to_thread(self.identities.resolve, number)  # after merges
         row = (
             None if current_id is None else await asyncio.to_thread(self.identities.get, current_id)
         )
         if row is None:
-            raise ToolError(f"нет личности №{number}")
+            raise ToolError(t("tool.identity_missing", n=number))
         number = row.id
         days = args.get("days") if isinstance(args.get("days"), int) else 7
         since = self._clock() - float(days or 7) * 86400
@@ -411,13 +414,13 @@ class Tools:
         try:
             made = await mosaic(linked, self.config)
         except (MediaToolError, OSError, ValueError) as exc:
-            data["video"] = f"не склеилось: {exc}"[:200]
+            data["video"] = f"not stitched: {exc}"[:200]
             return Result(data)
         if made is None:
-            data["video"] = "нечего склеивать: другие камеры в это время ничего не записали"
+            data["video"] = "nothing to stitch: the other cameras recorded nothing then"
             return Result(data)
         names = [self.camera_name(c) for c in made.cameras]
-        data["video"] = f"отправлено: {', '.join(names)}"
+        data["video"] = f"sent: {', '.join(names)}"
         places = [made.place(i) for i in range(len(made.cameras))]
         approximate = {self.camera_name(c.camera) for c in linked.clips if c.approximate}
         configured = [f.camera for f in self.config.clip_folders]
@@ -426,7 +429,7 @@ class Tools:
             describe(linked, camera_name=self.camera_name, configured=configured), approximate,
         )  # fmt: skip
         media = [
-            Media(path, caption if n == 1 else f"Часть {n} из {len(made.files)}",
+            Media(path, caption if n == 1 else t("mosaic.part", n=n, total=len(made.files)),
                   (made.width, made.height))
             for n, path in enumerate(made.files, start=1)
         ]  # fmt: skip
@@ -434,16 +437,16 @@ class Tools:
 
     async def mark_event(self, args: Mapping[str, Any]) -> Result:
         if self._mark is None:
-            raise ToolError("отмечать можно только из чата с ботом")
+            raise ToolError(t("tool.mark_chat_only"))
         row = await self._event(args.get("event_id"))
         answer = str(args.get("answer") or "")
         if answer not in ("right", "wrong", "unsure"):
-            raise ToolError("answer: right, wrong или unsure")
+            raise ToolError(t("tool.answer_values"))
         reason = args.get("reason")
         said = await self._mark(row.id, answer, str(reason) if reason else None)
         return Result({"done": said})
 
     async def today(self, _args: Mapping[str, Any]) -> Result:
         if self._digest is None:
-            raise ToolError("сводка доступна только в чате с ботом")
+            raise ToolError(t("tool.digest_chat_only"))
         return Result({"digest": await self._digest()})

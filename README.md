@@ -107,20 +107,22 @@ vibe, and a security system that runs on vibes gets switched off.
 - **An alert** is an album of up to three frames that show the subject (the sharpest moment
   of each face, then the frames the judge points at) and the clip, with the camera, the
   time, what the judge saw and who the face check recognized.
-- **👍 / 👎 / Кто это? / Не знаю**: 👎 asks why (passed by, own car, ours, an animal,
+- **👍 / 👎 / Who is it? / Not sure**: 👎 asks why (passed by, own car, ours, an animal,
   light, a stalled recording, …). Each answer is feedback on the event and a reviewed label
   in the clip's dataset; the buttons then shrink to one that takes the answer back.
 - **Early alerts** from the first seconds of a recording, for levels that wake for anyone;
   the same message is updated when the whole clip has been judged.
 - **An evening digest**, sent only when something needs a look; `/status` (including where
   the last alert's time went), `/quiet`, `/help`.
-- **Questions in plain words** («where else was this person?», «send the other cameras»):
+- **Questions in plain words** ("where else was this person?", "send the other cameras"):
   a small tool-calling assistant answers from events, clips and identities, on the judge's
   local model by default. The same read-only tools are served over MCP at
   `POST /api/v1/mcp` ([docs/assistant.md](docs/assistant.md)).
 
-The bot speaks Russian for now; the judge's one-line description can be in any language
-(`understanding.vlm.language`).
+The bot speaks English by default and Russian with `notifications.telegram.language: ru`
+(every phrase lives in one catalog per language). The judge's description, deep analysis
+and the assistant's answers follow the same language unless `understanding.vlm.language`
+says otherwise.
 
 ### People, opt-in
 
@@ -324,7 +326,7 @@ everything else: [ROADMAP.md](ROADMAP.md).
 | `vidette label`: model drafts, phone contact sheets, replies by number | ✅ |
 | `vidette eval`: baselines, VLM judges side by side, intervals, cost | ✅ |
 | Signed webhooks, Apprise (100+ services), web push, MQTT + Home Assistant discovery | ✅ on confirmed events only |
-| The bot in English | 🔭 |
+| The bot in English (default) or Russian (`language: ru`), one catalog per language | ✅ tested in both languages |
 | A plain-language policy shown back as an inspectable spec | 📐 levels are written by hand |
 | Dry run of a policy over past events | 📐 |
 | Calibration from 👍 / 👎 | 📐 the answers are collected as labels |

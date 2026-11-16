@@ -337,6 +337,7 @@ class VlmConfig(StrictModel):
         return self
 
 
+BOT_LANGUAGE_NAMES: dict[str, str] = {"en": "English", "ru": "Russian"}
 _WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$")
 
 
@@ -722,6 +723,10 @@ class TelegramConfig(StrictModel):
     # Who gets alerts and digests: "first" (only the first allowed chat: a trial run) or
     # "all". Commands are answered in every allowed chat either way.
     recipients: Literal["first", "all"] = "all"
+    # The bot's language: every message, button and digest (vidette.telegram.i18n), and the
+    # language the judge, deep analysis and the assistant write in unless
+    # understanding.vlm.language says otherwise.
+    language: Literal["en", "ru"] = "en"
     # Names of recognized people in messages and on the "This is ..." buttons. Off: "known".
     names: bool = False
     frames: int = Field(default=3, ge=1, le=9)  # album frames that show the subject
@@ -934,6 +939,10 @@ class VidetteConfig(StrictModel):
                     raise ValueError(
                         f"notification rule '{rule.when}' references unknown channel '{channel}'"
                     )
+        telegram = self.notifications.telegram
+        # free text a model writes follows the bot's language unless set on its own
+        if self.understanding.vlm.language is None and telegram and telegram.language != "en":
+            self.understanding.vlm.language = BOT_LANGUAGE_NAMES[telegram.language]
         return self
 
     def watched_cameras(self) -> list[str] | None:

@@ -56,9 +56,10 @@ from vidette.people.identities import IdentityError, IdentityStore, SightingCont
 from vidette.people.recurrence import was_raised
 from vidette.people.report import STRANGER, PeopleReport
 from vidette.people.store import PeopleStore, StoreError
-from vidette.telegram import reasons
+from vidette.telegram import i18n, reasons
 from vidette.telegram import text as say
 from vidette.telegram.api import TelegramApi, TelegramError, Upload
+from vidette.telegram.i18n import t
 from vidette.telegram.routing import alerting_verdict, decide, known_only, level_rank
 from vidette.verdicts.frames import spread
 from vidette.vlm.budget import MetaLedger
@@ -77,24 +78,20 @@ REFRESH_TOPICS = frozenset({"event.updated", "event.dismissed"})  # the whole cl
 EARLY_MARK = ".early"  # a clip path inside a dataset's early windows
 MAX_DIGEST_EVENTS = 5000
 _FAILURE_EMIT_EVERY = 10
-COMMANDS = [
-    ("status", "камеры, события за сегодня, сводка"),
-    ("live", "живое видео (будет в приложении Vidette)"),
-    ("quiet", "тишина на час; /quiet off снять"),
-    ("help", "что умеет бот"),
-]
-UNJUDGED_REASONS = (
-    ("context size", "кадры не помещаются в модель судьи"),
-    ("timeout", "судья не успел"),
-    ("network", "судья недоступен"),
-    ("budget", "бюджет судьи исчерпан"),
-    ("auth", "судья не принял ключ"),
-    ("rate_limited", "судья занят"),
-    ("server", "ошибка судьи"),
-    ("not_found", "модель не найдена"),
-    ("bad_answer", "непонятный ответ судьи"),
-    ("unsure", "судья не уверен"),
-    ("no frames", "нет кадров"),
+COMMANDS = ("status", "live", "quiet", "help")  # descriptions: `cmd.<name>` in the catalog
+QUIET_OFF_WORDS = frozenset({"off", "stop", "выкл", "стоп"})  # /quiet off, in any language
+UNJUDGED_REASONS = (  # what a verdict's summary says → `unjudged.<key>` in the catalog
+    ("context size", "context"),
+    ("timeout", "timeout"),
+    ("network", "network"),
+    ("budget", "budget"),
+    ("auth", "auth"),
+    ("rate_limited", "rate_limited"),
+    ("server", "server"),
+    ("not_found", "not_found"),
+    ("bad_answer", "bad_answer"),
+    ("unsure", "unsure"),
+    ("no frames", "no_frames"),
 )
 
 
@@ -118,12 +115,12 @@ def subject_frames(row: EventRow) -> list[Path]:
 
 def unjudged_reason(summary: str | None) -> str:
     if not summary:
-        return "не дошла очередь"
+        return t("unjudged.queue")
     lowered = summary.lower()
-    for key, words in UNJUDGED_REASONS:
-        if key in lowered:
-            return words
-    return "нет вердикта"
+    for found, key in UNJUDGED_REASONS:
+        if found in lowered:
+            return t(f"unjudged.{key}")
+    return t("unjudged.none")
 
 
 @dataclass
@@ -160,6 +157,7 @@ class TelegramService:
             raise ValueError("notifications.telegram is not configured")
         self.config = config
         self.tg: TelegramConfig = telegram
+        i18n.use(telegram.language)  # every phrase the bot sends, from here on
         self.db = db
         self.bus = bus
         self._emit = emit
@@ -249,17 +247,17 @@ class TelegramService:
 
     def _level_title(self, policy: PolicyConfig | None, level: str | None) -> str:
         if policy is None or not policy.levels:
-            return "по политике"
+            return t("level.by_policy")
         if level is None:
-            return "нет"
+            return t("level.none")
         config = policy.levels.get(level)
         return (config.title if config and config.title else level) or level
 
     def _scenario_title(self, policy: PolicyConfig | None, scenario: str | None) -> str:
         if not scenario:
-            return "тихо"
+            return t("scenario.quiet")
         if scenario == OTHER_SCENARIO:
-            return "другое"
+            return t("scenario.other")
         if policy is not None:
             found = policy.scenario_configs().get(scenario)
             if found is not None and found.title:
@@ -313,11 +311,11 @@ class TelegramService:
         data = dict(target.data)
         if message.kind == "alert":
             if row.state != EventState.confirmed.value:
-                data["note"] = "Уточнено по всему ролику: это не тревога."
+                data["note"] = t("note.clip_not_alert")
             elif "final" in (row.intent or {}):  # the clip got no verdict
-                data["note"] = "Весь ролик судья не оценил; тревога по первым секундам."
+                data["note"] = t("note.clip_unjudged")
             else:
-                data["note"] = "Уточнено по всему ролику."
+                data["note"] = t("note.clip_refined")
             if not data.get("clip_attached"):
                 await self._attach_clip(target, row, data)
             data["updated_at"] = self._clock()
@@ -353,8 +351,8 @@ class TelegramService:
         if size_mb > self.tg.max_video_mb:
             base = self.tg.clip_url or self.config.server.base_url
             link = f"{base.rstrip('/')}/api/v1/events/{row.id}/clip.mp4" if base else None
-            data["video_note"] = f"🎞 Весь ролик {size_mb:.0f} МБ, больше лимита: " + (
-                f'<a href="{link}">смотреть дома</a>' if link else "смотреть в Vidette"
+            data["video_note"] = t("video.too_big_whole", mb=f"{size_mb:.0f}") + (
+                f'<a href="{link}">{t("video.watch_home")}</a>' if link else t("video.watch_app")
             )
             data["clip_attached"] = True
             return
@@ -407,13 +405,13 @@ class TelegramService:
     ) -> str:
         if not alert:
             if verdict.get("abstained"):
-                return "Без проверки это ушло бы в сводку: судья не вынес вердикт."
-            return "Без проверки это ушло бы в сводку: судья не считает это тревогой."
+                return t("why.no_verdict")
+            return t("why.not_alert")
         if quiet and wake is not Wake.always:
-            return "Без проверки это ушло бы в сводку: включена тишина."
+            return t("why.quiet")
         if wake is Wake.unless_known and known_only(people, persons):
-            return "Без проверки это ушло бы в сводку: узнаны только свои."
-        return "Без проверки это ушло бы в сводку."
+            return t("why.known")
+        return t("why.plain")
 
     def _facts(
         self,
@@ -427,10 +425,10 @@ class TelegramService:
         persons = verdict.get("persons") if isinstance(verdict.get("persons"), int) else None
         description = verdict.get("rationale") or row.summary
         if verdict.get("abstained") or not verdict:
-            description = f"Вердикта нет: {unjudged_reason(row.summary)}"
+            description = t("alert.no_verdict", why=unjudged_reason(row.summary))
             rationale = str(verdict.get("rationale") or "")
             if rationale.startswith("unsure: "):
-                description = f"Судья не уверен: {rationale.removeprefix('unsure: ')}"
+                description = t("alert.judge_unsure", why=rationale.removeprefix("unsure: "))
         return say.AlertFacts(
             camera=self.camera_name(row.camera),
             started_at=row.started_at,
@@ -443,14 +441,14 @@ class TelegramService:
                 names=self.tg.names,
                 camera_name=self.camera_name,
             )
-            + (" · уровень поднят: приходит не первый раз" if was_raised(policy, verdict) else ""),
+            + (t("who.raised") if was_raised(policy, verdict) else ""),
             alert=row.state == EventState.confirmed.value,
             test=bool(data.get("test")),
             note=data.get("note"),
             extra=tuple(data.get("extra") or ()),
             mark=data.get("mark")
             or (
-                f"<i>метка в датасет не записана: {escape(str(data['problem']))}</i>"
+                f"<i>{t('alert.label_failed', problem=escape(str(data['problem'])))}</i>"
                 if data.get("problem")
                 else None
             ),
@@ -486,7 +484,7 @@ class TelegramService:
             return None  # this chat already has this event: one alert per event
         data: dict[str, Any] = {"rank": rank, "test": test, "note": note}
         if (row.intent or {}).get("phase") == "early" and note is None:
-            data["note"] = "По первым секундам записи; весь ролик пришлю в это сообщение."
+            data["note"] = t("note.early")
         try:
             album = await self._send_album(chat, thread, row, data)
             facts = self._facts(row, verdict, policy, data)
@@ -585,8 +583,10 @@ class TelegramService:
             else:
                 base = self.tg.clip_url or self.config.server.base_url
                 link = f"{base.rstrip('/')}/api/v1/events/{row.id}/clip.mp4" if base else None
-                data["video_note"] = f"🎞 Ролик {size_mb:.0f} МБ, больше лимита: " + (
-                    f'<a href="{link}">смотреть дома</a>' if link else "смотреть в Vidette"
+                data["video_note"] = t("video.too_big", mb=f"{size_mb:.0f}") + (
+                    f'<a href="{link}">{t("video.watch_home")}</a>'
+                    if link
+                    else t("video.watch_app")
                 )
         if not media:
             return []
@@ -602,7 +602,7 @@ class TelegramService:
             )
         except TelegramError as exc:
             await self._failed("album", exc)
-            data["note"] = (data.get("note") or "") + " Кадры не отправились."
+            data["note"] = (data.get("note") or "") + t("alert.frames_failed")
             return []
         return [int(message["message_id"]) for message in sent]
 
@@ -614,9 +614,9 @@ class TelegramService:
         keyboard: str = "main",
         data: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """The buttons under an alert. Before any answer: 👍 👎 / Кто это? Не знаю. After
+        """The buttons under an alert. Before any answer: 👍 👎 / Who is it? Not sure. After
         one, every evaluation shrinks to one button that says what was chosen
-        («👎 прошёл мимо», «👤 знакомый «Соседка»»); tapping it takes the answer back and
+        ("👎 walked past", "👤 familiar “Neighbour”"); tapping it takes the answer back and
         brings the full buttons again. No bulky keyboards stay on old alerts."""
         data = data or {}
 
@@ -629,15 +629,16 @@ class TelegramService:
             verdict = alerting_verdict(row.intent, row.policy)
             listed = [button(r.button, f"r:{r.code}") for r in reasons.likely(row.intent, verdict)]
             rows = [listed[i : i + 2] for i in range(0, len(listed), 2)]
-            rows.append([button("Без причины", "rn")])
+            rows.append([button(t("kb.no_reason"), "rn")])
             return {"inline_keyboard": rows}
         if keyboard == "picker" and len(faces) == 1:
             keyboard = f"face:{faces[0].n}"
         if keyboard == "picker":
             rows = [
-                [button(f"Лицо {face.n}: {self._face_word(face)}", f"f:{face.n}")] for face in faces
+                [button(t("kb.face", n=face.n, word=self._face_word(face)), f"f:{face.n}")]
+                for face in faces
             ]
-            rows.append([button("← Назад", "back")])
+            rows.append([button(t("kb.back"), "back")])
             return {"inline_keyboard": rows}
         if keyboard.startswith("face:") and report is not None:
             n = int(keyboard.removeprefix("face:"))
@@ -645,22 +646,30 @@ class TelegramService:
             people = self._people_store.people() if self._people_store is not None else []
             rows = []
             if self.tg.names and people:
-                ours = [button(f"Свой: {p.name}", f"p:{n}:{i}") for i, p in enumerate(people[:6])]
+                ours = [
+                    button(t("kb.ours", name=p.name), f"p:{n}:{i}")
+                    for i, p in enumerate(people[:6])
+                ]
                 rows += [ours[i : i + 2] for i in range(0, len(ours), 2)]
             if self._identities is not None:
                 if self.tg.names:
                     familiar = [r for r in self._identities.entries(status="familiar") if r.name][
                         :4
                     ]
-                    known = [button(f"Знакомый: {r.name}", f"i:{n}:{r.id}") for r in familiar]
+                    known = [
+                        button(t("kb.familiar", name=r.name), f"i:{n}:{r.id}") for r in familiar
+                    ]
                     rows += [known[i : i + 2] for i in range(0, len(known), 2)]
                 rows.append(
-                    [button("Новый знакомый…", f"nf:{n}"), button("Новая личность…", f"ni:{n}")]
+                    [
+                        button(t("kb.new_familiar"), f"nf:{n}"),
+                        button(t("kb.new_identity"), f"ni:{n}"),
+                    ]
                 )
-            rows.append([button("Чужой", f"s:{n}")])
+            rows.append([button(t("kb.stranger"), f"s:{n}")])
             if face is not None and face.confirmed:
-                rows.append([button("Отменить решение", f"u:{n}")])
-            rows.append([button("← Назад", "back")])
+                rows.append([button(t("kb.undo_face"), f"u:{n}")])
+            rows.append([button(t("kb.back"), "back")])
             return {"inline_keyboard": rows}
         answered = data.get("answer")
         decided = {
@@ -668,10 +677,10 @@ class TelegramService:
         }
         extra = self._extra_buttons(row_id, row)
         if not answered and not decided:
-            second = [button("Не знаю", "unk")]
+            second = [button(t("kb.unsure"), "unk")]
             if self._can_say_ours(row):
-                second.insert(0, button("Кто это?", "own"))
-            rows = [[button("👍 верно", "ok"), button("👎 ложная", "no")], second]
+                second.insert(0, button(t("kb.who"), "own"))
+            rows = [[button(t("kb.right"), "ok"), button(t("kb.wrong"), "no")], second]
             return {"inline_keyboard": rows + ([extra] if extra else [])}
         line: list[dict[str, str]] = []
         if answered:
@@ -681,7 +690,7 @@ class TelegramService:
         for number, word in sorted(decided.items())[:2]:
             line.append(button(f"👤 {word}", f"u:{number}"))
         if not decided and answered and self._can_say_ours(row):
-            line.append(button("Кто это?", "own"))
+            line.append(button(t("kb.who"), "own"))
         return {"inline_keyboard": [line] + ([extra] if extra else [])}
 
     def _extra_buttons(self, row_id: int, row: EventRow) -> list[dict[str, str]]:
@@ -689,7 +698,7 @@ class TelegramService:
         when there are other clip-folder cameras to look at."""
         if not row.clip_path or len(self.config.clip_folders) < 2:
             return []
-        return [{"text": "📹 Другие камеры", "callback_data": f"a:{row_id}:x"}]
+        return [{"text": t("kb.other_cameras"), "callback_data": f"a:{row_id}:x"}]
 
     @staticmethod
     def _face_word(face: Any) -> str:
@@ -697,7 +706,7 @@ class TelegramService:
             return str(face.name or face.person)
         if face.identity is not None:
             return face.identity.name or f"№{face.identity.id}"
-        return "мелкое" if face.status == "unclear" else "незнакомое"
+        return t("face.small") if face.status == "unclear" else t("face.unknown")
 
     def _report(self, row: EventRow) -> PeopleReport | None:
         try:
@@ -706,7 +715,7 @@ class TelegramService:
             return None
 
     def _can_say_ours(self, row: EventRow) -> bool:
-        """«Кто это?» when a face was found and there is something to say about it: an
+        """ "Who is it?" when a face was found and there is something to say about it: an
         enrolled person (with `names`), or anonymous identities."""
         report = self._report(row)
         if report is None or not report.seen or self._people_store is None:
@@ -734,7 +743,7 @@ class TelegramService:
 
     async def _poll(self) -> None:
         with contextlib.suppress(TelegramError):
-            await self.api.set_my_commands(COMMANDS)
+            await self.api.set_my_commands([(name, t(f"cmd.{name}")) for name in COMMANDS])
         raw = await self.db.get_meta(OFFSET_KEY)
         offset = int(raw) if raw and raw.isdigit() else None
         delay = 1.0
@@ -802,17 +811,17 @@ class TelegramService:
             if chat in self.tg.recipient_chats:
                 await self.send_digest(chat, thread=thread)
         elif command == "live":
-            await self.api.send_message(chat, say.LIVE_TEXT, thread_id=thread)
+            await self.api.send_message(chat, say.live_text(), thread_id=thread)
         elif command == "quiet":
             until = (
                 None
-                if rest.strip().lower() in ("off", "выкл", "стоп")
+                if rest.strip().lower() in QUIET_OFF_WORDS
                 else now + (self.tg.seconds("quiet_for"))
             )
             await self.db.set_meta(QUIET_KEY.format(chat=chat), repr(until or 0.0))
             await self.api.send_message(chat, say.quiet_text(until, now=now), thread_id=thread)
         elif command in ("start", "help"):
-            await self.api.send_message(chat, say.HELP_TEXT, thread_id=thread)
+            await self.api.send_message(chat, say.help_text(), thread_id=thread)
 
     async def _button(self, callback: Mapping[str, Any]) -> None:
         message = callback.get("message")
@@ -833,24 +842,24 @@ class TelegramService:
             or row.message_id != message.get("message_id")
             or row.event_id is None
         ):
-            await self.api.answer_callback_query(callback_id, "Эта тревога уже недоступна")
+            await self.api.answer_callback_query(callback_id, t("toast.gone"))
             return
         code = parts[2]
         toast: str | None = None
         if code == "own":
             await self._render(row.id, keyboard="picker")
-            toast = "Кто это?"
+            toast = t("toast.who")
         elif code == "back":
             await self._render(row.id, keyboard="main")
         elif code in ("ok", "unk"):
             toast = await self.answer(row, "right" if code == "ok" else "unsure")
         elif code == "no":
             await self.answer(row, "wrong", keyboard="reasons")
-            toast = "Почему ложная? Выберите причину"
+            toast = t("toast.why_false")
         elif code == "r" and len(parts) == 4 and parts[3] in reasons.BY_CODE:
             if parts[3] == "other":
                 await self._ask(row, "reason")
-                toast = "Ответьте на сообщение бота: что это было"
+                toast = t("toast.reply_what")
             else:
                 toast = await self.answer(row, "wrong", reason=parts[3])
         elif code == "rn":
@@ -861,7 +870,7 @@ class TelegramService:
             toast = await self.confirm_ours(row, int(parts[3]), int(parts[4]))
         elif code == "f" and len(parts) == 4 and parts[3].isdigit():
             await self._render(row.id, keyboard=f"face:{parts[3]}")
-            toast = f"Лицо {parts[3]}: кто это?"
+            toast = t("toast.face_who", n=parts[3])
         elif code in ("i", "s", "u") and len(parts) >= 4 and parts[3].isdigit():
             face = int(parts[3])
             choice: str | IdentityChoice | None = STRANGER if code == "s" else None
@@ -870,9 +879,9 @@ class TelegramService:
             toast = await self.face_decision(row, face, choice)
         elif code in ("nf", "ni") and len(parts) == 4 and parts[3].isdigit():
             await self._ask(row, "familiar" if code == "nf" else "unknown", face=int(parts[3]))
-            toast = "Ответьте именем на сообщение бота"
+            toast = t("toast.reply_name")
         elif code == "x":
-            await self.api.answer_callback_query(callback_id, "Собираю видео с других камер…")
+            await self.api.answer_callback_query(callback_id, t("toast.collecting"))
             self._background(self.send_other_cameras(row), "other cameras")
             return
         await self.api.answer_callback_query(callback_id, toast)
@@ -906,7 +915,7 @@ class TelegramService:
             assert message.event_id is not None
             event = await self.db.get_event(message.event_id)
         if event is None:
-            return "Событие уже удалено."
+            return t("event.deleted")
         target = reply_to if reply_to is not None else message.message_id
         await self.api.send_chat_action(
             message.chat_id, "upload_video", thread_id=message.thread_id
@@ -919,7 +928,7 @@ class TelegramService:
         except (MediaToolError, OSError, ValueError) as exc:
             logger.warning("mosaic for %s failed: %s", event.id, exc)
             made = None
-            lines.append(f"Склеить видео не получилось: {str(exc)[:120]}")
+            lines.append(t("mosaic.failed", error=str(exc)[:120]))
         if made is None:
             text = say.no_mosaic_text(linked.window.moment, lines)
             await self.api.send_message(
@@ -934,7 +943,7 @@ class TelegramService:
             lines, approximate,
         )  # fmt: skip
         for part, video in enumerate(made.files, start=1):
-            text = caption if part == 1 else f"Часть {part} из {len(made.files)}"
+            text = caption if part == 1 else t("mosaic.part", n=part, total=len(made.files))
             upload = (video.name, await asyncio.to_thread(video.read_bytes), "video/mp4")
             assert target is not None
             await self.api.send_reply_file(
@@ -984,7 +993,7 @@ class TelegramService:
             done, _pending = await asyncio.wait({work}, timeout=4.0)
             if not done:
                 sent = await self.api.send_message(
-                    chat, "⏳ Смотрю записи, локальная модель отвечает до пары минут…",
+                    chat, t("ask.wait"),
                     thread_id=thread, reply_to=asked, silent=True,
                 )  # fmt: skip
                 placeholder = sent.get("message_id") if isinstance(sent, dict) else None
@@ -1023,7 +1032,7 @@ class TelegramService:
         rows = [m for m in await self.db.telegram_alerts_for_event(event_id) if m.chat_id == chat]
         alert = next((m for m in rows if m.kind == "alert"), None)
         if alert is None:
-            return "по этому событию в этом чате не было тревоги; отметьте его в веб-приложении"
+            return t("toast.no_alert_here")
         if answer == "wrong" and reason not in reasons.BY_CODE:
             reason = None
         verdict: say.Answer = "unsure"
@@ -1054,7 +1063,7 @@ class TelegramService:
         assert message.event_id is not None
         event = await self.db.get_event(message.event_id)
         if event is None:
-            return "Событие удалено"
+            return t("event.deleted_short")
         data = dict(message.data)
         same = data.get("answer") == answer and data.get("label_prev") is not None
         if data.get("answer") and not same:
@@ -1088,7 +1097,7 @@ class TelegramService:
         await self.db.update_telegram_message(message.id, data=data)
         await self._render(message.id, keyboard=keyboard)
         self.status.answers += 1
-        return f"Отмечено: {say.answer_button(data)}"
+        return t("toast.marked", what=say.answer_button(data))
 
     async def take_back(self, message: TelegramMessageRow) -> str:
         """Undo the answer about the verdict: the event's feedback and review are
@@ -1106,7 +1115,7 @@ class TelegramService:
             data.pop(key, None)
         await self.db.update_telegram_message(message.id, data=data)
         await self._render(message.id, keyboard="main")
-        return "Ответ отменён"
+        return t("toast.answer_undone")
 
     async def _unlabel(self, event: EventRow, data: dict[str, Any]) -> None:
         previous = data.pop("label_prev", None)
@@ -1182,7 +1191,7 @@ class TelegramService:
         event = await self.db.get_event(message.event_id)
         report = None if event is None else self._report(event)
         if event is None or report is None:
-            return "Событие или лицо уже недоступно"
+            return t("toast.face_gone")
         try:
             ctx = self._face_context(event)
             if choice is None:
@@ -1190,7 +1199,7 @@ class TelegramService:
             else:
                 done = await asyncio.to_thread(decisions.decide, report, face, choice, ctx)
         except (StoreError, IdentityError) as exc:
-            return f"Не вышло: {exc}"[:190]
+            return t("toast.failed", error=exc)[:190]
         intent = dict(event.intent or {})
         intent["people"] = report.model_dump(mode="json")
         await self.db.update_event(event.id, intent=intent)
@@ -1202,7 +1211,7 @@ class TelegramService:
         faces = {str(k): v for k, v in (data.get("faces") or {}).items()}
         labels = {str(k): v for k, v in (data.get("face_labels") or {}).items()}
         if done.answer:
-            faces[str(face)] = mark.removeprefix("✅ Отмечено: ")
+            faces[str(face)] = mark.removeprefix(say.mark_prefix())
         else:
             faces.pop(str(face), None)
             previous = labels.pop(str(face), None)
@@ -1213,10 +1222,10 @@ class TelegramService:
         await self.db.update_telegram_message(message.id, data=data)
         await self._render(message.id, keyboard="main")
         self.status.answers += 1
-        return mark.removeprefix("✅ ")[:190] if done.answer else "Решение отменено"
+        return mark.removeprefix("✅ ")[:190] if done.answer else t("toast.decision_undone")
 
     async def confirm_ours(self, message: TelegramMessageRow, face: int, person_index: int) -> str:
-        """«Свой: <name>»: the face becomes that enrolled person's reference and, unless
+        """ "One of us: <name>": the face becomes that enrolled person's reference and, unless
         the level wakes for anyone, the clip is labelled as a household member."""
         assert message.event_id is not None
         event = await self.db.get_event(message.event_id)
@@ -1224,14 +1233,14 @@ class TelegramService:
         store = self._people_store
         people = store.people() if store is not None else []
         if event is None or report is None or not 0 <= person_index < len(people):
-            return "Событие, лицо или человек уже недоступны"
+            return t("toast.person_gone")
         person = people[person_index]
         try:
             await asyncio.to_thread(
                 decisions.decide, report, face, person.id, self._face_context(event)
             )
         except (StoreError, IdentityError) as exc:
-            return f"Не вышло: {exc}"[:190]
+            return t("toast.failed", error=exc)[:190]
         intent = dict(event.intent or {})
         intent["people"] = report.model_dump(mode="json")
         await self.db.update_event(event.id, intent=intent)
@@ -1240,7 +1249,9 @@ class TelegramService:
         data = dict(message.data)
         faces = {str(k): v for k, v in (data.get("faces") or {}).items()}
         labels = {str(k): v for k, v in (data.get("face_labels") or {}).items()}
-        faces[str(face)] = f"свой: {person.name}" if self.tg.names else "свой"
+        faces[str(face)] = (
+            t("face.ours_named", name=person.name) if self.tg.names else t("face.ours")
+        )
         wakes_anyone = policy is not None and policy.wake_for(verdict.get("label")) is Wake.always
         if self.tg.labels and event.clip_path and not wakes_anyone and str(face) not in labels:
             recorded = await self._label(event, verdict, policy, "ours")
@@ -1253,22 +1264,19 @@ class TelegramService:
         await self.db.update_telegram_message(message.id, data=data)
         await self._render(message.id, keyboard="main")
         self.status.answers += 1
-        return f"Отмечено: {faces[str(face)]}"
+        return t("toast.marked", what=faces[str(face)])
 
     async def _ask(self, message: TelegramMessageRow, what: str, *, face: int = 0) -> None:
         """A forced reply: a name for a face (`familiar`, `unknown`) or, after 👎 and
-        «Другое», what it was (`reason`). Read only as a reply to this question, in an
+        "Other", what it was (`reason`). Read only as a reply to this question, in an
         allowed chat; in memory, so after a restart the button is tapped again."""
         if what == "reason":
-            text = "Что это было? Ответьте на это сообщение коротко."
-            hint = "Например: соседи паркуются"
+            text = t("prompt.what")
+            hint = t("prompt.what_hint")
         else:
-            word = "знакомого" if what == "familiar" else "эту личность"
-            text = (
-                f"Как назвать {word} (лицо {face})? Ответьте на это сообщение одним словом или "
-                "фразой; «-» без имени."
-            )
-            hint = "Соседка" if what == "familiar" else "Имя"
+            who = t("prompt.who_familiar") if what == "familiar" else t("prompt.who_identity")
+            text = t("prompt.name", who=who, face=face)
+            hint = t("prompt.hint_familiar") if what == "familiar" else t("prompt.hint_name")
         sent = await self.api.send_message(
             message.chat_id,
             text,
@@ -1304,7 +1312,9 @@ class TelegramService:
             choice = IdentityChoice(name=None if name in ("", "-") else name, status=what)
             toast = await self.face_decision(row, face, choice)
         await self.api.send_message(
-            chat, f"Готово: {escape(toast)}", thread_id=thread if isinstance(thread, int) else None
+            chat,
+            t("done", what=escape(toast)),
+            thread_id=thread if isinstance(thread, int) else None,
         )
         return True
 
@@ -1377,7 +1387,7 @@ class TelegramService:
         if verdict is None:
             return None
         policy = self._policy(verdict.get("policy"))
-        title = self._level_title(policy, verdict.get("level")) + " (перепроверка)"
+        title = self._level_title(policy, verdict.get("level")) + t("digest.second_look")
         description = deep.get("description") or verdict.get("rationale")
         return say.DigestItem(
             self.camera_name(row.camera), row.started_at, title,

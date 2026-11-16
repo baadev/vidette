@@ -94,7 +94,7 @@ understanding:
   vlm:                            # the VLM judge: docs/vlm.md
     backend: none                 # none | local | cloud; the System page can switch it
     frames_per_call: 4            # 1 to 8
-    language: null                # e.g. Russian: the language of the one-line description
+    language: null                # e.g. German; default: the Telegram bot's language
     local:                        # an OpenAI-compatible server you run (Ollama default)
       base_url: http://localhost:11434/v1
       model: qwen2.5vl:7b
@@ -285,6 +285,7 @@ notifications:
     allowed_chats: ${VIDETTE_TELEGRAM_ALLOWED_CHATS}   # "id,id" or a list; nobody else
     topics: ${VIDETTE_TELEGRAM_TOPICS}         # "<chat>:alerts=<thread>,digest=<thread>;…"
     recipients: all               # all | first (a trial: only the first chat gets alerts)
+    language: en                  # en | ru: the bot's messages, and what models write
     names: false                  # names of recognized people in messages (privacy)
     frames: 3                     # frames in an alert's album that show the subject (1 to 9)
     max_video_mb: 20              # bigger clips are linked (clip_url), not sent

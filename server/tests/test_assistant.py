@@ -17,7 +17,7 @@ from test_linked import T0, an_event, clip_at, config
 
 import vidette.auth.deps as auth_deps
 from vidette.api.routers.mcp import router as mcp_router
-from vidette.assistant.agent import CAN_DO, Assistant
+from vidette.assistant.agent import Assistant, can_do
 from vidette.assistant.tools import ToolError, Tools, parse_when
 from vidette.auth.service import ANONYMOUS_ADMIN, Principal
 from vidette.db import Database
@@ -68,7 +68,7 @@ async def test_the_tools_find_events_clips_and_faces(tmp_path: Path) -> None:
     tools = Tools(cfg, db, camera_name=str.upper, clock=lambda: NOW)
     found = (await tools.call("find_events", {"since": "-3h"})).data
     assert found["total"] == 2 and found["events"][0]["cam"] == "YARD"
-    assert found["events"][0]["faces"] == ["незнакомец №7"]
+    assert found["events"][0]["faces"] == ["stranger #7"]
     by_face = (await tools.call("find_events", {"since": "-3h", "identity": 7})).data
     assert by_face["total"] == 2
     tools.current = event_id
@@ -136,7 +136,7 @@ async def test_a_server_without_tools_gets_a_json_action_prompt(tmp_path: Path) 
     reply = await assistant.answer("Что было за последние три часа?")
     assert reply.text == "Два события, оба прохожие."
     assert "tools" not in seen[1] and '"tool"' in seen[1]["messages"][0]["content"]
-    assert seen[2]["messages"][-1]["content"].startswith("Результат find_events:")
+    assert seen[2]["messages"][-1]["content"].startswith("Result of find_events:")
     await db.close()
 
 
@@ -169,7 +169,7 @@ async def test_quick_answers_need_no_model(tmp_path: Path) -> None:
     tools.identities = None
     off = await assistant.answer("где ещё был этот человек", event_id=event_id)
     assert "выключены" in off.text, "said plainly, not invented"
-    assert (await assistant.answer("что умеешь?")).text == CAN_DO
+    assert (await assistant.answer("что умеешь?")).text == can_do()
     today = await assistant.answer("Пришли сводку")
     assert today.fast and "Тревог не было" in today.text and days == [1]
     await db.close()
@@ -195,7 +195,7 @@ async def test_a_cloud_model_never_hears_a_name(tmp_path: Path) -> None:
     assistant = Assistant(cfg, tools, ledger=MemoryLedger(), http=http, clock=lambda: NOW)
     await assistant.answer("Кто там был?", event_id=event_id)
     sent = json.dumps(seen, ensure_ascii=False)
-    assert "свой" in sent and "знакомый №3" in sent
+    assert "one of us" in sent and "familiar #3" in sent
     assert "Sam" not in sent and "Соседка" not in sent
     await db.close()
 

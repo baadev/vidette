@@ -176,7 +176,7 @@ how many frames, how many pauses longer than 0.5 s and the time they cover, the 
 one and where it starts, the share of frames that came in a heap after a pause
 (`burst_share`), and the longest pauses as `[start, end]` seconds into the clip. A clip
 with a pause of 2 s or more, or pauses covering a tenth of it, counts as interrupted: the
-judge is told where the video stalled, and the bot says «запись прерывалась». Sound is not recorded: the judge does not use it, and recording
+judge is told where the video stalled, and the bot says "the recording paused". Sound is not recorded: the judge does not use it, and recording
 conversations is a legal minefield in many places.
 
 ## Disk limits

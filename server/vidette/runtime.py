@@ -60,6 +60,8 @@ from vidette.people.models import ModelError
 from vidette.people.recurrence import with_recurrence
 from vidette.people.setup import engine_for, identities_for, merge_settings_for, store_for
 from vidette.people.store import PeopleStore, StoreError
+from vidette.telegram import i18n
+from vidette.telegram.i18n import t
 from vidette.telegram.service import TelegramService
 from vidette.verdicts.base import Judge
 from vidette.verdicts.vlm import VlmJudge
@@ -86,6 +88,8 @@ class AppRuntime:
     def __init__(self, config: VidetteConfig, *, config_warnings: list[str] | None = None) -> None:
         self.config = config
         self.config_warnings = list(config_warnings or [])
+        if config.notifications.telegram is not None:  # the bot's language, process-wide
+            i18n.use(config.notifications.telegram.language)
         self.db = Database(config.storage.database)
         self.auth = AuthService(self.db, config.server.auth.mode)
         self.bus = InProcessEventBus()
@@ -163,16 +167,16 @@ class AppRuntime:
         """The judge in one line for people (the bot's /status)."""
         backend = await self.vlm_backend()
         if backend is VlmBackend.none:
-            return "выключен (backend: none)"
+            return t("judge.off")
         endpoint = endpoint_for(self.config, backend)
         status = self.verdicts.status
         model = endpoint.model.rstrip("/").rsplit("/", 1)[-1]
-        line = (
-            f"{backend.value} {model}; с запуска {status.judged}, "
-            f"пропущено старых {status.skipped_old}"
-        )
+        line = t(
+            "judge.line", backend=backend.value, model=model, judged=status.judged,
+            skipped=status.skipped_old,
+        )  # fmt: skip
         if status.last_error:
-            line += f"; ошибка: {status.last_error[:80]}"
+            line += t("judge.error", error=status.last_error[:80])
         return line
 
     # --- known people --------------------------------------------------------------------

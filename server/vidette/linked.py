@@ -40,6 +40,7 @@ from vidette.collect.clips import load_meta
 from vidette.core.config import ClipFolderConfig, VidetteConfig
 from vidette.db import EventRow
 from vidette.stitch import Piece, Stitched, Tile, stitch
+from vidette.telegram.i18n import t
 
 STAMP_SLACK_S = 600.0  # a clip's name is its start; clips can be long (a wake period)
 _STAMP = re.compile(r"(\d{8})-(\d{6})")
@@ -210,9 +211,7 @@ async def find_linked(
     clips: list[LinkedClip] = []
     for folder in folders:
         lag = config.cross_camera.lag_s(folder.camera)
-        found = await asyncio.to_thread(
-            clips_between, folder, window.start, window.end, lag_s=lag
-        )
+        found = await asyncio.to_thread(clips_between, folder, window.start, window.end, lag_s=lag)
         for path, began, ended in found:
             own = own_path is not None and path.resolve() == own_path
             linked = LinkedClip(
@@ -263,9 +262,9 @@ def clock_text(ts: float) -> str:
 def describe(
     linked: Linked, *, camera_name: Callable[[str], str], configured: Iterable[str]
 ) -> list[str]:
-    """Plain Russian lines about what each camera recorded at that moment. A late camera's
-    clip that only might show the moment is left out when the same camera has one that
-    overlaps the window by its stamps."""
+    """Plain lines, in the bot's language, about what each camera recorded at that moment.
+    A late camera's clip that only might show the moment is left out when the same camera
+    has one that overlaps the window by its stamps."""
     lines: list[str] = []
     inside = {c.camera for c in linked.clips if c.overlap(linked.window) > 0}
     for clip in linked.clips:
@@ -274,21 +273,20 @@ def describe(
         name = camera_name(clip.camera)
         span = f"{clock_text(clip.started_at)}–{clock_text(clip.ended_at)}"
         if clip.approximate:
-            span = f"около {span}"
+            span = t("linked.around", span=span)
         parts = [f"{name}: {span}"]
         if clip.own:
-            parts.append("это событие")
+            parts.append(t("linked.this_event"))
         elif clip.same_person:
-            parts.append("тот же человек по лицу")
+            parts.append(t("linked.same_person"))
         elif clip.persons:
-            parts.append("человек в кадре, но лицо не сравнить")
+            parts.append(t("linked.person_no_face"))
         lines.append(", ".join(parts))
     silent = linked.silent_cameras(configured)
     if silent:
         names = ", ".join(camera_name(c) for c in silent)
-        lines.append(f"{names}: в это время ничего не записано (камера спала или движения не было)")
+        lines.append(t("linked.nothing", names=names))
     return lines
-
 
 
 MOSAIC_DIR = "linked"  # under storage.media_dir

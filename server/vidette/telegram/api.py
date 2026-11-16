@@ -339,7 +339,7 @@ class TelegramApi:
     async def send_chat_action(
         self, chat_id: int, action: str = "typing", *, thread_id: int | None = None
     ) -> None:
-        """«печатает…» or «отправляет видео…» while a slow answer is on its way."""
+        """ "typing…" or "sending a video…" while a slow answer is on its way."""
         with contextlib.suppress(TelegramError):
             await self.call(
                 "sendChatAction",

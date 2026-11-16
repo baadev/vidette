@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
 
 from vidette.core.config import VidetteConfig
 from vidette.db import Database
+from vidette.telegram import i18n
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def bot_language() -> Iterator[None]:
+    """The suite was written against the Russian catalog: tests read Russian unless they
+    choose otherwise (English has its own tests, test_i18n.py). A bot built from a config
+    sets its own language."""
+    i18n.use("ru")
+    yield
+    i18n.use("en")
 
 
 @pytest.fixture

@@ -11,6 +11,15 @@ of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). 
 released; no images published from it; the last release is v0.1.3.
 
 ### Added
+- **The bot in English** (`notifications.telegram.language: en | ru`, default `en`): every
+  message, button, toast, prompt, the digest, `/help` and the assistant's quick answers
+  come from one catalog per language (`vidette.telegram.i18n`, English the reference,
+  Russian a full translation); a test keeps the catalogs complete with the same
+  placeholders and fails on a Cyrillic phrase outside them. Free text from models (the
+  judge's description, deep analysis, the assistant) follows the same language through
+  the prompt unless `understanding.vlm.language` is set. Questions are understood in
+  English and Russian whatever the setting. The assistant's tool results are plain
+  English for the model.
 - **Deep analysis** ([docs/deep.md](docs/deep.md),
   [ADR-0019](docs/architecture/adr/0019-deep-analysis.md)): `understanding.deep` gives the
   day's clips with people, faces or vehicles (and those the live judge never reached) a

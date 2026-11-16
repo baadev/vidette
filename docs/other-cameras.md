@@ -15,8 +15,8 @@ neighbours yet.
 | Where | What |
 |---|---|
 | Web app, an event card | under the clip: every other camera's clips around the moment, «same person (face)» where a face matched, and «All cameras at once» |
-| Telegram, under an alert | **📹 Другие камеры**: the mosaic as a reply to the alert, with what each camera recorded |
-| Telegram, a question | «пришли другие камеры» as a reply to an alert ([assistant.md](assistant.md)) |
+| Telegram, under an alert | **📹 Other cameras**: the mosaic as a reply to the alert, with what each camera recorded |
+| Telegram, a question | "send the other cameras" as a reply to an alert ([assistant.md](assistant.md)) |
 | API | `GET /api/v1/events/{id}/linked` (the clips), `GET /api/v1/events/{id}/linked.mp4` (the mosaic) |
 
 ## Which clips count
@@ -49,15 +49,15 @@ the cameras' own on-screen clocks (12 clips per camera, read by hand):
 
 So cameras that stream all the time line up within a few seconds; a battery camera does not. List such a
 camera under `lag_up_to`: its clips are searched that much later, and everything about it
-says the time is approximate («около 09:41:16–09:43:03»). Reading the on-screen clock to
+says the time is approximate ("about 09:41:16–09:43:03"). Reading the on-screen clock to
 place it exactly is 📐 designed, not built.
 
 ### The same person
 
-Only by face: a clip shows «тот же человек по лицу» when an anonymous identity
+Only by face: a clip shows "the same person by face" when an anonymous identity
 ([people.md](people.md#strangers-who-come-back)) or an enrolled person is in both the
 event's and that clip's face reports. A clip whose event saw a person without a comparable
-face says «человек в кадре, лицо не сравнить»; one that was never judged says nothing about
+face says "a person in view, no face to compare"; one that was never judged says nothing about
 people. Clothes, height or colour are never used: that would be profiling.
 
 ## The video
@@ -69,16 +69,16 @@ height. Nothing is drawn on top: each camera's own on-screen clock is in its til
 message under the video says which tile is which:
 
 ```
-📹 Все камеры, 09:40:59–09:41:59
-Слева сверху: Крыльцо; слева снизу: Сад; справа: Дорожка
-• Дорожка: 09:41:13–09:41:21, это событие
-• Крыльцо: около 09:41:16–09:43:03
-• Сад: 09:41:34–09:41:42, человек в кадре, но лицо не сравнить
-Крыльцо: время примерное, эта камера отдаёт запись с задержкой, её картинка может отставать от остальных
+📹 All cameras, 09:40:59–09:41:59
+Left top: Porch; left bottom: Garden; right: Path
+• Path: 09:41:13–09:41:21, this event
+• Porch: about 09:41:16–09:43:03
+• Garden: 09:41:34–09:41:42, a person in view, no face to compare
+Porch: approximate time, this camera delivers its recording late and its picture may lag behind the others
 ```
 
-When no other camera recorded anything, the bot says so instead («другие камеры ничего не
-записали … камера спала или движения не было»): battery cameras record only while awake.
+When no other camera recorded anything, the bot says so instead ("the other cameras recorded
+nothing … the camera slept or nothing moved"): battery cameras record only while awake.
 
 ## Budgets
 

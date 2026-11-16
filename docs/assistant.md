@@ -1,9 +1,10 @@
 # Questions in plain words, and MCP
 
-Write to the bot as you would to a person: «Где ещё встречался этот человек?», «Пришли
-видео с других камер в этот момент» (as a reply to an alert, so the alert is the
-context), «Что было у калитки после 9?», «Сводка за сегодня». A small assistant answers
-in Russian, briefly, with videos when you asked for them. The same tools are open to an
+Write to the bot as you would to a person: "Where else was this person?", "Send the video
+from the other cameras at that moment" (as a reply to an alert, so the alert is the
+context), "What happened at the gate after 9?", "Today's digest". A small assistant answers
+briefly, in the bot's `language` (English or Russian; it understands both), with videos
+when you asked for them. The same tools are open to an
 assistant on your own machine over MCP. Design:
 [ADR-0017](architecture/adr/0017-subject-frames-other-cameras-and-questions.md).
 
@@ -49,15 +50,15 @@ llama-server shared with other work (6 slots of 2048 tokens): one tool call took
 about 2000 tokens.
 
 `cloud` (`understanding.vlm.cloud`) is opt-in: your questions and what the tools found go
-to that vendor. Results for it never carry a name (enrolled people are «свой», identities
-«№12»), and no face crop, embedding or frame is ever sent; videos go to the chat, never to
+to that vendor. Results for it never carry a name (enrolled people are "one of us", identities
+"#12"), and no face crop, embedding or frame is ever sent; videos go to the chat, never to
 the model. `vidette validate` says so while it is on.
 
 ## In Telegram
 
 - Only allowed chats; a message from anyone else is ignored.
 - A reply to an alert, to its album or to the bot's answer about it makes that event the
-  context. Without a reply, ask with a time («что было в 9:40?»).
+  context. Without a reply, ask with a time ("what happened at 9:40?").
 - After four seconds without an answer the bot says it is looking; the answer comes as a
   new message (it buzzes), videos as replies to it.
 - One question at a time (the model is shared); messages older than ten minutes (sent

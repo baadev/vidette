@@ -1,9 +1,10 @@
-"""What the bot says, in Russian, as Telegram HTML. Pure functions: the service passes
-facts in and sends the strings out, so every message has a test.
+"""What the bot says, as Telegram HTML, in the bot's language (vidette.telegram.i18n holds
+every phrase, English and Russian). Pure functions: the service passes facts in and sends
+the strings out, so every message has a test.
 
 House rules for messages read on a phone: the camera and the time first, then what the
 judge saw, then who; short lines; no dashes as punctuation; names only when the config
-allows them (`names`), otherwise "свой".
+allows them (`names`), otherwise "one of us".
 """
 
 from __future__ import annotations
@@ -19,16 +20,20 @@ from pydantic import ValidationError
 
 from vidette.people.report import IdentityBrief
 from vidette.telegram import reasons
+from vidette.telegram.i18n import month, n, ordinal, t
 
 MAX_TEXT = 4096  # Telegram's limit for a message
 LEVEL_ICONS = {0: "🚨", 1: "⚠️"}
 Answer = Literal["right", "wrong", "unsure", "ours"]
-ANSWER_WORDS: dict[str, str] = {
-    "right": "верно",
-    "wrong": "ложная",
-    "unsure": "не знаю",
-    "ours": "свой",
-}
+
+
+def answer_word(answer: str) -> str:
+    """The word for an answer about a verdict: right, false alarm, not sure, one of us."""
+    return (
+        t(f"answer.{answer}")
+        if answer in ("right", "wrong", "unsure", "ours")
+        else t("answer.marked")
+    )
 
 
 def clock(ts: float, *, now: float | None = None, seconds: bool = False) -> str:
@@ -39,13 +44,9 @@ def clock(ts: float, *, now: float | None = None, seconds: bool = False) -> str:
     return stamp if same_day or now is None else f"{at:%d.%m} {stamp}"
 
 
-def plural(count: int, one: str, few: str, many: str) -> str:
-    n = abs(count) % 100
-    if 10 < n < 20:
-        return f"{count} {many}"
-    n %= 10
-    word = one if n == 1 else few if 2 <= n <= 4 else many
-    return f"{count} {word}"
+def plural(count: int, key: str) -> str:
+    """`count` with the catalog noun `key` in the right form ("3 clips")."""
+    return n(key, count)
 
 
 def _brief(raw: object) -> IdentityBrief | None:
@@ -62,33 +63,35 @@ def stranger_phrase(
     camera_name: Callable[[str], str] | None = None,
     small: bool = False,
 ) -> str:
-    """One face that is not enrolled: «незнакомец» or, when it belongs to an anonymous
-    identity (ADR-0014), «незнакомец №12, 3-й раз за сегодня (Улица, Двор за час)». A
+    """One face that is not enrolled: "stranger" or, when it belongs to an anonymous
+    identity (ADR-0014), "stranger #12, 3rd time today (Street, Yard within the hour)". A
     name someone gave the identity is shown only with `names`; `small`: a face too small
-    to compare («лицо мелкое»)."""
+    to compare ("small face")."""
     brief = _brief(raw)
     if brief is None:
-        return "лицо мелкое" if small else "незнакомец"
+        return t("who.small_face") if small else t("who.stranger")
     if names and brief.name:
-        who = f"{escape(brief.name)} (№{brief.id})"
+        who = t("who.named", name=escape(brief.name), id=brief.id)
     elif brief.status == "suspicious":
-        who = f"⚠️ подозрительный №{brief.id}"
+        who = t("who.suspicious", id=brief.id)
     else:
-        who = f"незнакомец №{brief.id}"
+        who = t("who.stranger_n", id=brief.id)
     if small:
-        who += " (лицо мелкое)"
+        who += t("who.small_suffix")
     today = brief.today()
     if brief.sightings <= 1:
-        count = "впервые"
+        count = t("who.first_time")
     elif today > 1:
-        count = f"{today}-й раз за сегодня"
+        count = t("who.nth_today", nth=ordinal(today))
     else:
-        count = f"{brief.sightings}-й раз за {plural(brief.days, 'день', 'дня', 'дней')}"
+        count = t(
+            "who.nth_over_days", nth=ordinal(brief.sightings), days=plural(brief.days, "n.days")
+        )
     cameras = brief.cameras_within(3600.0)
     if len(cameras) > 1:
         named = ", ".join(escape(camera_name(c) if camera_name else c) for c in cameras)
-        count += f" ({named} за час)"
-    return f"{who}, {count}"
+        count += t("who.cameras_hour", cameras=named)
+    return t("who.joined", who=who, count=count)
 
 
 def _familiar(person: Mapping[str, Any]) -> bool:
@@ -103,12 +106,12 @@ def who_line(
     names: bool,
     camera_name: Callable[[str], str] | None = None,
 ) -> str:
-    """«свой: Имя» / «знакомый: Соседка» / «незнакомец №12, 3-й раз за сегодня» /
-    «лицо не найдено», from the event's face report."""
+    """ "one of us: Sam" / "familiar: Neighbour" / "stranger #12, 3rd time today" /
+    "no face found", from the event's face report."""
     if people is None or "seen" not in people:
         if persons == 0:
-            return "людей не видно"
-        return "лица не проверялись"
+            return t("who.no_people")
+        return t("who.unchecked")
     seen = [p for p in people.get("seen") or [] if isinstance(p, Mapping)]
     known = [p for p in seen if p.get("status") == "known"]
     familiar = [p for p in seen if p.get("status") != "known" and _familiar(p)]
@@ -118,15 +121,15 @@ def who_line(
     if known:
         if names:
             listed = ", ".join(escape(str(p.get("name") or p.get("person"))) for p in known)
-            parts.append(f"свой: {listed}")
+            parts.append(t("who.ours_named", names=listed))
         else:
-            parts.append("свои" if len(known) > 1 else "свой")
+            parts.append(t("who.ours_many") if len(known) > 1 else t("who.ours_one"))
     if familiar:
         named = [b.name for p in familiar if (b := _brief(p.get("identity"))) and b.name]
         if names and named:
-            parts.append(f"знакомый: {escape(', '.join(named))}")
+            parts.append(t("who.familiar_named", names=escape(", ".join(named))))
         else:
-            parts.append("знакомые" if len(familiar) > 1 else "знакомый")
+            parts.append(t("who.familiar_many") if len(familiar) > 1 else t("who.familiar_one"))
     others = [(p, False) for p in unknown] + [(p, True) for p in unclear]
     if others:
         phrases = [
@@ -135,15 +138,15 @@ def who_line(
         ]
         if len(others) == 1:
             parts.append(phrases[0])
-        elif all(phrase in ("незнакомец", "лицо мелкое") for phrase in phrases):
-            parts.append(f"незнакомцы: {len(others)}")
+        elif all(phrase in (t("who.stranger"), t("who.small_face")) for phrase in phrases):
+            parts.append(t("who.strangers", n=len(others)))
         else:
-            parts.append(f"незнакомцы: {len(others)} ({'; '.join(phrases)})")
+            parts.append(t("who.strangers_list", n=len(others), list="; ".join(phrases)))
     if parts:
-        return " и ".join(parts)
+        return t("who.and").join(parts)
     if persons == 0:
-        return "людей не видно"
-    return "лицо не найдено"
+        return t("who.no_people")
+    return t("who.no_face")
 
 
 @dataclass(frozen=True)
@@ -158,20 +161,20 @@ class AlertFacts:
     test: bool = False
     note: str | None = None  # e.g. why a test went to the alerts topic
     extra: tuple[str, ...] = ()  # collapsed later events
-    mark: str | None = None  # "✅ Отмечено: ложная"
+    mark: str | None = None  # "✅ Marked: false alarm"
     video_note: str | None = None  # a link when the clip was too big to send
-    stream_note: str | None = None  # «запись прерывалась…» (stream_note())
+    stream_note: str | None = None  # "The recording paused…" (stream_note())
 
 
 def alert_text(facts: AlertFacts, *, now: float) -> str:
     icon = LEVEL_ICONS.get(facts.level_rank, "🔔")
     lines = []
     if facts.test:
-        lines.append("🧪 <b>Проверка канала</b> (настоящий клип, настоящий судья)")
+        lines.append(t("alert.test"))
     if facts.alert:
-        lines.append(f"{icon} <b>Тревога: {escape(facts.level_title)}</b>")
+        lines.append(t("alert.title", icon=icon, level=escape(facts.level_title)))
     else:
-        lines.append("🔔 <b>Событие, не тревога</b>")
+        lines.append(t("alert.not_alert"))
     lines.append(f"📍 {escape(facts.camera)}, {clock(facts.started_at, now=now, seconds=True)}")
     lines.append(f"👤 {facts.who}")
     if facts.description:
@@ -183,7 +186,7 @@ def alert_text(facts: AlertFacts, *, now: float) -> str:
     if facts.note:
         lines.append(f"<i>{escape(facts.note)}</i>")
     if facts.extra:
-        lines.append(f"Ещё на этой камере: {len(facts.extra)}")
+        lines.append(t("alert.more_here", n=len(facts.extra)))
         lines += [f"＋ {line}" for line in facts.extra[-5:]]
     if facts.mark:
         lines.append(facts.mark)
@@ -193,7 +196,7 @@ def alert_text(facts: AlertFacts, *, now: float) -> str:
 def upgrade_text(facts: AlertFacts, *, now: float) -> str:
     """The whole clip raised the level of an early alert: one more message that buzzes."""
     lines = [
-        f"⬆️ <b>Уровень выше: {escape(facts.level_title)}</b>",
+        t("alert.upgrade", level=escape(facts.level_title)),
         f"📍 {escape(facts.camera)}, {clock(facts.started_at, now=now, seconds=True)}",
     ]
     if facts.description:
@@ -201,29 +204,20 @@ def upgrade_text(facts: AlertFacts, *, now: float) -> str:
     return truncate("\n".join(lines))
 
 
-# Stages of one alert, in order, as the event's `intent.timeline` names them.
-LATENCY_STAGES: tuple[tuple[str, str], ...] = (
-    ("requested", "камера проснулась"),
-    ("motion", "движение"),
-    ("first_frame", "первый кадр"),
-    ("person_seen", "человек в кадре"),
-    ("early", "первые секунды записаны"),
-    ("early_picked_up", "сервер взял их"),
-    ("early_judge_started", "судья начал"),
-    ("early_judge_finished", "судья ответил"),
-    ("closed", "ролик готов"),
-    ("picked_up", "сервер взял ролик"),
-    ("judge_started", "судья начал"),
-    ("judge_finished", "судья ответил"),
-    ("sent", "тревога ушла"),
-)
+# Stages of one alert, in order, as the event's `intent.timeline` names them (the words:
+# `stage.<name>` in the catalog).
+LATENCY_STAGES: tuple[str, ...] = (
+    "requested", "motion", "first_frame", "person_seen", "early", "early_picked_up",
+    "early_judge_started", "early_judge_finished", "closed", "picked_up", "judge_started",
+    "judge_finished", "sent",
+)  # fmt: skip
 
 
 def span(seconds: float) -> str:
-    """«7 с», «1:58», «1:02:03»."""
+    """ "7 s", "1:58", "1:02:03"."""
     whole = max(0, round(seconds))
     if whole < 60:
-        return f"{whole} с"
+        return t("span.seconds", n=whole)
     minutes, secs = divmod(whole, 60)
     if minutes < 60:
         return f"{minutes}:{secs:02d}"
@@ -232,7 +226,7 @@ def span(seconds: float) -> str:
 
 
 def latency_text(timeline: Mapping[str, Any], *, sent_at: float | None) -> str | None:
-    """«Где ушло время» for one alert: each stage after the previous one, then the total
+    """ "Where the time went" for one alert: each stage after the previous one, then the total
     from the person (or the first frame) to the alert. None with fewer than two stages.
 
     Stages run on the clock of the machine that records; a camera's stream can lag behind
@@ -245,10 +239,10 @@ def latency_text(timeline: Mapping[str, Any], *, sent_at: float | None) -> str |
         for late in ("closed", "picked_up", "judge_started", "judge_finished"):
             if stamps.get(late, 0) > sent_at:
                 stamps.pop(late)
-    present = [(key, words) for key, words in LATENCY_STAGES if key in stamps]
+    present = [(key, t(f"stage.{key}")) for key in LATENCY_STAGES if key in stamps]
     if len(present) < 2:
         return None
-    lines = ["⏱ <b>Где ушло время</b>"]
+    lines = [t("latency.title")]
     previous_key, previous_words = present[0]
     lines.append(f"{previous_words}: {clock(stamps[previous_key], seconds=True)}")
     for key, words in present[1:]:
@@ -257,9 +251,9 @@ def latency_text(timeline: Mapping[str, Any], *, sent_at: float | None) -> str |
     start = stamps.get("person_seen") or stamps.get("first_frame")
     if start is not None and "sent" in stamps:
         lines.append(
-            f"От человека в кадре до тревоги: {span(stamps['sent'] - start)}"
+            t("latency.from_person", span=span(stamps["sent"] - start))
             if "person_seen" in stamps
-            else f"От первого кадра до тревоги: {span(stamps['sent'] - start)}"
+            else t("latency.from_frame", span=span(stamps["sent"] - start))
         )
     return "\n".join(lines)
 
@@ -270,31 +264,31 @@ def interrupted(stream: object) -> bool:
 
 
 def stream_note(stream: object) -> str | None:
-    """«Запись прерывалась: 38 пауз, до 13 с» for an interrupted recording, else None."""
+    """ "The recording paused: 38 pauses, up to 13 s" for an interrupted recording."""
     if not isinstance(stream, Mapping) or not interrupted(stream):
         return None
     stalls = stream.get("stalls")
     longest = stream.get("longest_stall_s")
     parts = []
     if isinstance(stalls, int) and stalls > 0:
-        parts.append(plural(stalls, "пауза", "паузы", "пауз"))
+        parts.append(plural(stalls, "n.pauses"))
     if isinstance(longest, int | float) and longest >= 1:
-        parts.append(f"до {longest:.0f} с")
-    return "Запись прерывалась" + (": " + ", ".join(parts) if parts else "")
+        parts.append(t("stream.up_to", n=f"{longest:.0f}"))
+    return t("stream.interrupted") + (": " + ", ".join(parts) if parts else "")
 
 
 def extra_line(started_at: float, description: str | None, *, now: float) -> str:
-    text = escape(description) if description else "без описания"
+    text = escape(description) if description else t("alert.no_description")
     return f"{clock(started_at, now=now, seconds=True)} {text}"
 
 
 def mark_line(answer: Answer, *, person: str | None = None, problem: str | None = None) -> str:
-    word = ANSWER_WORDS[answer]
+    word = answer_word(answer)
     if answer == "ours" and person:
-        word = f"свой ({escape(person)})"
-    line = f"✅ Отмечено: {word}"
+        word = t("mark.ours_person", name=escape(person))
+    line = t("mark.done", word=word)
     if problem:
-        line += f"\n<i>метка в датасет не записана: {escape(problem)}</i>"
+        line += f"\n<i>{t('alert.label_failed', problem=escape(problem))}</i>"
     return line
 
 
@@ -302,17 +296,17 @@ def answer_button(data: Mapping[str, Any]) -> str:
     """The one button left under an alert after an answer about its verdict."""
     answer = data.get("answer")
     if answer == "right":
-        return "👍 верно"
+        return t("kb.right")
     if answer == "unsure":
-        return "🤷 не знаю"
+        return t("kb.unsure_done")
     reason = reasons.BY_CODE.get(str(data.get("reason") or ""))
     if answer == "wrong":
-        return f"👎 {reason.short}" if reason else "👎 ложная"
-    return "✅ " + ANSWER_WORDS.get(str(answer), "отмечено")
+        return f"👎 {reason.short}" if reason else t("kb.wrong")
+    return "✅ " + answer_word(str(answer))
 
 
-_ACROSS = {"left": "слева", "right": "справа", "middle": ""}
-_DOWN = {"top": "сверху", "bottom": "снизу", "full": ""}
+_ACROSS = {"left": "place.left", "right": "place.right", "middle": ""}
+_DOWN = {"top": "place.top", "bottom": "place.bottom", "full": ""}
 
 
 def mosaic_caption(
@@ -323,52 +317,61 @@ def mosaic_caption(
     approximate: set[str],
 ) -> str:
     """The message under a mosaic: which tile is which camera, then what each recorded."""
-    head = [f"📹 <b>Все камеры, {clock(start, seconds=True)}–{clock(end, seconds=True)}</b>"]
+    head = [t("mosaic.title", start=clock(start, seconds=True), end=clock(end, seconds=True))]
     if len(tiles) > 1:
         where = []
         for name, (across, down) in tiles:
-            place = " ".join(w for w in (_ACROSS[across], _DOWN[down]) if w) or "по центру"
-            where.append(f"{place}: {escape(name)}")
+            words = (t(key) for key in (_ACROSS[across], _DOWN[down]) if key)
+            place = " ".join(words) or t("place.centre")
+            where.append(t("mosaic.place", place=place, name=escape(name)))
         legend = "; ".join(where)
         head.append(legend[:1].upper() + legend[1:])
     body = [f"• {escape(line)}" for line in lines]
     if approximate:
         names = ", ".join(sorted(approximate))
-        body.append(
-            f"<i>{escape(names)}: время примерное, эта камера отдаёт запись с задержкой, "
-            "её картинка может отставать от остальных</i>"
-        )
+        body.append(f"<i>{t('mosaic.approximate', names=escape(names))}</i>")
     return truncate("\n".join(head + body), 1024)
 
 
 def no_mosaic_text(moment: float, lines: list[str]) -> str:
-    head = f"📹 Около {clock(moment, seconds=True)} другие камеры ничего не записали."
+    head = t("mosaic.none", time=clock(moment, seconds=True))
     return truncate("\n".join([head, *(f"• {escape(line)}" for line in lines)]))
 
 
 def face_mark_line(seen: Mapping[str, Any] | None, *, names: bool) -> str:
-    """What was decided about one face (ADR-0016): «✅ Отмечено: знакомый «Соседка»
-    (№5)», «✅ Отмечено: чужой (№12)», or that the decision was taken back."""
+    """What was decided about one face (ADR-0016): "✅ Marked: familiar “Neighbour” (#5)",
+    "✅ Marked: stranger (#12)", or that the decision was taken back."""
     if seen is None or not seen.get("confirmed"):
-        return "↩️ Решение по лицу отменено"
+        return t("face.undone")
     brief = _brief(seen.get("identity"))
-    number = f" (№{brief.id})" if brief is not None else ""
+    number = t("face.number", id=brief.id) if brief is not None else ""
     name = brief.name if brief is not None and brief.name and names else None
     confirmed = str(seen.get("confirmed"))
     if confirmed == "stranger":
-        word = f"чужой{number}"
+        word = t("face.stranger", number=number)
     elif confirmed == "unsure":
-        word = "не знаю"
+        word = t("face.unsure")
     elif confirmed.startswith("identity:") and brief is not None:
         if brief.status == "familiar":
-            word = f"знакомый «{escape(name)}»{number}" if name else f"знакомый{number}"
+            word = (
+                t("face.familiar_named", name=escape(name), number=number)
+                if name
+                else t("face.familiar", number=number)
+            )
         elif brief.status == "suspicious":
-            word = f"подозрительный{number}"
+            word = t("face.suspicious", number=number)
         else:
-            word = f"личность №{brief.id}" + (f" «{escape(name)}»" if name else "")
+            word = t("face.identity", id=brief.id) + (
+                t("face.identity_named", name=escape(name)) if name else ""
+            )
     else:
-        word = "свой"
-    return f"✅ Отмечено: {word}"
+        word = t("face.ours")
+    return t("mark.done", word=word)
+
+
+def mark_prefix() -> str:
+    """ "✅ Marked: " as the language writes it (what the service strips for a button)."""
+    return t("mark.done", word="")
 
 
 def truncate(text: str, limit: int = MAX_TEXT) -> str:
@@ -379,11 +382,6 @@ def truncate(text: str, limit: int = MAX_TEXT) -> str:
 
 
 # --- digest -------------------------------------------------------------------------------
-
-MONTHS = (
-    "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
-    "октября", "ноября", "декабря",
-)  # fmt: skip
 
 
 @dataclass
@@ -422,36 +420,35 @@ class DayDigest:
 
 
 def day_digest_text(day: DayDigest, *, now: float, evening: bool) -> str:
-    """Plain short Russian lines, no codes: what happened, what was wrong, what waits."""
+    """Plain short lines, no codes: what happened, what was wrong, what waits."""
     date = datetime.fromtimestamp(now)
     if evening:
-        lines = [f"🌙 <b>Итог дня, {date.day} {MONTHS[date.month - 1]}</b>"]
+        lines = [t("digest.evening", day=date.day, month=month(date.month))]
     else:
-        lines = [f"📋 <b>Сегодня к {clock(now, now=now)}</b>"]
+        lines = [t("digest.so_far", time=clock(now, now=now))]
     if day.alerts:
         answers = []
         if day.wrong:
-            answers.append(f"ложных {day.wrong}")
+            answers.append(t("digest.false_n", n=day.wrong))
         if day.right:
-            answers.append(f"верных {day.right}")
+            answers.append(t("digest.right_n", n=day.right))
         if day.unanswered:
-            answers.append(f"без ответа {day.unanswered}")
-        said = f" По вашим отметкам: {', '.join(answers)}." if answers else ""
-        lines.append(f"Тревог: {day.alerts}.{said}")
+            answers.append(t("digest.unanswered_n", n=day.unanswered))
+        said = t("digest.by_marks", list=", ".join(answers)) if answers else ""
+        lines.append(t("digest.alerts", n=day.alerts, marks=said))
     else:
-        lines.append("Тревог не было.")
+        lines.append(t("digest.no_alerts"))
     if day.reasons:
-        common = ", ".join(f"{escape(word)} ({n})" for word, n in day.reasons.most_common(3))
-        lines.append(f"Ложные чаще всего: {common}.")
+        common = ", ".join(f"{escape(word)} ({k})" for word, k in day.reasons.most_common(3))
+        lines.append(t("digest.common_false", list=common))
     if day.unanswered and day.last_unanswered is not None:
         at, camera = day.last_unanswered
-        waiting = plural(day.unanswered, "тревога ждёт", "тревоги ждут", "тревог ждут")
         lines.append(
-            f"{waiting} ответа, последняя в {clock(at, now=now)} ({escape(camera)}). "
-            "Кнопки под тревогой."
-        )
+            t("digest.waiting_line", waiting=plural(day.unanswered, "n.waiting"),
+              time=clock(at, now=now), camera=escape(camera))
+        )  # fmt: skip
     if day.notable:
-        lines.append("Без тревоги, но стоит взглянуть:")
+        lines.append(t("digest.look"))
         for item in day.notable[-6:]:
             stamp = clock(item.started_at, now=now)
             text = f"• {stamp} {escape(item.camera)}: {escape(item.title)}"
@@ -459,20 +456,19 @@ def day_digest_text(day: DayDigest, *, now: float, evening: bool) -> str:
                 text += f". {escape(item.description)}"
             lines.append(text)
         if len(day.notable) > 6:
-            lines.append(f"…и ещё {len(day.notable) - 6}")
+            lines.append(t("digest.and_more", n=len(day.notable) - 6))
     if day.events:
-        clips = plural(day.events, "ролик", "ролика", "роликов")
-        common = ", ".join(f"{escape(t)} {n}" for t, n in day.ordinary.most_common(4))
-        lines.append(f"Всего за день {clips}" + (f": {common}." if common else "."))
+        clips = plural(day.events, "n.clips")
+        common = ", ".join(f"{escape(title)} {k}" for title, k in day.ordinary.most_common(4))
+        lines.append(t("digest.total", clips=clips) + (f": {common}." if common else "."))
     if day.unjudged:
-        why = day.unjudged_why.most_common(1)[0][0] if day.unjudged_why else "не дошла очередь"
-        lines.append(f"Не проверено судьёй: {day.unjudged} ({escape(why)}).")
+        why = day.unjudged_why.most_common(1)[0][0] if day.unjudged_why else t("unjudged.queue")
+        lines.append(t("digest.unjudged", n=day.unjudged, why=escape(why)))
     if day.deep_review:
         lines.append(
-            f"Перепроверка: {plural(day.deep_checked, 'ролик', 'ролика', 'роликов')}; "
-            f"{plural(day.deep_review, 'спорный ушёл', 'спорных ушли', 'спорных ушли')} "
-            "на разметку."
-        )
+            t("digest.deep", clips=plural(day.deep_checked, "n.clips"),
+              disputed=plural(day.deep_review, "n.disputed"))
+        )  # fmt: skip
     return truncate("\n".join(lines))
 
 
@@ -499,44 +495,32 @@ def status_text(
     latency: str | None = None,
 ) -> str:
     lines = [f"📊 <b>Vidette</b> · {clock(now, now=now)}"]
-    lines.append(f"Судья: {escape(judge)}. Сегодня вердиктов {judged}, без вердикта {unjudged}")
+    lines.append(t("status.judge", judge=escape(judge), judged=judged, unjudged=unjudged))
     if cameras:
-        lines.append("<b>Сегодня по камерам</b>")
+        lines.append(t("status.by_camera"))
         for cam in cameras:
-            last = "" if cam.last_at is None else f", последнее {clock(cam.last_at, now=now)}"
-            alerts = f", тревог {cam.alerts}" if cam.alerts else ""
-            events = plural(cam.events, "событие", "события", "событий")
+            last = "" if cam.last_at is None else t("status.last", time=clock(cam.last_at, now=now))
+            alerts = t("status.alerts", n=cam.alerts) if cam.alerts else ""
+            events = plural(cam.events, "n.events")
             lines.append(f"• {escape(cam.name)}: {events}{alerts}{last}")
-    lines.append(f"Последняя тревога: {escape(last_alert) if last_alert else 'не было'}")
+    what = escape(last_alert) if last_alert else t("status.no_alert")
+    lines.append(t("status.last_alert", what=what))
     if latency:
         lines.append(latency)
     if quiet_until is not None and quiet_until > now:
-        lines.append(f"🔕 Тишина до {clock(quiet_until, now=now)}")
+        lines.append(t("status.quiet", time=clock(quiet_until, now=now)))
     return truncate("\n".join(lines))
 
 
-LIVE_TEXT = (
-    "📹 Живое видео будет прямо в приложении Vidette, без отдельных программ. Пока его нет: "
-    "последние события и сводка по команде /status."
-)
+def live_text() -> str:
+    return t("live")
 
 
 def quiet_text(until: float | None, *, now: float) -> str:
     if until is None or until <= now:
-        return "🔔 Тишина выключена: тревоги приходят как обычно."
-    return (
-        f"🔕 Тишина до {clock(until, now=now)}. Критичные тревоги всё равно придут, "
-        "остальное копится в сводку. Снять: /quiet off"
-    )
+        return t("quiet.off")
+    return t("quiet.on", time=clock(until, now=now))
 
 
-HELP_TEXT = (
-    "Я присылаю тревоги с камер и вечером итог дня, если есть что посмотреть.\n"
-    "/status: камеры, события за сегодня, последняя тревога и сводка\n"
-    "/live: живое видео (будет в приложении Vidette)\n"
-    "/quiet: тишина на час (критичное всё равно придёт), /quiet off: снять\n"
-    "Под тревогой: 👍 верно, 👎 ложная (спрошу почему), Кто это?, Не знаю, 📹 Другие камеры. "
-    "Ответ можно отменить, нажав на него.\n"
-    "Можно просто спросить: «где ещё был этот человек?» или «пришли другие камеры» в ответ "
-    "на тревогу, «что было у калитки после 9?», «сводка»."
-)
+def help_text() -> str:
+    return t("help")

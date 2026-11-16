@@ -45,7 +45,8 @@ clips, which the buttons now help collect.
        allowed_chats: ${VIDETTE_TELEGRAM_ALLOWED_CHATS}   # "id,id" or a YAML list
        topics: ${VIDETTE_TELEGRAM_TOPICS}                 # "<chat>:alerts=<t>,digest=<t>;…"
        recipients: first      # first: a trial, only the first chat gets alerts; all: everyone
-       names: false           # true: "ours: Sam" and the "This is …" buttons (privacy below)
+       language: en           # en (default) | ru
+       names: false           # true: "one of us: Sam" and the name buttons (privacy below)
        camera_names: {front_door: Front door}
    ```
 
@@ -130,18 +131,35 @@ wake someone. An `unless_known` event that went to the digest is still confirmed
 listed there with who it was.
 
 The judge never sees the wake rules, only the scenarios and whether each level is an
-alert. `understanding.vlm.language: Russian` asks for the one-line description in that
-language (the rest of the prompt stays English).
+alert. The bot's `language` (`en` by default, `ru`) is also the language the judge writes
+its one-line description in, unless `understanding.vlm.language` names another (the rest of
+the prompt stays English).
+
+## Language
+
+```yaml
+notifications:
+  telegram:
+    language: en   # en (default) | ru: every message, button, the digest and /help
+```
+
+Every phrase the bot sends lives in one catalog per language
+(`server/vidette/telegram/i18n.py`; English is the reference, a test keeps the others
+complete). Policy level and scenario `title`s and `camera_names` are your own words and
+are shown as written. Free text from models (the judge's description, deep analysis, the
+assistant) follows `language` through the prompt. Questions to the bot are understood in
+English and Russian whatever the setting. The examples below are in English; with
+`language: ru` the same messages read «Тревога: критично», «👍 верно», «Кто это?».
 
 ## The alert
 
 ```
-🚨 Тревога: критично
+🚨 Alert: critical
 📍 Front door, 21:14:03
-👤 незнакомец
-💬 Человек в капюшоне дважды дёргает ручку двери.
-[👍 верно] [👎 ложная]
-[Кто это?] [Не знаю]
+👤 stranger
+💬 A person in a hood pulls the door handle twice.
+[👍 right] [👎 false alarm]
+[Who is it?] [Not sure]
 ```
 
 - Above the text, an album: up to `frames` (3) frames that show the subject, and the clip
@@ -153,21 +171,21 @@ language (the rest of the prompt stays English).
   only where that address does.
 - The album arrives silently; the text with the buttons is what buzzes.
 - One camera's alerts within `collapse` (5 min) at the same or a lower level edit the
-  first message ("Ещё на этой камере: 2" and their times) instead of buzzing again; a
+  first message ("More on this camera: 2" and their times) instead of buzzing again; a
   higher level is a new alert.
 - One alert per event and chat, enforced by the database.
 
-The person line: `свой: Sam` (with `names: true`, else `свой`), `незнакомец` (a readable
-face that matched nobody), `лицо не видно` (no readable face), `людей не видно` (the
-judge counted nobody), `лица не проверялись` (known people are off). With anonymous
-identities ([people.md](people.md#strangers-who-come-back)): `незнакомец №12, 3-й раз за
-сегодня` (`впервые`, `4-й раз за 3 дня`; the cameras when two or more saw it within the
-hour), `⚠️ подозрительный №12` for one you marked, `знакомый: Соседка` for a familiar
-person (the name only with `names: true`), `незнакомец №40 (лицо мелкое)` for a face too
-small to compare, `лицо не найдено` when the judge saw someone whose face was never found,
-and `· уровень поднят: приходит не первый раз` when a policy's `recurrence` rule raised
+The person line: `one of us: Sam` (with `names: true`, else `one of us`), `stranger` (a
+readable face that matched nobody), `no people in view` (the judge counted nobody), `faces
+not checked` (known people are off). With anonymous identities
+([people.md](people.md#strangers-who-come-back)): `stranger #12, 3rd time today` (`first
+time`, `4th time in 3 days`; the cameras when two or more saw it within the hour),
+`⚠️ suspicious #12` for one you marked, `familiar: Neighbour` for a familiar person (the
+name only with `names: true`), `stranger #40 (small face)` for a face too small to
+compare, `no face found` when the judge saw someone whose face was never found, and
+`· level raised: not the first visit` when a policy's `recurrence` rule raised
 the level; no face crop of an identity is ever sent. A line
-`📼 Запись прерывалась: 38 пауз, до 13 с` says the video paused (the clip's
+`📼 The recording paused: 38 pauses, up to 13 s` says the video paused (the clip's
 [stream health](collect.md#stream-health)); the judge was told where.
 
 ### Early alerts: before the clip ends
@@ -180,7 +198,7 @@ source picks that up within a second:
 1. The early window is judged at once. If it is an alert at a level that wakes for
    anyone (`wake: always`), the alert goes out as usual (routing, quiet hours, collapse,
    one per event and chat), marked
-   «По первым секундам записи»; its album holds the frames that show the subject and the
+   "From the first seconds of the recording"; its album holds the frames that show the subject and the
    first seconds as a video. Anything else, a lower level included, changes nothing yet:
    in testing, a person who seemed to stop in the first 8 s mostly walked on, and two of
    the nine alerts marked false in two days were such early alerts that the whole clip
@@ -190,10 +208,10 @@ source picks that up within a second:
      a later alert;
    - after an early alert, the same message is edited: the clip replaces the album's last
      item (or answers the alert when there was no album; a link when it is too big), the
-     text shows the whole clip's verdict, «Уточнено по всему ролику»;
+     text shows the whole clip's verdict, "Checked against the whole clip";
    - a higher level from the whole clip also sends one short message answering the alert
-     («⬆️ Уровень выше: критично»), the only second buzz for an event;
-   - not an alert after all: the text says «это не тревога»; the event is dismissed;
+     ("⬆️ Level raised: critical"), the only second buzz for an event;
+   - not an alert after all: the text says "not an alert"; the event is dismissed;
    - no verdict for the whole clip: the early verdict stands.
 
 How early the alert can be: the window (8 s) plus the judge's time plus a second or two.
@@ -202,48 +220,48 @@ own, the target is 20 to 30 s from the person appearing.
 
 ## The buttons
 
-Under a new alert: **👍 верно**, **👎 ложная**, **Кто это?** (when a face was found) and
-**Не знаю**. After an answer the buttons shrink to one that says what was chosen
-(«👎 прошёл мимо», «👤 знакомый «Соседка»»): tapping it takes that answer back exactly
+Under a new alert: **👍 right**, **👎 false alarm**, **Who is it?** (when a face was found) and
+**Not sure**. After an answer the buttons shrink to one that says what was chosen
+("👎 walked past", "👤 familiar “Neighbour”"): tapping it takes that answer back exactly
 (the event's feedback, the dataset label, the face decision) and brings the full buttons
 again. No keyboard of six buttons is left on old alerts.
 
 **Why was it false?** 👎 is recorded at once and the bot offers the reasons, the most
-likely first for this event (a stalled recording offers «Запись зависла» first, a
-verdict about a car «Сел в машину, своя», a person at the house «Прошёл мимо»):
+likely first for this event (a stalled recording offers "The recording froze" first, a
+verdict about a car "Got into a car, theirs", a person at the house "Walked past"):
 
 | Reason | Stored as | The clip's label |
 |---|---|---|
-| Прошёл мимо | `passing` | `passer_by` when the policy has it, else `other` |
-| Сел в машину, своя | `car_use` | `car_use` (or `car_passing`) when the policy has it |
-| Свой или знакомый | `ours` | `household_member` |
-| Животное, Проехала машина | `animal`, `vehicle` | `animal`, `car_passing` |
-| Свет, тень, дождь; Запись зависла; Не та камера | `light`, `stalled`, `camera` | `other` |
-| Верно, но неважно | `unimportant` | the judge's own scenario: it saw right, the alert was not worth it |
-| Другое: напишу | `other` | `other`; the bot asks what it was, the reply is the entry's `notes` |
+| Walked past | `passing` | `passer_by` when the policy has it, else `other` |
+| Got into a car, theirs | `car_use` | `car_use` (or `car_passing`) when the policy has it |
+| One of us or familiar | `ours` | `household_member` |
+| An animal, A car drove past | `animal`, `vehicle` | `animal`, `car_passing` |
+| Light, shadow, rain; The recording froze; Wrong camera | `light`, `stalled`, `camera` | `other` |
+| Right, but not important | `unimportant` | the judge's own scenario: it saw right, the alert was not worth it |
+| Other: I'll write | `other` | `other`; the bot asks what it was, the reply is the entry's `notes` |
 
 The reason is kept on the event (`intent.review`) and as the entry's `reason` in
-`labels.yaml`; the digest counts the reasons («Ложные чаще всего: прошёл мимо (5)»).
+`labels.yaml`; the digest counts the reasons ("False most often: walked past (5)").
 
 | Button | The event | The clip's dataset (`labels.yaml`) | Known people |
 |---|---|---|---|
-| 👍 верно | feedback `up` | `N <the scenario the judge named>`, reviewed | |
-| 👎 ложная | feedback `down` | `N other` (none of the policy's scenarios), reviewed | |
-| Не знаю | | `N ?`: unlabelled, reviewed, not scored | |
-| Кто это? → Свой: a name | | `N household_member`, unless the level wakes `always` | the face is confirmed as that person (`vidette people confirm`); a face of an anonymous identity promotes the whole identity |
-| Кто это? → Знакомый: a name, Новый знакомый…, Новая личность…, Чужой | | | the face goes into that identity, a new familiar or unknown one (the bot asks for its name: reply to its message), or stays a stranger with an identity ([people.md](people.md#change-your-mind)) |
-| Кто это? → Отменить решение | | | the answer about that face is taken back, exactly |
+| 👍 right | feedback `up` | `N <the scenario the judge named>`, reviewed | |
+| 👎 false alarm | feedback `down` | `N other` (none of the policy's scenarios), reviewed | |
+| Not sure | | `N ?`: unlabelled, reviewed, not scored | |
+| Who is it? → One of us: a name | | `N household_member`, unless the level wakes `always` | the face is confirmed as that person (`vidette people confirm`); a face of an anonymous identity promotes the whole identity |
+| Who is it? → Familiar: a name, New familiar…, New identity…, Stranger | | | the face goes into that identity, a new familiar or unknown one (the bot asks for its name: reply to its message), or stays a stranger with an identity ([people.md](people.md#change-your-mind)) |
+| Who is it? → Take it back | | | the answer about that face is taken back, exactly |
 
-- The bot edits the alert ("✅ Отмечено: ложная") and keeps the buttons, so a wrong tap
+- The bot edits the alert ("✅ Marked: false alarm") and keeps the buttons, so a wrong tap
   can be corrected; the last answer wins, as with `vidette label apply`.
 - A clip without an entry gets one first, numbered like `vidette label draft` would,
   with the live verdict as its `draft`; the policy's scenarios (and `other`) are added to
   the dataset's vocabulary if missing. `labels.yaml` is created from the starter template
   if the folder has none. Everything goes through the same code as
   [`vidette label apply`](label.md) and is validated before the file is replaced.
-- "Кто это?" appears when the face check found a face and there is something to say
+- "Who is it?" appears when the face check found a face and there is something to say
   about it: anonymous identities are on, or (with `names: true`) someone is enrolled.
-  With several faces it asks which one first ("Лицо 1: …"). Enrolled people and named
+  With several faces it asks which one first ("Face 1: …"). Enrolled people and named
   familiar identities are listed by name only with `names: true`. A name typed in reply
   to the bot's question is read only in an allowed chat and only as a reply to that
   question; after a restart of the service, tap the button again.
@@ -251,14 +269,14 @@ The reason is kept on the event (`intent.review`) and as the entry's `reason` in
 
 ## The other cameras, and questions
 
-Under an alert, when there are other clip-folder cameras, **📹 Другие камеры** sends every
+Under an alert, when there are other clip-folder cameras, **📹 Other cameras** sends every
 camera at the moment of the alert as one video, a reply to the alert, with which tile is
 which camera and what each recorded; a camera that recorded nothing is named as such
 (battery cameras record only while awake). Details: [other-cameras.md](other-cameras.md).
 
 Any other text from an allowed chat is a question, answered by a small assistant with the
-local model by default: «где ещё был этот человек?» or «пришли другие камеры» as a reply to
-an alert, «что было у калитки после 9?», «сводка». Details and privacy:
+local model by default: "where else was this person?" or "send the other cameras" as a reply to
+an alert, "what happened at the gate after 9?", "digest". Details and privacy:
 [assistant.md](assistant.md).
 
 ## The digest and the commands
@@ -269,14 +287,14 @@ look**: an event that was confirmed but woke nobody (known people, quiet hours),
 nobody answered yet. A day of passers-by and answered alerts sends nothing.
 
 ```
-🌙 Итог дня, 14 января
-Тревог: 3. По вашим отметкам: ложных 2, без ответа 1.
-Ложные чаще всего: прошёл мимо (2).
-1 тревога ждёт ответа, последняя в 18:40 (Крыльцо). Кнопки под тревогой.
-Без тревоги, но стоит взглянуть:
-• 20:05 Сад: человек у дома, свой: Sam
-Всего за день 410 роликов: прохожие 90, машины 60, животные 4.
-Не проверено судьёй: 150 (не дошла очередь).
+🌙 The day, January 14
+Alerts: 3. By your marks: false 2, unanswered 1.
+False most often: walked past (2).
+1 alert waits for an answer, the last at 18:40 (Porch). The buttons are under the alert.
+No alert, but worth a look:
+• 20:05 Garden: person at the house, one of us: Sam
+All day: 410 clips: passers-by 90, cars 60, animals 4.
+Not checked by the judge: 150 (the queue did not reach it).
 ```
 
 The day is written down before the message goes out, so a restart never sends it twice; a
@@ -304,16 +322,16 @@ queued, started and finished (`early_` ones for the early window), and the alert
 `sent_at` with its message. `/status` shows it for the last alert:
 
 ```
-⏱ Где ушло время
-камера проснулась: 00:05:43
-→ первый кадр: +1 с
-→ человек в кадре: +1:16
-→ ролик готов: +52 с
-→ сервер взял ролик: +6 с
-→ судья начал: +1:58
-→ судья ответил: +1:04
-→ тревога ушла: +3 с
-От человека в кадре до тревоги: 4:03
+⏱ Where the time went
+camera woke up: 00:05:43
+→ first frame: +1 s
+→ person in view: +1:16
+→ clip ready: +52 s
+→ the server took the clip: +6 s
+→ the judge started: +1:58
+→ the judge answered: +1:04
+→ alert sent: +3 s
+From the person in view to the alert: 4:03
 ```
 
 All stages run on the recording machine's clock. A camera's stream can itself lag behind
@@ -347,7 +365,7 @@ work (2048 tokens per slot):
 - **The judge is the bottleneck.** One verdict took 51 to 115 s, most of it waiting for a
   free slot. The cameras cut about 100 to 150 clips an hour together; the judge answers
   a few dozen. Newest first keeps the current clip at the front; the rest are counted in
-  the digest as "не дошла очередь".
+  the digest as "the queue did not reach it".
 - **Context:** four frames at 768 px plus a policy with levels were 2101 tokens and the
   server refused them; at 640 px, 1565 in and about 50 out.
 - **A small figure is easy to miss.** On a test clip a person about 100 px tall at the

@@ -18,27 +18,36 @@ from dataclasses import dataclass
 from typing import Any
 
 from vidette.label.feedback import JUDGES_SCENARIO
+from vidette.telegram.i18n import t
 
 
 @dataclass(frozen=True)
 class Reason:
     code: str  # stored on the event and in the dataset
-    button: str  # on the button under the alert
-    short: str  # on the one button left after the answer («👎 прошёл мимо»)
     truth: tuple[str, ...] = ()  # scenarios it stands for, the first the policy knows wins
+
+    @property
+    def button(self) -> str:
+        """On the button under the alert (`reason.<code>.button` in the catalog)."""
+        return t(f"reason.{self.code}.button")
+
+    @property
+    def short(self) -> str:
+        """On the one button left after the answer ("👎 walked past")."""
+        return t(f"reason.{self.code}.short")
 
 
 REASONS: tuple[Reason, ...] = (
-    Reason("passing", "Прошёл мимо", "прошёл мимо", ("passer_by",)),
-    Reason("car_use", "Сел в машину, своя", "своя машина", ("car_use", "car_passing")),
-    Reason("ours", "Свой или знакомый", "свои", ("household_member",)),
-    Reason("animal", "Животное", "животное", ("animal",)),
-    Reason("vehicle", "Проехала машина", "машина", ("car_passing",)),
-    Reason("light", "Свет, тень, дождь", "свет, тень", ()),
-    Reason("stalled", "Запись зависла", "запись зависла", ()),
-    Reason("camera", "Не та камера", "не та камера", ()),
-    Reason("unimportant", "Верно, но неважно", "неважно", (JUDGES_SCENARIO,)),
-    Reason("other", "Другое: напишу", "другое", ()),
+    Reason("passing", ("passer_by",)),
+    Reason("car_use", ("car_use", "car_passing")),
+    Reason("ours", ("household_member",)),
+    Reason("animal", ("animal",)),
+    Reason("vehicle", ("car_passing",)),
+    Reason("light", ()),
+    Reason("stalled", ()),
+    Reason("camera", ()),
+    Reason("unimportant", (JUDGES_SCENARIO,)),
+    Reason("other", ()),
 )
 BY_CODE: dict[str, Reason] = {reason.code: reason for reason in REASONS}
 

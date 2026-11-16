@@ -9,7 +9,7 @@ Read-only: find events, an event's details, the clips of every camera around a m
 where an identity was seen, today's digest. Videos are links to the API
 (`…/clip.mp4`, `…/linked.mp4`), never bytes in the answer. An MCP client may hand
 everything to a cloud model, so no name is ever in a result (identity numbers and
-"свой" only), and no face crop, embedding or frame.
+"one of us" only), and no face crop, embedding or frame.
 """
 
 from __future__ import annotations

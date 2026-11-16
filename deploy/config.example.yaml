@@ -109,6 +109,7 @@ notifications:
   #   allowed_chats: ${VIDETTE_TELEGRAM_ALLOWED_CHATS}   # "id,id"; nobody else is answered
   #   topics: ${VIDETTE_TELEGRAM_TOPICS}                 # "<chat>:alerts=<t>,digest=<t>;…"
   #   recipients: all        # first: a trial, only the first chat gets alerts
+  #   language: en           # en | ru: messages, buttons, the digest (docs/telegram.md)
   #   names: false           # names of recognized people go to Telegram when true
   #   digest_at: "21:00"     # the day's digest, only when something needs a look
   rules:

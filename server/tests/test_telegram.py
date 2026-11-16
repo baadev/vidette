@@ -80,6 +80,7 @@ def make_config(tmp_path: Path, **telegram: Any) -> VidetteConfig:
         "topics": f"{OWNER}:alerts={ALERTS},digest={DIGEST}",
         "recipients": "first",
         "names": True,
+        "language": "ru",
         "camera_names": {"front_door": "Дверь"},
         "api_url": "http://telegram.test",
     }

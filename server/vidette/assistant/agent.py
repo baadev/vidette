@@ -29,6 +29,7 @@ import httpx
 
 from vidette.assistant.tools import CURRENT, Media, Result, ToolError, Tools
 from vidette.core.config import VidetteConfig, VlmBackend
+from vidette.telegram.i18n import model_language, t
 from vidette.telegram.text import plural
 from vidette.vlm.budget import UsageLedger
 from vidette.vlm.client import parse_json_answer
@@ -37,29 +38,38 @@ from vidette.vlm.gate import SlotGate
 
 logger = logging.getLogger(__name__)
 
-CAN_DO = (
-    "Я умею: присылать видео со всех камер в момент тревоги («пришли другие камеры» в ответ "
-    "на тревогу), искать, где ещё был человек по лицу («где ещё был этот человек?»), "
-    "находить события («что было на улице после 12:00?», «тревоги за сегодня»), "
-    "рассказывать подробности события и сводку дня, отмечать тревогу верной или ложной."
-)
+
+def can_do() -> str:
+    """What the assistant can do, in the bot's language."""
+    return t("assistant.can_do")
+
+
 SYSTEM = (
-    "Ты помощник домашней системы видеонаблюдения Vidette. Отвечай по-русски, коротко, "
-    "одним-тремя предложениями, только по данным инструментов; ничего не выдумывай. "
-    "Если камера ничего не записала, так и скажи (камеры на батарейках пишут, только когда "
-    "проснулись). Один человек на разных камерах — только если инструмент сказал "
-    "same_person_by_face; иначе говори «в это же время», а не «тот же человек». Никогда не "
-    "описывай внешность людей. Если просьба не про камеры и события, коротко скажи, что "
-    "умеешь: найти события, прислать видео со всех камер, сказать, где ещё был человек по "
-    "лицу, сводку дня."
+    "You are the assistant of Vidette, a home camera system. Answer in {language}, briefly, "
+    "in one to three sentences, only from what the tools return; never make anything up. "
+    "If a camera recorded nothing, say so (battery cameras record only when they wake up). "
+    "One person on several cameras only when a tool said same_person_by_face; otherwise say "
+    '"at the same time", not "the same person". Never describe how people look. If the '
+    "request is not about the cameras and events, say briefly what you can do: find "
+    "events, send video from every camera, say where else a person was seen by face, the "
+    "day's digest."
 )
-_OTHER_CAMERAS = re.compile(r"друг\w*\s+камер|со?\s+всех\s+камер|все\s+камеры|остальн\w*\s+камер")
+# The commonest questions, answered without the model; English and Russian are both
+# understood whatever the bot's language.
+_OTHER_CAMERAS = re.compile(
+    r"друг\w*\s+камер|со?\s+всех\s+камер|все\s+камеры|остальн\w*\s+камер"
+    r"|other\s+cameras|all\s+(the\s+)?cameras|every\s+camera"
+)
 _WHERE_ELSE = re.compile(
     r"где\s+(ещё|еще)|(ещё|еще)\s+(встреча|был|приход|появля)|раньше\s+(был|видел|приход)"
     r"|этот\s+человек|эта\s+женщина|этот\s+мужчина"
+    r"|where\s+else|seen\s+(this|that)\s+(person|man|woman)|this\s+person\s+before"
 )
-_TODAY = re.compile(r"сводк|итог\w*\s+дня|что\s+было\s+сегодня|за\s+сегодня\??$")
-_HELP = re.compile(r"^(что\s+(ты\s+)?умеешь|помощь|help|/help)\??$")
+_TODAY = re.compile(
+    r"сводк|итог\w*\s+дня|что\s+было\s+сегодня|за\s+сегодня\??$"
+    r"|digest|summary|what\s+happened\s+today"
+)
+_HELP = re.compile(r"^(что\s+(ты\s+)?умеешь|помощь|help|/help|what\s+can\s+you\s+do)\??$")
 TOOL_RESULT_CHARS = 700  # a shared server's slot holds about 2000 tokens in all
 
 
@@ -112,23 +122,23 @@ class Assistant:
             return quick
         endpoint = self.endpoint()
         if endpoint is None:
-            return Reply("Свободные вопросы выключены (assistant.backend: none). " + CAN_DO)
+            return Reply(t("assistant.off") + can_do())
         try:
             return await self._converse(endpoint, text, event_id)
         except _ModelError as exc:
             logger.info("assistant: %s", exc)
-            return Reply(f"Модель не ответила ({exc}). Попробуйте позже. " + CAN_DO)
+            return Reply(t("assistant.model_failed", error=exc) + can_do())
 
     async def _fast(self, text: str, event_id: str | None) -> Reply | None:
         """The commonest questions, answered without the model."""
         lowered = text.lower()
         if _HELP.search(lowered):
-            return Reply(CAN_DO, fast=True)
+            return Reply(can_do(), fast=True)
         try:
             if event_id and _OTHER_CAMERAS.search(lowered):
                 result = await self.tools.call("send_clips", {"event_id": CURRENT})
                 if result.media:  # the caption under the video says it all
-                    return Reply("Все камеры в этот момент, одним видео:", result.media, fast=True)
+                    return Reply(t("assistant.all_cameras"), result.media, fast=True)
                 return Reply(self._clips_text(result), fast=True)
             if event_id and _WHERE_ELSE.search(lowered):
                 return Reply(await self._where_else(), fast=True)
@@ -145,21 +155,18 @@ class Assistant:
         for clip in data.get("clips") or []:
             line = f"{clip['cam']}: {clip['from']}–{clip['to']}"
             if clip.get("time"):
-                line += " (время примерное)"
+                line += t("assistant.time_approx")
             if clip.get("this_event"):
-                line += ", это событие"
+                line += ", " + t("linked.this_event")
             elif clip.get("same_person_by_face"):
-                line += ", тот же человек по лицу"
+                line += ", " + t("linked.same_person")
             elif clip.get("person"):
-                line += ", человек в кадре, лицо не сравнить"
+                line += ", " + t("linked.person_no_face")
             lines.append(line)
         if data.get("nothing_from"):
-            lines.append(
-                f"{', '.join(data['nothing_from'])}: в это время ничего не записано "
-                "(камера спала или движения не было)"
-            )
+            lines.append(t("linked.nothing", names=", ".join(data["nothing_from"])))
         if not result.media:
-            lines.insert(0, "Видео нет: в этот момент записала только эта камера.")
+            lines.insert(0, t("assistant.no_video"))
         return "\n".join(lines)
 
     async def _where_else(self) -> str:
@@ -167,47 +174,47 @@ class Assistant:
         numbers = [
             int(match.group(1))
             for face in detail.get("faces") or []
-            if (match := re.search(r"№(\d+)", str(face)))
+            if (match := re.search(r"[#№](\d+)", str(face)))
         ]
         if not numbers:
             if detail.get("faces"):
-                return "Лицо здесь распознано как своё или слишком мелкое: сравнивать не с чем."
-            return (
-                "В этом событии лицо не найдено, поэтому сравнить человека с другими записями "
-                "нельзя. По одежде или росту я людей не сравниваю. Могу прислать, что "
-                "записали другие камеры в этот момент."
-            )
+                return t("assistant.face_ours_or_small")
+            return t("assistant.no_face")
         parts = []
         for number in numbers[:2]:
             found = (await self.tools.call("identity_sightings", {"identity": number})).data
             shown = found.get("shown") or []
             others = [s for s in shown if not s.get("this_event")]
-            head = f"№{number}" + (f" ({found['name']})" if found.get("name") else "")
+            head = t("assistant.number", id=number) + (
+                f" ({found['name']})" if found.get("name") else ""
+            )
             if not others:
-                parts.append(f"{head}: других встреч за неделю нет, это первая.")
+                parts.append(t("assistant.first_seen", head=head))
                 continue
             listed = "; ".join(f"{s['t']} {s['cam']}" for s in others[:8])
             more = found["sightings_total"] - (len(shown) - len(others)) - len(others[:8])
-            tail = f" и ещё {more}" if more > 0 else ""
-            total = plural(int(found["sightings_total"]), "раз", "раза", "раз")
-            days = plural(int(found["days_seen"]), "день", "дня", "дней")
-            parts.append(f"{head}: всего {total} за {days}; другие встречи: {listed}{tail}.")
+            tail = t("assistant.and_more", n=more) if more > 0 else ""
+            total = plural(int(found["sightings_total"]), "n.times")
+            days = plural(int(found["days_seen"]), "n.days")
+            parts.append(
+                t("assistant.seen", head=head, total=total, days=days, listed=listed, tail=tail)
+            )
         return "\n".join(parts)
 
     # --- the model -------------------------------------------------------------------------
 
     async def _converse(self, endpoint: VlmEndpoint, text: str, event_id: str | None) -> Reply:
         now = datetime.fromtimestamp(self._clock())
-        system = SYSTEM + f" Сейчас {now:%Y-%m-%d %H:%M}."
+        system = SYSTEM.format(language=model_language()) + f" It is now {now:%Y-%m-%d %H:%M}."
         cameras = ", ".join(
             f"{f.camera} ({self.tools.camera_name(f.camera)})" for f in self.config.clip_folders
         )
         if cameras:
-            system += f" Камеры: {cameras}."
+            system += f" Cameras: {cameras}."
         if event_id:
             brief = (await self.tools.call("event_detail", {"event_id": CURRENT})).data
             system += (
-                " Вопрос задан в ответ на это событие (event_id current): "
+                " The question replies to this event (event_id current): "
                 + json.dumps(brief, ensure_ascii=False)[:500]
             )
         messages: list[dict[str, Any]] = [
@@ -222,7 +229,7 @@ class Assistant:
             calls += used
             requested = self._tool_requests(message)
             if not requested or final:
-                answer = self._text(message) or "Не нашёл, что ответить. " + CAN_DO
+                answer = self._text(message) or t("assistant.no_answer") + can_do()
                 return Reply(answer.strip(), media, model_calls=calls)
             messages.append(self._assistant_turn(message, requested))
             for call_id, name, args in requested[:2]:
@@ -233,7 +240,7 @@ class Assistant:
                 except ToolError as exc:
                     content = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 messages.append(self._tool_turn(call_id, name, content[:TOOL_RESULT_CHARS]))
-        return Reply("Не успел ответить. " + CAN_DO, media, model_calls=calls)
+        return Reply(t("assistant.too_slow") + can_do(), media, model_calls=calls)
 
     async def _ask(
         self, endpoint: VlmEndpoint, messages: list[dict[str, Any]], *, final: bool
@@ -241,7 +248,7 @@ class Assistant:
         backend = f"assistant-{endpoint.backend.value}"
         usage = await self._ledger.today(backend)
         if usage.calls >= self.config.assistant.max_calls_per_day:
-            raise _ModelError("дневной лимит вопросов исчерпан")
+            raise _ModelError(t("assistant.err.limit"))
         body: dict[str, Any] = {
             "model": endpoint.model,
             "messages": messages if self._native_tools else self._as_prompt(messages, final),
@@ -264,9 +271,9 @@ class Assistant:
                     timeout=self.config.assistant.timeout_s,
                 )  # fmt: skip
         except httpx.TimeoutException as exc:
-            raise _ModelError("не уложилась во время") from exc
+            raise _ModelError(t("assistant.err.timeout")) from exc
         except httpx.HTTPError as exc:
-            raise _ModelError(f"недоступна: {type(exc).__name__}") from exc
+            raise _ModelError(t("assistant.err.unreachable", name=type(exc).__name__)) from exc
         if response.status_code == 400 and self._native_tools and "tool" in response.text.lower():
             self._native_tools = False  # this server has no tool calls: the JSON prompt
             message, used = await self._ask(endpoint, messages, final=final)
@@ -278,14 +285,14 @@ class Assistant:
             logger.info("assistant: %s answered HTTP %d: %s", endpoint.host, response.status_code,
                         detail)  # fmt: skip
             if "context" in detail.lower():
-                raise _ModelError("вопрос и найденное не поместились в модель")
+                raise _ModelError(t("assistant.err.context"))
             raise _ModelError(f"HTTP {response.status_code}")
         try:
             message = response.json()["choices"][0]["message"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise _ModelError("непонятный ответ") from exc
+            raise _ModelError(t("assistant.err.unclear")) from exc
         if not isinstance(message, dict):
-            raise _ModelError("непонятный ответ")
+            raise _ModelError(t("assistant.err.unclear"))
         return message, 1
 
     # --- the two dialects: native tool calls, and a JSON action in plain text --------------
@@ -343,7 +350,7 @@ class Assistant:
 
     def _tool_turn(self, call_id: str, name: str, content: str) -> dict[str, Any]:
         if not self._native_tools:
-            return {"role": "user", "content": f"Результат {name}: {content}"}
+            return {"role": "user", "content": f"Result of {name}: {content}"}
         return {"role": "tool", "tool_call_id": call_id, "content": content}
 
     def _as_prompt(self, messages: list[dict[str, Any]], final: bool) -> list[dict[str, Any]]:
@@ -352,10 +359,10 @@ class Assistant:
             for s in self.tools.specs()
         )
         rule = (
-            'Ответь JSON: {"answer": "текст"}.'
+            'Answer with JSON: {"answer": "text"}.'
             if final
-            else 'Ответь одним JSON: {"tool": "имя", "args": {…}} чтобы вызвать инструмент, '
-            'или {"answer": "текст"} чтобы ответить. Инструменты: ' + tools
+            else 'Answer with one JSON object: {"tool": "name", "args": {…}} to call a tool, '
+            'or {"answer": "text"} to answer. Tools: ' + tools
         )
         first = dict(messages[0])
         first["content"] = f"{first['content']}\n{rule}"
