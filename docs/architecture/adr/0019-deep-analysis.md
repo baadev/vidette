@@ -41,8 +41,10 @@ judge should become labelling work, so a person reviews only where the judges pa
   and nothing live waits, and a live call that arrives cancels the deep request (the job
   goes back, its finished looks kept). Before each request the worker reads the server's
   `GET /slots` and sends only when a slot is idle, backing off from 15 s to 5 min.
-- **When**: back to back inside `window` (01:00-07:00 by default); outside it one clip
-  every `trickle_every` (10 min), or nothing (`outside_window: off`).
+- **When**: back to back inside `window` (01:00-07:00 by default), yielding to live calls
+  as above; outside it one clip every `trickle_every` (10 min) as a turn of its own (in
+  line with live calls, not cancelled: on a busy day the live judge never rests and a
+  yielding trickle would never run), or nothing (`outside_window: off`).
 - **Inside `vidette serve`**, not a separate agent: only one process can see the live
   judge, the assistant and deep analysis together and let the live ones go first; the
   event database has one writer (ADR-0008); the digest that quotes the deep descriptions
@@ -55,8 +57,10 @@ judge should become labelling work, so a person reviews only where the judges pa
 
 ## Consequences
 
-- Live verdicts wait for nothing new; a deep request can be thrown away by a live one,
-  so on a busy day deep analysis mostly waits for the night.
+- At night live verdicts wait for nothing new: a deep request can be thrown away by a live
+  one. By day a live verdict may wait for one deep request once per `trickle_every`; on a
+  test deployment the live judge kept the slot busy all day, so without the turn deep
+  analysis would only ever run at night.
 - Deep calls are counted apart from the live judge's (`deep-local` in the usage ledger);
   the clip cap is the real limit.
 - More frames than the live judge are only as useful as the slot's context allows: with

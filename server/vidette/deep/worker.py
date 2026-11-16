@@ -9,13 +9,16 @@
      labels.yaml ◀── disputed / uncertain clips as review drafts (label_disputes)
 
 When it runs: always one request at a time, through the process's shared slot
-(vidette.vlm.gate): it waits while the live judge or the assistant use it, and a live
-call that arrives cancels the deep request (the job goes back to the queue, the frames
-already described are kept for the retry). Before every request it asks the server's
-`/slots` and sends only when `min_idle_slots` are idle; otherwise it backs off, 15 s
-doubling to 5 min, so it never takes another tenant's slot. Inside `window` (01:00-07:00
-by default) it runs back to back; outside it, one clip every `trickle_every`, or nothing
-(`outside_window: off`). At most `max_clips_per_day` clips are analysed per local day.
+(vidette.vlm.gate). Inside `window` (01:00-07:00 by default) it runs back to back but
+only while the live judge rests: it waits while the live judge or the assistant use the
+slot, and a live call that arrives cancels the deep request (the job goes back to the
+queue, the frames already described are kept for the retry). Outside the window it takes
+one clip every `trickle_every` as a turn of its own, in line with live calls and not
+cancelled, so a live judge that never rests (a busy day) waits for one deep request now
+and then instead of starving it; `outside_window: off` leaves the day to the live judge.
+Before every request it asks the server's `/slots` and sends only when `min_idle_slots`
+are idle; otherwise it backs off, 15 s doubling to 5 min, so it never takes another
+tenant's slot. At most `max_clips_per_day` clips are analysed per local day.
 
 Why inside serve and not a separate agent: the one slot is shared with the live judge
 and the assistant, and only one process can see all three and let live calls go first;
@@ -148,6 +151,7 @@ class DeepWorker:
         self._last_refill = 0.0
         self._last_started = 0.0
         self._partial: dict[str, list[Look]] = {}  # looks of a preempted job, for its retry
+        self._preemptible = True  # night: yield to live calls; day trickle: a turn of its own
         self.status = DeepStatus()
 
     # --- lifecycle -------------------------------------------------------------------------
@@ -215,6 +219,10 @@ class DeepWorker:
             logger.info("deep: %d event(s) queued", added)
         return added
 
+    def in_window(self) -> bool:
+        local = datetime.fromtimestamp(self._clock())
+        return self.deep.in_window(local.hour * 60 + local.minute)
+
     async def allowed_in(self) -> float:
         """Seconds until the next clip may start (0: now), from the cap, the window and
         the trickle pace."""
@@ -246,7 +254,8 @@ class DeepWorker:
         wait = await self.allowed_in()
         if wait > 0:
             return min(wait, IDLE_SLEEP_S)
-        if self._live_busy() or self.gate.busy or self.gate.live_waiting:
+        night = self.in_window()
+        if night and (self._live_busy() or self.gate.busy or self.gate.live_waiting):
             self.status.waiting_for = "the live judge"
             return 5.0
         now = self._clock()
@@ -258,7 +267,7 @@ class DeepWorker:
             return IDLE_SLEEP_S
         self.status.waiting_for = None
         self._last_started = now
-        await self.run_job(job)
+        await self.run_job(job, preemptible=night)
         return 0.0
 
     # --- one job ---------------------------------------------------------------------------
@@ -266,7 +275,7 @@ class DeepWorker:
     @contextlib.asynccontextmanager
     async def _slot(self) -> AsyncIterator[None]:
         """The shared slot, and then a free slot on the server (ADR-0019)."""
-        async with self.gate.background():
+        async with self.gate.background(preemptible=self._preemptible):
             delay = BACKOFF_S[0]
             while self.deep.slots == "check":
                 state = await slot_state(self.endpoint, self._http)
@@ -308,7 +317,7 @@ class DeepWorker:
                 people = PeopleReport.model_validate(raw)
         return Case(incident=incident, media=tuple(Path(m) for m in incident.media), people=people)
 
-    async def run_job(self, job: DeepJobRow) -> None:
+    async def run_job(self, job: DeepJobRow, *, preemptible: bool = True) -> None:
         row = await self.db.get_event(job.event_id)
         now = self._clock()
         if row is None:
@@ -323,6 +332,7 @@ class DeepWorker:
             await self.db.deep_update(job.event_id, state="skipped", error=why, done_at=now)
             return
         await self.db.deep_update(job.event_id, state="running", taken_at=now)
+        self._preemptible = preemptible
         work = self.media_dir / "deep-frames" / row.id
         started = self._clock()
         stats = dict(job.stats)
@@ -383,6 +393,7 @@ class DeepWorker:
                 ],
                 "frames": len(result.frames.paths),
                 "agreement": record["agreement"],
+                "mode": "night" if preemptible else "trickle",
             }
         )  # fmt: skip
         if self.status.slot_checks > checks and self.status.slots:

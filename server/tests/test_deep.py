@@ -431,3 +431,46 @@ async def test_running_jobs_are_queued_again_after_a_restart(tmp_path: Path) -> 
     assert (job.priority, job.reason) == (0, "alert")
     assert json.dumps(job.stats) == "{}"
     await db.close()
+
+
+async def test_a_daytime_turn_is_not_cancelled_and_live_calls_wait_for_it(
+    tmp_path: Path,
+) -> None:
+    gate = SlotGate()
+    order: list[str] = []
+
+    async def turn() -> None:
+        async with gate.background(preemptible=False):
+            await asyncio.sleep(0.05)
+            order.append("turn")
+
+    task = asyncio.create_task(turn())
+    await asyncio.sleep(0.01)
+    async with gate.live():
+        order.append("live")
+    await task
+    assert order == ["turn", "live"] and gate.preemptions == 0
+
+
+async def test_outside_the_window_the_worker_takes_a_turn_while_the_live_judge_works(
+    tmp_path: Path,
+) -> None:
+    fake = FakeVlmApi(answer=answer, slots=[False])
+    noon = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).timestamp()
+    worker, db, _gate, _slept = await make_worker(
+        tmp_path, fake, [noon], window="01:00-07:00", trickle_every="10m"
+    )
+    worker._live_busy = lambda: True  # a busy day: the live judge never rests
+    await insert(
+        db,
+        tmp_path / "street",
+        "20261114-110000",
+        started=noon - 7200,
+        verdict=PASSER,
+        state="dismissed",
+    )
+    assert await worker.step() == 0.0
+    [job] = await db.deep_jobs(state="done")
+    assert job.stats["mode"] == "trickle"
+    assert await worker.step() > 0  # the next one waits for the trickle
+    await db.close()

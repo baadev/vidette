@@ -54,10 +54,14 @@ It runs inside `vidette serve`; there is nothing else to start.
 ## One request at a time, never in someone else's slot
 
 A shared model server may give this installation one parallel slot. The live judge, the
-assistant and deep analysis share it in one process: live calls go first, deep analysis
-takes the slot only when it is free, and a live call that arrives cancels the deep
-request (the job goes back to the queue; the frames it already described are not asked
-again). Before every request the server's `GET /slots` (llama.cpp, with the API key) must
+assistant and deep analysis share it in one process. Inside the window live calls go
+first: deep analysis takes the slot only while the live judge rests, and a live call that
+arrives cancels the deep request (the job goes back to the queue; the frames it already
+described are not asked again). Outside the window a busy live judge may never rest, so
+the trickle takes one clip every `trickle_every` as a turn of its own: in line with the
+live calls, not cancelled. A live verdict then waits for at most one deep request (about
+a minute on a shared 27B model) once per `trickle_every`; `outside_window: off` if that is
+too much. Before every request the server's `GET /slots` (llama.cpp, with the API key) must
 show an idle slot; otherwise it waits 15 s, doubling up to 5 min. `slots: ignore` for
 servers without that endpoint (Ollama, hosted APIs).
 
@@ -88,5 +92,5 @@ labelling. It is still sent once a day, and only when something needs a look.
 |---|---|
 | Compute | two requests per clip on the judge's server: one with up to eight frames, one text-only. Timings from the first runs are in the queue's stats (`vidette deep status`) |
 | Storage | a few kB of JSON per event, the chosen frames under `media_dir/deep-frames/` |
-| Latency | none added to live verdicts: they take the slot back |
+| Latency | at night none added to live verdicts (they take the slot back); by day a live verdict may wait for one deep request once per `trickle_every` |
 | Money | none on a local server; on a cloud backend, two calls per clip up to `max_clips_per_day` |

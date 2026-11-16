@@ -9,7 +9,10 @@ want it. `SlotGate` hands it out:
 - a **background** caller (deep analysis) takes it only when it is free and no live call
   waits, and gives it back the moment one arrives: the gate cancels the background
   request (`PREEMPTED`), the caller puts its job back and tries later. A live verdict then
-  waits for nothing but the server.
+  waits for nothing but the server;
+- a **turn** (a background request with `preemptible=False`, deep analysis's daytime
+  trickle) queues in arrival order like a live call and is not cancelled: when the live
+  judge never rests, it waits for one such request now and then instead of starving it.
 
 `slot_state` asks a llama.cpp server how many of its slots are busy right now (`GET
 /slots`, with the API key when there is one), so a background call is sent only when one
@@ -71,9 +74,23 @@ class SlotGate:
             self._lock.release()
 
     @contextlib.asynccontextmanager
-    async def background(self, *, poll_s: float = 0.5) -> AsyncIterator[None]:
+    async def background(
+        self, *, poll_s: float = 0.5, preemptible: bool = True
+    ) -> AsyncIterator[None]:
         """Wait until the slot is free and no live call waits, then hold it. The holding
-        task is cancelled with `PREEMPTED` when a live call arrives."""
+        task is cancelled with `PREEMPTED` when a live call arrives.
+
+        `preemptible=False` is a turn of its own (deep analysis's daytime trickle): it
+        queues for the slot in arrival order like a live call and is not cancelled, so a
+        busy live judge waits for one background request instead of starving it."""
+        if not preemptible:
+            await self._lock.acquire()
+            try:
+                self.background_calls += 1
+                yield
+            finally:
+                self._lock.release()
+            return
         while self._live_waiting or self._lock.locked():
             await asyncio.sleep(poll_s)
         await self._lock.acquire()  # free: returns at once, no other task runs in between
