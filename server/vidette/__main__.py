@@ -46,6 +46,14 @@ def _cmd_serve(host: str, port: int, config: Path | None, env_files: list[Path])
         os.environ["VIDETTE_CONFIG"] = str(config.expanduser())
     config_path = os.environ.get("VIDETTE_CONFIG", "/config/vidette.yaml")
     print(f"vidette v{__version__} · http://{host}:{port} · config: {config_path}")
+    import logging
+
+    # the workers' own lines (deep analysis, the merge pass, a judge that abstained) next
+    # to uvicorn's; other libraries stay at warnings
+    logging.basicConfig(
+        level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    logging.getLogger("vidette").setLevel(logging.INFO)
     uvicorn.run("vidette.api.app:create_app", factory=True, host=host, port=port)
     return 0
 

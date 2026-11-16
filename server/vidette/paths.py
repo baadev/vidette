@@ -42,5 +42,10 @@ def write_private(path: Path, data: bytes) -> None:
 
 
 def too_open(path: Path) -> bool:
-    """True when group or others can read or enter `path`."""
-    return bool(stat.S_IMODE(path.stat().st_mode) & 0o077)
+    """True when group or others can read or enter `path` (False when it is gone: SQLite
+    removes its -wal and -shm files between a listing and a look)."""
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return False
+    return bool(stat.S_IMODE(mode) & 0o077)
