@@ -271,6 +271,43 @@ one, or a known person), **Known** (an enrolled person or a new one; **Not … :
 back** undoes it), **Delete identity**. Reading needs `read:config`, changes
 `write:config`, like the People page.
 
+### The merge pass: one person, found later
+
+Live matching decides once, when a face arrives. The merge pass looks at the whole store
+afterwards and joins identities that are certainly one person, every merge audited and
+reversible ([ADR-0018](architecture/adr/0018-identity-merge-pass.md)):
+
+- **the same moment**: faces at least 0.85 alike on one camera within 10 minutes (the same
+  pixels cut into two clips score 1.0; two people seen at once scored at most 0.74);
+- **clear faces**: a best pair of 0.5 or more (the live join threshold), no pair of their
+  clear faces below 0.4, each the other's closest by 0.06.
+
+Never merged: two identities seen in one clip, sightings you kept apart (a split, an
+undone merge), two identities you both named or marked, one close to someone enrolled
+with one that is not, a known person. A group keeps the number, name and status of the
+one you marked (else of the one seen most); what you named or marked is never moved
+away. Small faces at other times or on other cameras are never merged: blurred faces of
+different people look alike.
+
+```bash
+uv run vidette people --config ~/.config/vidette/serve.yaml merge          # the plan, dry run
+#   clear-face pairs, best score:  n=2145  >=0.45:21 >=0.5:4 >=0.55:0 …
+#   one camera, close in time:     n=1872  >=0.7:32 >=0.85:9 >=0.95:5 …
+#   not merged: clear: another candidate within the margin: 4
+#   plan: 7 merge(s) in 6 group(s)
+uv run vidette people --config ~/.config/vidette/serve.yaml merge --apply  # backup, then merge
+uv run vidette people --config ~/.config/vidette/serve.yaml merge --log
+uv run vidette people --config ~/.config/vidette/serve.yaml merge --undo 20261116-153000
+uv run vidette people --config ~/.config/vidette/serve.yaml merge --unmerge 12
+```
+
+`vidette serve` runs it after new sightings, at most every 30 minutes
+(`people.identities.merge`, `auto: false` to leave it to you), and copies the database to
+`identities/backups/` (0600, the last five) before any pass that merges. An undone merge
+brings the identity back with its number and keeps its sightings apart from the rest
+from then on. A number that a merge removed (in an old alert, on an event card) opens the
+identity it went into.
+
 ### Fill it from the clips you have
 
 ```bash

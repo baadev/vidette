@@ -29,6 +29,7 @@ import httpx
 
 from vidette.vlm.budget import Pace, UsageLedger
 from vidette.vlm.endpoint import VlmEndpoint
+from vidette.vlm.gate import SlotGate
 
 ErrorKind = Literal[
     "budget", "timeout", "network", "auth", "not_found", "rate_limited", "server", "bad_answer"
@@ -82,9 +83,7 @@ def _content_text(message: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):  # some servers return content parts
-        return "".join(
-            part.get("text", "") for part in content if isinstance(part, dict)
-        )
+        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
     return ""
 
 
@@ -110,8 +109,14 @@ class VlmClient:
         ledger: UsageLedger,
         http: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.monotonic,
+        gate: SlotGate | None = None,
+        background: bool = False,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         self.endpoint = endpoint
+        self.gate = gate  # the one shared slot (vidette.vlm.gate); None: no sharing
+        self.background = background  # yields the slot to live calls (deep analysis)
+        self._extra_body = dict(extra_body or {})
         self._ledger = ledger
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
@@ -150,6 +155,23 @@ class VlmClient:
             data_url = "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")
             content.append({"type": "image_url", "image_url": {"url": data_url}})
 
+        if self.gate is None:
+            return await self._ask(system, text, content, images, schema, schema_name)
+        hold = self.gate.background() if self.background else self.gate.live()
+        async with hold:
+            return await self._ask(system, text, content, images, schema, schema_name)
+
+    async def _ask(
+        self,
+        system: str,
+        text: str,
+        content: list[dict[str, Any]],
+        images: list[bytes],
+        schema: dict[str, Any],
+        schema_name: str,
+    ) -> VlmAnswer:
+        endpoint = self.endpoint
+        backend = endpoint.backend.value
         calls = 0
         started = self._clock()
         mode: FormatMode | None = self._mode
@@ -161,6 +183,7 @@ class VlmClient:
                     {"role": "user", "content": content},
                 ],
                 endpoint.token_param: endpoint.max_output_tokens,
+                **self._extra_body,
             }
             if mode == "json_schema":
                 body["response_format"] = {
@@ -232,11 +255,7 @@ class VlmClient:
                 "timeout", f"{endpoint.host} did not answer within {endpoint.timeout_s:g} s"
             ) from exc
         except httpx.HTTPError as exc:
-            hint = (
-                " (is Ollama running? `ollama serve`)"
-                if endpoint.backend == "local"
-                else ""
-            )
+            hint = " (is Ollama running? `ollama serve`)" if endpoint.backend == "local" else ""
             raise VlmError(
                 "network", self._scrub(f"cannot reach {endpoint.host}: {exc}{hint}")
             ) from exc

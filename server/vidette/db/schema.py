@@ -145,12 +145,38 @@ CREATE UNIQUE INDEX idx_telegram_alert_once ON telegram_messages(event_id, chat_
 CREATE INDEX idx_telegram_chat_camera ON telegram_messages(chat_id, camera, created_at);
 """
 
+_V6_DEEP: Final[str] = """
+-- Deep analysis (ADR-0019): a second, slower look at an event by the big model, kept
+-- next to the live verdict (`deep`, JSON), never over it; and the queue it works from.
+-- One row per event, so a clip is analysed once however often it is queued; `running`
+-- rows are put back to `queued` when the server starts (the request died with it).
+ALTER TABLE events ADD COLUMN deep TEXT;
+CREATE TABLE deep_jobs (
+    event_id    TEXT PRIMARY KEY,
+    camera      TEXT NOT NULL,
+    started_at  REAL NOT NULL,   -- the event's
+    priority    INTEGER NOT NULL, -- lower goes first
+    reason      TEXT NOT NULL,   -- why it is worth a look: alert, level, person, vehicle, …
+    state       TEXT NOT NULL DEFAULT 'queued',  -- queued | running | done | failed | skipped
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    queued_at   REAL NOT NULL,
+    taken_at    REAL,
+    done_at     REAL,
+    day         TEXT,            -- the local day it counted against the daily cap
+    error       TEXT,
+    stats       TEXT             -- JSON: calls, seconds per call, tokens, slot checks, …
+);
+CREATE INDEX idx_deep_jobs_state ON deep_jobs(state, priority, started_at);
+CREATE INDEX idx_deep_jobs_day ON deep_jobs(day);
+"""
+
 MIGRATIONS: Final[list[str]] = [
     _V1_INITIAL,
     _V2_EVENTS,
     _V3_MANAGEMENT,
     _V4_UPSTREAM,
     _V5_TELEGRAM,
+    _V6_DEEP,
 ]
 
 SCHEMA_VERSION: Final[int] = len(MIGRATIONS)

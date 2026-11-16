@@ -32,6 +32,7 @@ from vidette.db.schema import MIGRATIONS, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class UserRow:
     id: int
@@ -94,6 +95,44 @@ class EventRow:
     source: str | None = None  # upstream NVR ("frigate"); None for v0.1 rows
     source_ref: str | None = None  # upstream id (Frigate review id)
     upstream: dict[str, Any] | None = None  # what the upstream said (severity, summary)
+    deep: dict[str, Any] | None = None  # the deep analysis (ADR-0019), next to `intent`
+
+
+@dataclass(frozen=True)
+class DeepJobRow:
+    """One event in the deep-analysis queue (ADR-0019); `stats` decoded from JSON."""
+
+    event_id: str
+    camera: str
+    started_at: float
+    priority: int
+    reason: str
+    state: str  # queued | running | done | failed | skipped
+    attempts: int
+    queued_at: float
+    taken_at: float | None
+    done_at: float | None
+    day: str | None
+    error: str | None
+    stats: dict[str, Any]
+
+
+def _deep_job(row: sqlite3.Row) -> DeepJobRow:
+    return DeepJobRow(
+        event_id=str(row["event_id"]),
+        camera=str(row["camera"]),
+        started_at=float(row["started_at"]),
+        priority=int(row["priority"]),
+        reason=str(row["reason"]),
+        state=str(row["state"]),
+        attempts=int(row["attempts"]),
+        queued_at=float(row["queued_at"]),
+        taken_at=row["taken_at"],
+        done_at=row["done_at"],
+        day=row["day"],
+        error=row["error"],
+        stats=json.loads(row["stats"] or "{}"),
+    )
 
 
 def _user(row: sqlite3.Row) -> UserRow:
@@ -157,6 +196,7 @@ def _event(row: sqlite3.Row) -> EventRow:
         upstream=json.loads(row["upstream"]) if row["upstream"] is not None else None,
         snapshot_path=row["snapshot_path"],
         clip_path=row["clip_path"],
+        deep=json.loads(row["deep"]) if "deep" in row.keys() and row["deep"] else None,  # noqa: SIM118
     )
 
 
@@ -317,9 +357,7 @@ class Database:
         return int(row["id"])
 
     async def get_user_by_username(self, username: str) -> UserRow | None:
-        async with self._db.execute(
-            "SELECT * FROM users WHERE username = ?", (username,)
-        ) as cur:
+        async with self._db.execute("SELECT * FROM users WHERE username = ?", (username,)) as cur:
             row = await cur.fetchone()
         return _user(row) if row is not None else None
 
@@ -361,9 +399,7 @@ class Database:
         return purged
 
     # --- api tokens ---------------------------------------------------------------------
-    async def create_api_token(
-        self, name: str, token_hash: str, scopes: str, user_id: int
-    ) -> int:
+    async def create_api_token(self, name: str, token_hash: str, scopes: str, user_id: int) -> int:
         async with self._write_lock:
             async with self._db.execute(
                 "INSERT INTO api_tokens (name, token_hash, scopes, user_id, created_at) "
@@ -429,9 +465,7 @@ class Database:
             sql = "SELECT * FROM system_events ORDER BY at DESC, id DESC LIMIT ?"
             params: tuple[float | int, ...] = (limit,)
         else:
-            sql = (
-                "SELECT * FROM system_events WHERE at > ? ORDER BY at DESC, id DESC LIMIT ?"
-            )
+            sql = "SELECT * FROM system_events WHERE at > ? ORDER BY at DESC, id DESC LIMIT ?"
             params = (since, limit)
         async with self._db.execute(sql, params) as cur:
             rows = await cur.fetchall()
@@ -599,6 +633,104 @@ class Database:
             await self._db.commit()
         return cursor.rowcount > 0
 
+    # --- deep analysis (ADR-0019) -----------------------------------------------------------
+    async def set_event_deep(self, event_id: str, deep: dict[str, Any] | None) -> None:
+        """The deep analysis of an event, next to its live verdict (never over it)."""
+        async with self._write_lock:
+            await self._db.execute(
+                "UPDATE events SET deep = ? WHERE id = ?",
+                (None if deep is None else json.dumps(deep, ensure_ascii=False), event_id),
+            )
+            await self._db.commit()
+
+    async def deep_enqueue(self, jobs: list[tuple[str, str, float, int, str]]) -> int:
+        """Queue events (id, camera, started_at, priority, reason) not queued before; an
+        event already in the queue keeps its row, with the better priority. Returns how
+        many are new."""
+        if not jobs:
+            return 0
+        now = self._clock()
+        async with self._write_lock:
+            before = self._db.total_changes
+            await self._db.executemany(
+                "INSERT INTO deep_jobs (event_id, camera, started_at, priority, reason, state,"
+                " queued_at) VALUES (?, ?, ?, ?, ?, 'queued', ?)"
+                " ON CONFLICT(event_id) DO UPDATE SET priority = excluded.priority,"
+                " reason = excluded.reason"
+                " WHERE deep_jobs.state = 'queued' AND excluded.priority < deep_jobs.priority",
+                [(e, c, s, p, r, now) for e, c, s, p, r in jobs],
+            )
+            await self._db.commit()
+            changed = self._db.total_changes - before
+        return changed
+
+    async def deep_known(self, since_ts: float) -> set[str]:
+        """Event ids queued (in any state) for events that started after `since_ts`."""
+        async with self._db.execute(
+            "SELECT event_id FROM deep_jobs WHERE started_at > ?", (since_ts,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return {str(row["event_id"]) for row in rows}
+
+    async def deep_next(self, *, since_ts: float, max_attempts: int) -> DeepJobRow | None:
+        """The next queued job: best priority first, then the newest event."""
+        async with self._db.execute(
+            "SELECT * FROM deep_jobs WHERE state = 'queued' AND started_at > ? AND attempts < ?"
+            " ORDER BY priority, started_at DESC LIMIT 1",
+            (since_ts, max_attempts),
+        ) as cur:
+            row = await cur.fetchone()
+        return None if row is None else _deep_job(row)
+
+    async def deep_update(self, event_id: str, **fields: Any) -> None:
+        """Set columns of one job (state, attempts, taken_at, done_at, day, error, stats)."""
+        allowed = {"state", "attempts", "taken_at", "done_at", "day", "error", "stats"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not deep_jobs columns: {sorted(unknown)}")
+        if not fields:
+            return
+        values = [
+            json.dumps(v, ensure_ascii=False) if k == "stats" and v is not None else v
+            for k, v in fields.items()
+        ]
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        async with self._write_lock:
+            await self._db.execute(
+                f"UPDATE deep_jobs SET {assignments} WHERE event_id = ?", (*values, event_id)
+            )
+            await self._db.commit()
+
+    async def deep_requeue_running(self) -> int:
+        """Jobs left `running` by a stopped server go back to the queue."""
+        async with self._write_lock:
+            cursor = await self._db.execute(
+                "UPDATE deep_jobs SET state = 'queued', taken_at = NULL WHERE state = 'running'"
+            )
+            await self._db.commit()
+        return cursor.rowcount
+
+    async def deep_counts(self, *, day: str | None = None) -> dict[str, int]:
+        """Jobs per state; with `day`, only those that counted against that day's cap."""
+        where, params = ("WHERE day = ?", (day,)) if day is not None else ("", ())
+        async with self._db.execute(
+            f"SELECT state, COUNT(*) AS n FROM deep_jobs {where} GROUP BY state", params
+        ) as cur:
+            rows = await cur.fetchall()
+        return {str(row["state"]): int(row["n"]) for row in rows}
+
+    async def deep_jobs(
+        self, *, state: str | None = None, limit: int = 50, done_first: bool = False
+    ) -> list[DeepJobRow]:
+        """Jobs in queue order (or the most recently finished first)."""
+        where, params = ("WHERE state = ?", [state]) if state else ("", [])
+        order = "done_at DESC" if done_first else "priority, started_at DESC"
+        async with self._db.execute(
+            f"SELECT * FROM deep_jobs {where} ORDER BY {order} LIMIT ?", (*params, limit)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_deep_job(row) for row in rows]
+
     # --- meta (key/value: schema version, VAPID keys, …) -------------------------------------
     async def get_meta(self, key: str) -> str | None:
         async with self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)) as cur:
@@ -728,9 +860,7 @@ class Database:
             row = await cur.fetchone()
         return _telegram_message(row) if row is not None else None
 
-    async def telegram_message_at(
-        self, chat_id: int, message_id: int
-    ) -> TelegramMessageRow | None:
+    async def telegram_message_at(self, chat_id: int, message_id: int) -> TelegramMessageRow | None:
         """The bot's message row a Telegram message belongs to: the message itself (an
         alert, a collapsed line, an answer), or an alert whose album holds it."""
         async with self._db.execute(

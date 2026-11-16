@@ -50,9 +50,7 @@ def _today(clock: Callable[[], float]) -> str:
 def _prune(days: dict[str, Any], today: str) -> dict[str, Any]:
     cutoff = date.fromisoformat(today).toordinal() - KEEP_DAYS
     return {
-        day: value
-        for day, value in days.items()
-        if date.fromisoformat(day).toordinal() > cutoff
+        day: value for day, value in days.items() if date.fromisoformat(day).toordinal() > cutoff
     }
 
 
@@ -139,6 +137,21 @@ class MetaLedger:
             entry["calls"] = int(entry.get("calls", 0)) + calls
             entry["usd"] = round(float(entry.get("usd", 0.0)) + usd, 6)
             await self._store.set_meta(self._key(), json.dumps(data, sort_keys=True))
+
+
+class KeyedLedger:
+    """Another ledger's days under a prefix: deep analysis (ADR-0019) counts its calls
+    apart from the live judge's, so neither budget eats the other."""
+
+    def __init__(self, inner: UsageLedger, prefix: str) -> None:
+        self._inner = inner
+        self._prefix = prefix
+
+    async def today(self, backend: str) -> DayUsage:
+        return await self._inner.today(self._prefix + backend)
+
+    async def add(self, backend: str, *, calls: int, usd: float) -> None:
+        await self._inner.add(self._prefix + backend, calls=calls, usd=usd)
 
 
 class Pace:

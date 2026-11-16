@@ -125,7 +125,32 @@ ALTER TABLE identities ADD COLUMN promoted_from TEXT;
 UPDATE identities SET status = 'familiar' WHERE status = 'ignored';
 """
 
-MIGRATIONS = [_V1, _V2]  # append-only
+_V3 = """
+-- ADR-0018: what the merge pass did, each merge with what it takes to undo it (the
+-- identity it removed, as it was, and the sightings it moved), and sightings a person
+-- said are two people (a split, an undone merge), which the pass never joins again.
+CREATE TABLE IF NOT EXISTS merges (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run         TEXT NOT NULL,
+    at          REAL NOT NULL,
+    source      INTEGER NOT NULL,
+    target      INTEGER NOT NULL,
+    rule        TEXT NOT NULL,
+    score       REAL NOT NULL,
+    identity    TEXT NOT NULL,
+    sightings   TEXT NOT NULL,
+    undone_at   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_merges_source ON merges(source);
+CREATE INDEX IF NOT EXISTS idx_merges_run ON merges(run);
+CREATE TABLE IF NOT EXISTS apart (
+    a           INTEGER NOT NULL REFERENCES sightings(id) ON DELETE CASCADE,
+    b           INTEGER NOT NULL REFERENCES sightings(id) ON DELETE CASCADE,
+    PRIMARY KEY (a, b)
+);
+"""
+
+MIGRATIONS = [_V1, _V2, _V3]  # append-only
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -205,6 +230,35 @@ class Similar:
     id: int
     score: float
     weak: bool = False  # the score involves unclear faces: a hint only
+
+
+@dataclass(frozen=True)
+class MergeRow:
+    """One merge the merge pass made (vidette.people.merge), as the audit keeps it."""
+
+    id: int
+    run: str
+    at: float
+    source: int  # the identity merged away; its number is never given to anyone else
+    target: int  # the identity it went into
+    rule: str  # "clear" or "same_moment"
+    score: float
+    sightings: int  # how many sightings it moved
+    undone_at: float | None
+
+
+@dataclass(frozen=True)
+class MergeCandidate:
+    """What the merge planner reads about one identity (embeddings, never crops)."""
+
+    id: int
+    status: str
+    named: bool
+    near_known: bool
+    # (sighting id, at, camera, "source:source_id" of the clip or event)
+    sightings: list[tuple[int, float, str, str]]
+    clear: list[Vector]  # clear faces: what live matching compares
+    every: list[Vector]  # clear and unclear faces
 
 
 @dataclass(frozen=True)
@@ -932,10 +986,276 @@ class IdentityStore:
             ).fetchone()[0]
             if len(found) == total:
                 raise IdentityError("that is every sighting; nothing would be left to split from")
+            staying = [
+                int(r["id"])
+                for r in conn.execute(
+                    f"SELECT id FROM sightings WHERE identity = ? AND id NOT IN ({marks})",
+                    (identity, *found),
+                )
+            ]
             new = self._new_identity(conn)
             conn.execute(f"UPDATE sightings SET identity = ? WHERE id IN ({marks})", (new, *found))
             conn.execute(f"UPDATE refs SET identity = ? WHERE sighting IN ({marks})", (new, *found))
+            self._keep_apart(conn, found, staying)  # a person said so: never merged back
         return self.require(new)
+
+    # --- the merge pass's merges (ADR-0018): audited, reversible ---------------------------
+
+    @staticmethod
+    def _keep_apart(conn: sqlite3.Connection, these: list[int], those: list[int]) -> None:
+        conn.executemany(
+            "INSERT OR IGNORE INTO apart (a, b) VALUES (?, ?)",
+            [(min(x, y), max(x, y)) for x in these for y in those if x != y],
+        )
+
+    def candidates(self) -> list[MergeCandidate]:
+        """Every identity the merge pass may consider (not promoted to a known person),
+        with its sightings and face embeddings."""
+        if not self.db_path.exists():
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT i.id, i.status, i.name, COALESCE(MAX(s.known_score), 0) AS near"
+                " FROM identities i LEFT JOIN sightings s ON s.identity = i.id"
+                " WHERE i.status != 'known' GROUP BY i.id ORDER BY i.id"
+            ).fetchall()
+            sightings: dict[int, list[tuple[int, float, str, str]]] = {}
+            for r in conn.execute(
+                "SELECT id, identity, at, camera, source, source_id FROM sightings ORDER BY at"
+            ):
+                sightings.setdefault(int(r["identity"]), []).append(
+                    (int(r["id"]), float(r["at"]), str(r["camera"]),
+                     f"{r['source']}:{r['source_id']}")
+                )  # fmt: skip
+            clear: dict[int, list[Vector]] = {}
+            every: dict[int, list[Vector]] = {}
+            for r in conn.execute("SELECT identity, embedding, weak FROM refs ORDER BY id"):
+                vector = _unpack(r["embedding"])
+                every.setdefault(int(r["identity"]), []).append(vector)
+                if not r["weak"]:
+                    clear.setdefault(int(r["identity"]), []).append(vector)
+        return [
+            MergeCandidate(
+                id=int(r["id"]),
+                status=str(r["status"]),
+                named=r["name"] is not None,
+                near_known=float(r["near"]) >= self.settings.near_known,
+                sightings=sightings.get(int(r["id"]), []),
+                clear=clear.get(int(r["id"]), []),
+                every=every.get(int(r["id"]), []),
+            )
+            for r in rows
+        ]
+
+    def apart_pairs(self) -> set[tuple[int, int]]:
+        """Sighting pairs (smaller id first) that a person said are different people."""
+        if not self.db_path.exists():
+            return set()
+        with self._connect() as conn:
+            return {(int(r[0]), int(r[1])) for r in conn.execute("SELECT a, b FROM apart")}
+
+    def auto_merge(self, source: int, target: int, *, rule: str, score: float, run: str) -> int:
+        """The merge pass's merge: every sighting of `source` moves to `target` and
+        `source` is removed, with an audit row that `unmerge` undoes exactly. Refused for
+        anything a person decided: `source` must be unnamed and unmarked, `target` not a
+        known person, the two must share no clip and hold no sightings a person kept
+        apart. `target` keeps its own name and status. Returns the merge's id."""
+        if source == target:
+            raise IdentityError("an identity cannot be merged into itself")
+        with self._write() as conn:
+            moving = self._exists(conn, source)
+            into = self._exists(conn, target)
+            if moving["status"] != "unknown" or moving["name"] is not None:
+                raise IdentityError(f"#{source} was named or marked by a person; never moved")
+            if into["status"] == "known":
+                raise IdentityError(f"#{target} is a known person; the merge pass never adds to it")
+            shared = conn.execute(
+                "SELECT 1 FROM sightings s JOIN sightings t ON t.source = s.source"
+                " AND t.source_id = s.source_id WHERE s.identity = ? AND t.identity = ? LIMIT 1",
+                (source, target),
+            ).fetchone()
+            if shared is not None:
+                raise IdentityError(f"#{source} and #{target} were seen in one clip: two people")
+            apart = conn.execute(
+                "SELECT 1 FROM apart p JOIN sightings s ON s.id IN (p.a, p.b)"
+                " JOIN sightings t ON t.id IN (p.a, p.b) AND t.id != s.id"
+                " WHERE s.identity = ? AND t.identity = ? LIMIT 1",
+                (source, target),
+            ).fetchone()
+            if apart is not None:
+                raise IdentityError(f"a person kept #{source} and #{target} apart")
+            moved = [
+                int(r["id"])
+                for r in conn.execute("SELECT id FROM sightings WHERE identity = ?", (source,))
+            ]
+            kept = {key: moving[key] for key in moving.keys()}  # noqa: SIM118 - sqlite3.Row
+            conn.execute("UPDATE sightings SET identity = ? WHERE identity = ?", (target, source))
+            conn.execute("UPDATE refs SET identity = ? WHERE identity = ?", (target, source))
+            conn.execute(
+                "UPDATE identities SET updated_at = ? WHERE id = ?", (self._clock(), target)
+            )
+            conn.execute("DELETE FROM identities WHERE id = ?", (source,))
+            cursor = conn.execute(
+                "INSERT INTO merges (run, at, source, target, rule, score, identity, sightings)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (run, self._clock(), source, target, rule, round(score, 4), json.dumps(kept),
+                 json.dumps(moved)),
+            )  # fmt: skip
+            assert cursor.lastrowid is not None
+            return int(cursor.lastrowid)
+
+    def unmerge(self, merge: int) -> tuple[int, int]:
+        """Undo one merge of the merge pass: the identity comes back with its number, name
+        and status, with the sightings the merge moved that are still where merges put
+        them (one a person moved since stays where they put it). Those sightings and the
+        rest of the identity are then kept apart, so the pass does not merge them again.
+        Returns (identity, sightings moved back)."""
+        with self._write() as conn:
+            row = conn.execute("SELECT * FROM merges WHERE id = ?", (merge,)).fetchone()
+            if row is None:
+                raise IdentityError(f"there is no merge {merge}")
+            if row["undone_at"] is not None:
+                raise IdentityError(f"merge {merge} was undone already")
+            source = int(row["source"])
+            if conn.execute("SELECT 1 FROM identities WHERE id = ?", (source,)).fetchone():
+                raise IdentityError(f"#{source} exists again; nothing to restore")
+            where = self._merged_into(conn, int(row["target"]))
+            wanted = [int(s) for s in json.loads(row["sightings"])]
+            marks = ",".join("?" * len(where))
+            back = [
+                int(r["id"])
+                for r in conn.execute(
+                    f"SELECT id FROM sightings WHERE identity IN ({marks})", tuple(where)
+                )
+                if int(r["id"]) in set(wanted)
+            ]
+            kept = json.loads(row["identity"])
+            conn.execute(
+                "INSERT INTO identities (id, name, status, person, created_at, updated_at,"
+                " promoted_faces, promoted_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (source, kept.get("name"), kept.get("status") or "unknown", kept.get("person"),
+                 float(kept.get("created_at") or self._clock()), self._clock(),
+                 kept.get("promoted_faces"), kept.get("promoted_from")),
+            )  # fmt: skip
+            if back:
+                ids = ",".join("?" * len(back))
+                holders = {
+                    int(r["identity"])
+                    for r in conn.execute(
+                        f"SELECT DISTINCT identity FROM sightings WHERE id IN ({ids})", tuple(back)
+                    )
+                }
+                conn.execute(f"UPDATE sightings SET identity = ? WHERE id IN ({ids})",
+                             (source, *back))  # fmt: skip
+                conn.execute(f"UPDATE refs SET identity = ? WHERE sighting IN ({ids})",
+                             (source, *back))  # fmt: skip
+                others = [
+                    int(r["id"])
+                    for r in conn.execute(
+                        "SELECT id FROM sightings WHERE identity IN"
+                        f" ({','.join('?' * len(holders))})",
+                        tuple(holders),
+                    )
+                ]
+                self._keep_apart(conn, back, others)  # taken back: never merged again
+            conn.execute("UPDATE merges SET undone_at = ? WHERE id = ?", (self._clock(), merge))
+        return source, len(back)
+
+    def _merged_into(self, conn: sqlite3.Connection, identity: int) -> list[int]:
+        """`identity` and every identity later merges carried its sightings to."""
+        chain = [identity]
+        current = identity
+        for _ in range(1000):
+            row = conn.execute(
+                "SELECT target FROM merges WHERE source = ? AND undone_at IS NULL"
+                " ORDER BY id DESC LIMIT 1",
+                (current,),
+            ).fetchone()
+            if row is None or int(row["target"]) in chain:
+                break
+            current = int(row["target"])
+            chain.append(current)
+        return chain
+
+    def undo_run(self, run: str) -> list[tuple[int, int]]:
+        """Undo every merge of one pass, newest first."""
+        with self._connect() as conn:
+            ids = [
+                int(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM merges WHERE run = ? AND undone_at IS NULL ORDER BY id DESC",
+                    (run,),
+                )
+            ]
+        if not ids:
+            raise IdentityError(f"no merges to undo in run {run}")
+        return [self.unmerge(merge) for merge in ids]
+
+    def resolve(self, identity: int) -> int | None:
+        """The identity `identity` is now: itself, or where the merge pass put it (an
+        alert or an event card may name a number that a merge removed). None when
+        neither exists."""
+        if not self.db_path.exists():
+            return None
+        with self._connect() as conn:
+            for current in reversed(self._merged_into(conn, identity)):
+                if conn.execute("SELECT 1 FROM identities WHERE id = ?", (current,)).fetchone():
+                    return current
+        return None
+
+    def merge_log(self, *, run: str | None = None, limit: int = 200) -> list[MergeRow]:
+        """The merge pass's merges, newest first."""
+        if not self.db_path.exists():
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM merges WHERE (? IS NULL OR run = ?) ORDER BY id DESC LIMIT ?",
+                (run, run, limit),
+            ).fetchall()
+        return [
+            MergeRow(
+                id=int(r["id"]), run=str(r["run"]), at=float(r["at"]), source=int(r["source"]),
+                target=int(r["target"]), rule=str(r["rule"]), score=float(r["score"]),
+                sightings=len(json.loads(r["sightings"])), undone_at=r["undone_at"],
+            )
+            for r in rows
+        ]  # fmt: skip
+
+    def last_sighting_id(self) -> int:
+        """The newest sighting's id (0 when none): the merge pass runs when it grows."""
+        if not self.db_path.exists():
+            return 0
+        with self._connect() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM sightings").fetchone()
+        return int(row[0])
+
+    def backup(self, keep: int = 5) -> Path:
+        """A consistent copy of the database under `backups/` (0600), newest `keep` kept:
+        taken before the merge pass first changes anything."""
+        folder = private_dir(self.root / "backups")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self._clock()))
+        target = folder / f"identities-{stamp}.db"
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.close(fd)
+        with self._connect() as conn:
+            copy = sqlite3.connect(target)
+            try:
+                conn.backup(copy)
+            finally:
+                copy.close()
+        for old in sorted(folder.glob("identities-*.db"))[:-keep]:
+            old.unlink(missing_ok=True)
+        return target
+
+    def _prune_merges(self, conn: sqlite3.Connection) -> None:
+        """Audit rows whose sightings are all gone (deleted, expired) undo nothing."""
+        alive = {int(r[0]) for r in conn.execute("SELECT id FROM sightings")}
+        dead = [
+            int(r["id"])
+            for r in conn.execute("SELECT id, sightings FROM merges")
+            if not alive.intersection(int(s) for s in json.loads(r["sightings"]))
+        ]
+        conn.executemany("DELETE FROM merges WHERE id = ?", [(i,) for i in dead])
 
     def move_sighting(
         self,
@@ -1044,6 +1364,7 @@ class IdentityStore:
                 "SELECT COUNT(*) FROM sightings WHERE identity = ?", (identity,)
             ).fetchone()[0]
             conn.execute("DELETE FROM identities WHERE id = ?", (identity,))
+            self._prune_merges(conn)
         self._remove_crops(crops)
         self._checkpoint()
         return int(count)

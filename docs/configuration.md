@@ -114,6 +114,24 @@ understanding:
       max_calls_per_day: 200
       max_calls_per_minute: 10
       prices: {}                  # set them, or cost reports say "unknown"
+  deep:                           # deep analysis: docs/deep.md, ADR-0019
+    enabled: false
+    backend: local                # local | cloud: one of the endpoints above
+    window: "01:00-07:00"         # local time, may wrap midnight; back to back inside it
+    outside_window: trickle       # trickle | off
+    trickle_every: 10m            # outside the window, at most one clip this often
+    max_clips_per_day: 150
+    lookback: 36h                 # events this recent are queued
+    frames: 8                     # per clip
+    frames_per_call: null         # default: all of them in one look (at most 8)
+    max_output_tokens: 600
+    language: null                # default: vlm.language
+    include_unjudged: true        # also clips the live judge never reached (last)
+    min_confidence: 0.6           # below it a verdict counts as uncertain
+    slots: check                  # check | ignore: send only when the server has an idle slot
+    min_idle_slots: 1
+    max_attempts: 3
+    label_disputes: true          # disputed and uncertain clips become review drafts
 ```
 
 The v0.1 keys `provider` and `send` are rejected with a pointer here. `vidette validate`
@@ -214,6 +232,14 @@ people:
     min_face_px: 40               # readable faces smaller than this start a weak identity
     near_known: 0.3               # this close to someone enrolled: marked, never raises
     retention_days: 30            # unnamed, unflagged identities go after this long
+    merge:                        # the merge pass (ADR-0018): audited, reversible
+      auto: true                  # vidette serve runs it after new sightings
+      every: 30m                  # at most this often
+      clear: 0.5                  # clear faces: best pair at least this...
+      clear_floor: 0.4            # ...no pair below this, and the closest by `margin`
+      margin: 0.06
+      same_moment: 0.85           # any faces this alike, on one camera...
+      same_moment_within: 10m     # ...this close in time
   extra_fps: 6                    # a second look around every face found (ADR-0016)
   extra_frames: 24                # at most this many more frames a clip; 0 turns it off
 ```

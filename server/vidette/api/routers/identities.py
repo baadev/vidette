@@ -233,8 +233,12 @@ async def _sighting_out(rt: AppRuntime, sighting: SightingRow) -> SightingOut:
 
 async def _detail(rt: AppRuntime, store: IdentityStore, identity: int) -> IdentityDetailOut:
     row = await asyncio.to_thread(store.get, identity)
+    if row is None:  # a number the merge pass removed: the identity it is now (ADR-0018)
+        now = await asyncio.to_thread(store.resolve, identity)
+        row = None if now is None else await asyncio.to_thread(store.get, now)
     if row is None:
         raise problem(404, "No such identity", "it may have been merged, split off or deleted")
+    identity = row.id
     sightings = await asyncio.to_thread(store.sightings, identity)
     similar = await asyncio.to_thread(store.similar, identity)
     others = {r.id: r for r in await asyncio.to_thread(store.entries)}

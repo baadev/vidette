@@ -28,6 +28,9 @@ first-run wizard has an API to talk to (wizard-mode).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import dataclasses
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -39,6 +42,8 @@ from vidette.clipfolder import ClipFolderSource
 from vidette.core.config import VidetteConfig, VlmBackend, load_config
 from vidette.core.events import InProcessEventBus
 from vidette.db import Database
+from vidette.deep.analyst import DeepAnalyst
+from vidette.deep.worker import DeepWorker
 from vidette.events.intake import EventIntake
 from vidette.frigate.client import FrigateClient
 from vidette.frigate.source import FrigateSource
@@ -50,17 +55,25 @@ from vidette.notify.webpush import WebPushNotifier
 from vidette.people.check import CheckSettings, PeopleCheck
 from vidette.people.engine import EngineUnavailableError, FaceEngine
 from vidette.people.identities import IdentityError, IdentityStore
+from vidette.people.merge import merge_pass
 from vidette.people.models import ModelError
 from vidette.people.recurrence import with_recurrence
-from vidette.people.setup import engine_for, identities_for, store_for
+from vidette.people.setup import engine_for, identities_for, merge_settings_for, store_for
 from vidette.people.store import PeopleStore, StoreError
 from vidette.telegram.service import TelegramService
 from vidette.verdicts.base import Judge
 from vidette.verdicts.vlm import VlmJudge
 from vidette.verdicts.worker import VerdictWorker
-from vidette.vlm.budget import MetaLedger
+from vidette.vlm.budget import KeyedLedger, MetaLedger
 from vidette.vlm.client import VlmClient
-from vidette.vlm.endpoint import BACKEND_META_KEY, effective_backend, endpoint_for, parse_choice
+from vidette.vlm.endpoint import (
+    BACKEND_META_KEY,
+    VlmEndpoint,
+    effective_backend,
+    endpoint_for,
+    parse_choice,
+)
+from vidette.vlm.gate import SlotGate
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +119,8 @@ class AppRuntime:
         )
         self.vlm_ledger = MetaLedger(self.db)
         self._vlm_clients: list[VlmClient] = []
+        # one model slot per server for everything in this process (ADR-0019)
+        self._gates: dict[str, SlotGate] = {}
         self.people_store: PeopleStore | None = None
         self.face_engine: FaceEngine | None = None
         self.people_check: PeopleCheck | None = None
@@ -136,7 +151,12 @@ class AppRuntime:
                 face_engine=self.face_engine,
                 identities=self.identities,
                 judge_status=self.judge_line,
+                gate_for=self.gate_for,
             )
+        self.deep: DeepWorker | None = None
+        if config.understanding.deep.enabled:
+            self.deep = self._make_deep()
+        self._merge_task: asyncio.Task[None] | None = None
         self._workers_started = False
 
     async def judge_line(self) -> str:
@@ -197,11 +217,69 @@ class AppRuntime:
         stored = parse_choice(await self.db.get_meta(BACKEND_META_KEY))
         return effective_backend(self.config, stored)
 
+    def gate_for(self, endpoint: VlmEndpoint) -> SlotGate:
+        """The shared slot of one model server (vidette.vlm.gate)."""
+        return self._gates.setdefault(endpoint.base_url, SlotGate())
+
     def _make_judge(self, backend: VlmBackend) -> Judge:
-        client = VlmClient(endpoint_for(self.config, backend), ledger=self.vlm_ledger)
+        endpoint = endpoint_for(self.config, backend)
+        client = VlmClient(endpoint, ledger=self.vlm_ledger, gate=self.gate_for(endpoint))
         self._vlm_clients.append(client)
         vlm = self.config.understanding.vlm
         return VlmJudge(client=client, frames_per_call=vlm.frames_per_call, language=vlm.language)
+
+    def _make_deep(self) -> DeepWorker:
+        """Deep analysis (ADR-0019) on the judge's own endpoint, its calls counted apart."""
+        deep = self.config.understanding.deep
+        vlm = self.config.understanding.vlm
+        endpoint = dataclasses.replace(
+            endpoint_for(self.config, VlmBackend(deep.backend)),
+            max_output_tokens=deep.max_output_tokens,
+            max_calls_per_day=deep.max_clips_per_day * 8,  # the clip cap is the real limit
+        )
+        client = VlmClient(endpoint, ledger=KeyedLedger(self.vlm_ledger, "deep-"))
+        self._vlm_clients.append(client)
+        analyst = DeepAnalyst(
+            client,
+            frames=deep.frames,
+            frames_per_call=deep.frames_per_call or min(deep.frames, 8),
+            language=deep.language or vlm.language,
+        )
+        return DeepWorker(
+            self.config,
+            self.db,
+            analyst,
+            self.gate_for(endpoint),
+            media_dir=self.config.storage.media_dir,
+            emit=self.emit,
+            endpoint=endpoint,
+            live_busy=lambda: self.verdicts.working or self.verdicts.backlog > 0,
+        )
+
+    async def _identity_merges(self) -> None:
+        """The merge pass (ADR-0018) after new sightings, at most every `merge.every`;
+        a failure is logged and tried again next time, never stops anything else."""
+        assert self.identities is not None
+        store = self.identities
+        settings = self.config.people.identities.merge
+        seen = -1
+        while True:
+            try:
+                newest = await asyncio.to_thread(store.last_sighting_id)
+                if newest != seen:
+                    plan, applied = await asyncio.to_thread(
+                        merge_pass, store, merge_settings_for(self.config.people)
+                    )
+                    seen = newest
+                    if applied.merged:
+                        await self.emit(
+                            "identities.merged",
+                            {"run": applied.run, "merges": applied.merged,
+                             "groups": len(plan.groups)},
+                        )  # fmt: skip
+            except Exception:
+                logger.exception("identity merge pass failed")
+            await asyncio.sleep(settings.every_s)
 
     @classmethod
     def from_environment(cls) -> AppRuntime:
@@ -273,10 +351,21 @@ class AppRuntime:
             self.frigate_source.start()  # last: consumers above are subscribed already
         if self.clip_folders is not None:
             self.clip_folders.start()
+        if self.deep is not None:
+            self.deep.start()  # deep analysis: the night window, one request at a time
+        if self.identities is not None and self.config.people.identities.merge.auto:
+            self._merge_task = asyncio.create_task(self._identity_merges(), name="merge")
         self._workers_started = True
 
     async def stop(self) -> None:
         stops: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        merge, self._merge_task = self._merge_task, None
+        if merge is not None:
+            merge.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await merge
+        if self.deep is not None:
+            stops.append(("deep analysis", self.deep.stop))
         if self.clip_folders is not None:
             stops.append(("clip folders", self.clip_folders.stop))
         if self.frigate_source is not None:

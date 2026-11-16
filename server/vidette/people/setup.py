@@ -9,8 +9,21 @@ from vidette.core.config import PeopleConfig
 from vidette.people.check import CheckSettings, PeopleCheck
 from vidette.people.engine import FaceLimits, OpenCvFaceEngine, load_engine
 from vidette.people.identities import IdentitySettings, IdentityStore
+from vidette.people.merge import MergeSettings
 from vidette.people.models import default_models_dir
 from vidette.people.store import PeopleStore
+
+
+def merge_settings_for(config: PeopleConfig) -> MergeSettings:
+    """The merge pass's rules from `people.identities.merge` (ADR-0018)."""
+    merge = config.identities.merge
+    return MergeSettings(
+        clear=merge.clear,
+        clear_floor=merge.clear_floor,
+        margin=merge.margin,
+        same_moment=merge.same_moment,
+        same_moment_within_s=merge.same_moment_within_s,
+    )
 
 
 def store_for(config: PeopleConfig, *, root: Path | None = None) -> PeopleStore:

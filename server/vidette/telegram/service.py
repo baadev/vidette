@@ -62,6 +62,8 @@ from vidette.telegram.api import TelegramApi, TelegramError, Upload
 from vidette.telegram.routing import alerting_verdict, decide, known_only, level_rank
 from vidette.verdicts.frames import spread
 from vidette.vlm.budget import MetaLedger
+from vidette.vlm.endpoint import VlmEndpoint
+from vidette.vlm.gate import SlotGate
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,7 @@ class TelegramService:
         assistant: Assistant | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        gate_for: Callable[[VlmEndpoint], SlotGate] | None = None,
     ) -> None:
         telegram = config.notifications.telegram
         if telegram is None:
@@ -183,7 +186,9 @@ class TelegramService:
                 names=telegram.names, mark=self._mark_from_question,
                 digest=self._digest_for_question, clock=clock,
             )  # fmt: skip
-            self._assistant = Assistant(config, tools, ledger=MetaLedger(db), clock=clock)
+            self._assistant = Assistant(
+                config, tools, ledger=MetaLedger(db), clock=clock, gate_for=gate_for
+            )
         self.status = TelegramStatus()
 
     # --- lifecycle ---------------------------------------------------------------------
@@ -1339,7 +1344,12 @@ class TelegramService:
         if await self.db.get_meta(key) == today:
             return False
         await self.db.set_meta(key, today)  # before sending: never twice
-        day = await self.day(chat)
+        midnight = (
+            datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+        ).timestamp()
+        minutes = self.tg.digest_minutes or 0
+        # deep analysis may find something in last night's clips after yesterday's digest
+        day = await self.day(chat, late_since=midnight - 86400 + minutes * 60)
         if not day.substance:
             return False
         text = say.day_digest_text(day, now=now, evening=True)
@@ -1357,8 +1367,28 @@ class TelegramService:
         self.status.digests_sent += 1
         return True
 
-    async def day(self, chat: int, *, since: float | None = None) -> say.DayDigest:
-        """Today (from local midnight, or `since`) for one chat, from the database."""
+    def _deep_finding(self, row: EventRow) -> say.DigestItem | None:
+        """What deep analysis (ADR-0019) flagged that the live judge did not: an alert
+        level on an event that did not alert, as a digest item in its own words."""
+        deep = row.deep or {}
+        if deep.get("agreement") != "disputed" or row.state == EventState.confirmed.value:
+            return None
+        verdict = next((v for v in deep.get("verdicts") or [] if v.get("alert")), None)
+        if verdict is None:
+            return None
+        policy = self._policy(verdict.get("policy"))
+        title = self._level_title(policy, verdict.get("level")) + " (перепроверка)"
+        description = deep.get("description") or verdict.get("rationale")
+        return say.DigestItem(
+            self.camera_name(row.camera), row.started_at, title,
+            str(description) if description else None,
+        )  # fmt: skip
+
+    async def day(
+        self, chat: int, *, since: float | None = None, late_since: float | None = None
+    ) -> say.DayDigest:
+        """Today (from local midnight, or `since`) for one chat, from the database. With
+        `late_since`, what deep analysis flagged between then and `since` comes first."""
         now = self._clock()
         if since is None:
             since = (
@@ -1369,7 +1399,19 @@ class TelegramService:
         rows = await self.db.list_events(since_ts=since, limit=MAX_DIGEST_EVENTS)
         alerted = await self.db.telegram_alerted_events(chat, since=since - 3600)
         day = say.DayDigest(since=since, events=len(rows))
+        if late_since is not None and late_since < since:
+            late = await self.db.list_events(since_ts=late_since, limit=MAX_DIGEST_EVENTS)
+            for row in sorted(late, key=lambda r: r.started_at):
+                flagged = self._deep_finding(row) if row.started_at <= since else None
+                if flagged is not None and row.id not in alerted:
+                    day.notable.append(flagged)
+                    day.deep_found += 1
         for row in sorted(rows, key=lambda r: r.started_at):
+            deep = row.deep or {}
+            if deep:
+                day.deep_checked += 1
+                if deep.get("agreement") in ("disputed", "uncertain"):
+                    day.deep_review += 1
             verdict = alerting_verdict(row.intent, row.policy)
             policy = self._policy(row.policy or verdict.get("policy"))
             review = (row.intent or {}).get("review")
@@ -1394,15 +1436,25 @@ class TelegramService:
                 title = self._level_title(policy, verdict.get("level"))
                 if known_only(people if isinstance(people, Mapping) else None, persons):
                     title += ", " + say.who_line(people, persons, names=self.tg.names)
-                description = verdict.get("rationale")
+                # the deep look's words when there are some: more frames, plainer prose
+                description = deep.get("description") or verdict.get("rationale")
                 day.notable.append(
                     say.DigestItem(
                         self.camera_name(row.camera), row.started_at, title,
                         str(description) if description else None,
                     )
                 )  # fmt: skip
+                continue
+            flagged = self._deep_finding(row)
+            if flagged is not None:
+                day.notable.append(flagged)
+                day.deep_found += 1
             elif row.state == EventState.dismissed.value:
                 day.ordinary[self._scenario_title(policy, verdict.get("label"))] += 1
+            elif deep.get("verdicts") and not deep["verdicts"][0].get("abstained"):
+                first = deep["verdicts"][0]  # judged by the deep look only
+                day.ordinary[self._scenario_title(self._policy(first.get("policy")),
+                                                  first.get("label"))] += 1  # fmt: skip
             else:
                 day.unjudged += 1
                 day.unjudged_why[unjudged_reason(row.summary)] += 1

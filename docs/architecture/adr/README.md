@@ -25,3 +25,6 @@ the old one (both stay). New ADRs land as PRs with a comment window. Template:
 | [0014](0014-anonymous-identities.md) | Anonymous identities: unknown faces that come back, counted for the judge | accepted, amends 0012 and principle 4; amended by 0016 |
 | [0015](0015-truthful-timing-and-early-verdicts.md) | The camera's clock for clips, frames by packet, an early verdict per recording | accepted, amends 0010 and 0013 |
 | [0016](0016-every-face-reversible-decisions.md) | Every face gets an identity, its sharpest moment, and decisions that can be taken back | accepted, amends 0014 |
+| [0017](0017-subject-frames-other-cameras-and-questions.md) | Alerts that show their subject and can be argued with, the other cameras at that moment, and questions in plain words | accepted; amended by 0019 |
+| [0018](0018-identity-merge-pass.md) | A merge pass joins identities that are certainly one person, audited and reversible | accepted, amends 0014 and 0016 |
+| [0019](0019-deep-analysis.md) | Deep analysis: a second look at the day's clips, on one shared slot, inside serve | accepted, amends 0013 and 0017 |

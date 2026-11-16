@@ -203,6 +203,34 @@ def record(
     return Recorded(root, entry.id, entry.number, reply, applied, previous)
 
 
+def propose(
+    clip: Path, proposal: LiveVerdict, *, scenarios: dict[str, str], note: str
+) -> tuple[str, int] | None:
+    """Put a clip in the next review batch (deep analysis, ADR-0019): its entry, created
+    as a draft with `proposal` when missing, gets `note` (what the two judges said). An
+    entry someone already reviewed is left alone (None). Returns (dataset name, review
+    number). Blocking; run in a thread."""
+    root = dataset_root(clip)
+    if root is None:
+        raise FeedbackError(f"{clip.name} is not in a dataset folder (<dataset>/clips/)")
+    if not clip.is_file():
+        raise FeedbackError(f"{clip.name} is gone from {clip.parent}")
+    with _LOCK:
+        try:
+            ensure_vocabulary(root, scenarios)
+            entry = ensure_entry(root, clip, proposal)
+            if entry.status == "reviewed":
+                return None
+            if entry.notes != note:
+                _set_fields(root, entry.id, notes=note)
+        except FeedbackError:
+            raise
+        except Exception as exc:  # a dataset problem must not stop the worker
+            raise FeedbackError(f"{type(exc).__name__}: {exc}"[:300]) from exc
+    assert entry.number is not None
+    return root.name, entry.number
+
+
 def _set_fields(root: Path, entry_id: str, **fields: str | None) -> None:
     dataset = load_dataset(root)
     entry = next(e for e in dataset.labels.entries if e.id == entry_id)

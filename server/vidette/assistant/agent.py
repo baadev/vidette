@@ -15,6 +15,7 @@ honest answer, never an exception in the chat.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -32,6 +33,7 @@ from vidette.telegram.text import plural
 from vidette.vlm.budget import UsageLedger
 from vidette.vlm.client import parse_json_answer
 from vidette.vlm.endpoint import VlmEndpoint, VlmUnavailableError, endpoint_for
+from vidette.vlm.gate import SlotGate
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +80,11 @@ class Assistant:
         ledger: UsageLedger,
         http: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.time,
+        gate_for: Callable[[VlmEndpoint], SlotGate] | None = None,
     ) -> None:
         self.config = config
         self.tools = tools
+        self._gate_for = gate_for  # the shared model slot (vidette.vlm.gate), live priority
         self._ledger = ledger
         self._http = http or httpx.AsyncClient()
         self._clock = clock
@@ -252,11 +256,13 @@ class Assistant:
         if endpoint.api_key:
             headers["authorization"] = f"Bearer {endpoint.api_key}"
         await self._ledger.add(backend, calls=1, usd=0.0)
+        gate = self._gate_for(endpoint) if self._gate_for is not None else None
         try:
-            response = await self._http.post(
-                f"{endpoint.base_url}/chat/completions", json=body, headers=headers,
-                timeout=self.config.assistant.timeout_s,
-            )  # fmt: skip
+            async with gate.live() if gate is not None else contextlib.nullcontext():
+                response = await self._http.post(
+                    f"{endpoint.base_url}/chat/completions", json=body, headers=headers,
+                    timeout=self.config.assistant.timeout_s,
+                )  # fmt: skip
         except httpx.TimeoutException as exc:
             raise _ModelError("не уложилась во время") from exc
         except httpx.HTTPError as exc:

@@ -11,6 +11,30 @@ of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). 
 released; no images published from it; the last release is v0.1.3.
 
 ### Added
+- **Deep analysis** ([docs/deep.md](docs/deep.md),
+  [ADR-0019](docs/architecture/adr/0019-deep-analysis.md)): `understanding.deep` gives the
+  day's clips with people, faces or vehicles (and those the live judge never reached) a
+  second look by the judge's model: one request with up to eight frames and no policy
+  that describes what happens, then a text-only request that decides under the policy
+  from that description, in the owner's language. The result is stored next to the live
+  verdict (`events.deep`), compared with it (agree, disputed, uncertain, only deep);
+  disputed and uncertain clips become `status: draft` entries in their dataset with both
+  verdicts in `notes`. A persistent queue (`deep_jobs`) with priorities, retries, a
+  daily cap, a night window (01:00-07:00) and a trickle outside it. One model slot per
+  server for the whole process (`vidette.vlm.gate`): the live judge and the assistant go
+  first and take the slot back from a deep request; before each request the server's
+  `/slots` must show an idle slot, else it backs off. The evening digest quotes deep
+  descriptions and lists what only the deep look flagged. `vidette deep status | show`.
+- **Identity merge pass** ([ADR-0018](docs/architecture/adr/0018-identity-merge-pass.md),
+  [docs/people.md](docs/people.md#the-merge-pass-one-person-found-later)): identities that
+  are certainly one person are joined after the fact: the same moment on one camera
+  (faces 0.85 alike within 10 minutes) or clear faces that match like a live join with
+  no closer rival. Complete linkage; never across one clip, a person's split or undo, two
+  marked identities, a known person, or the household/stranger line. Audited (`merges`),
+  reversible (`--unmerge`, `--undo RUN`, sightings kept apart afterwards), a backup
+  before every pass that merges; old numbers resolve to the identity they went into.
+  `vidette people merge` (dry run by default) prints the score distribution behind the
+  thresholds; `vidette serve` runs it after new sightings (`people.identities.merge`).
 - **Quieter alerts that can be argued with**
   ([ADR-0017](docs/architecture/adr/0017-subject-frames-other-cameras-and-questions.md)):
   an alert's album holds only frames that show its subject (the best moment of each face,

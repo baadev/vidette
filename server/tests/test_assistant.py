@@ -156,8 +156,9 @@ async def test_quick_answers_need_no_model(tmp_path: Path) -> None:
                  for t, c, ref in ((110, "yard", "y"), (100, "street", str(own_clip)),
                                    (-3000, "door", "d"))]  # fmt: skip
     identities = SimpleNamespace(
-        get=lambda n: SimpleNamespace(status="unknown", sightings=3, days=1, name=None),
+        get=lambda n: SimpleNamespace(id=n, status="unknown", sightings=3, days=1, name=None),
         sightings=lambda n: sightings,
+        resolve=lambda n: n,  # no merges here (ADR-0018)
     )
     tools = Tools(cfg, db, clock=lambda: NOW, digest=digest,
                   identities=identities)  # type: ignore[arg-type]  # fmt: skip

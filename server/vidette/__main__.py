@@ -1,4 +1,4 @@
-"""CLI: `vidette serve | validate | frigate | eval | collect | label | people | telegram`."""
+"""CLI: `vidette serve | validate | frigate | eval | collect | label | people | telegram | deep`."""
 
 from __future__ import annotations
 
@@ -178,7 +178,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     telegram_cli.add_arguments(telegram)
 
+    from vidette.deep import cli as deep_cli
+
+    deep = subparsers.add_parser(
+        "deep",
+        help="deep analysis: the queue and the verdicts vidette serve made (docs/deep.md)",
+    )
+    deep_cli.add_arguments(deep)
+
     args = parser.parse_args(argv)
+    if args.command == "deep":
+        return deep_cli.run(args)
     if args.command == "telegram":
         return telegram_cli.run(args)
     if args.command == "collect":

@@ -410,6 +410,9 @@ class DayDigest:
     ordinary: Counter[str] = field(default_factory=Counter)  # titles of ordinary scenarios
     unjudged: int = 0
     unjudged_why: Counter[str] = field(default_factory=Counter)
+    deep_checked: int = 0  # looked at again by deep analysis (ADR-0019)
+    deep_review: int = 0  # where it and the live judge part: in the next labelling batch
+    deep_found: int = 0  # of the notable items, the ones only deep analysis flagged
 
     @property
     def substance(self) -> bool:
@@ -464,6 +467,12 @@ def day_digest_text(day: DayDigest, *, now: float, evening: bool) -> str:
     if day.unjudged:
         why = day.unjudged_why.most_common(1)[0][0] if day.unjudged_why else "не дошла очередь"
         lines.append(f"Не проверено судьёй: {day.unjudged} ({escape(why)}).")
+    if day.deep_review:
+        lines.append(
+            f"Перепроверка: {plural(day.deep_checked, 'ролик', 'ролика', 'роликов')}; "
+            f"{plural(day.deep_review, 'спорный ушёл', 'спорных ушли', 'спорных ушли')} "
+            "на разметку."
+        )
     return truncate("\n".join(lines))
 
 

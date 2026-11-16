@@ -47,9 +47,28 @@ class FakeVlmApi:
     force_count: int | None = None  # force only the first N requests (None: all)
     usage: tuple[int, int] = (1000, 40)
     requests: list[dict[str, Any]] = field(default_factory=list)
+    # llama.cpp's GET /slots: one bool per slot, True when it is processing; None: 404
+    slots: list[bool] | None = None
+    slot_reads: int = 0
 
     def app(self) -> FastAPI:
         app = FastAPI()
+
+        @app.get("/slots")
+        async def slots(request: Request) -> JSONResponse:
+            self.slot_reads += 1
+            if self.api_key is not None and request.headers.get("authorization") != (
+                f"Bearer {self.api_key}"
+            ):
+                return JSONResponse({"error": {"message": "invalid api key"}}, status_code=401)
+            if self.slots is None:
+                return JSONResponse({"error": {"message": "not found"}}, status_code=404)
+            return JSONResponse(
+                [
+                    {"id": n, "n_ctx": 2048, "is_processing": busy}
+                    for n, busy in enumerate(self.slots)
+                ]
+            )
 
         @app.post("/v1/chat/completions")
         async def completions(request: Request) -> JSONResponse:

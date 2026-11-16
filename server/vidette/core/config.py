@@ -36,6 +36,7 @@ class ConfigError(Exception):
 
 # --- building blocks -------------------------------------------------------------------------
 
+
 class StrictModel(BaseModel):
     """Reject unknown keys: a typo in the config must be an error, not a silent no-op."""
 
@@ -336,8 +337,81 @@ class VlmConfig(StrictModel):
         return self
 
 
+_WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$")
+
+
+class DeepConfig(StrictModel):
+    """Deep analysis (docs/deep.md, ADR-0019): a slower second look at the day's clips
+    with people or vehicles, on the judge's own endpoint, one request at a time, never
+    replacing the live verdict. Disagreements go to the next labelling batch; the evening
+    digest uses its descriptions."""
+
+    enabled: bool = False
+    backend: Literal["local", "cloud"] = "local"  # which understanding.vlm endpoint
+    window: str = "01:00-07:00"  # local time; may wrap midnight ("22:00-06:00")
+    outside_window: Literal["trickle", "off"] = "trickle"
+    trickle_every: str = "10m"  # outside the window: at most one clip this often
+    max_clips_per_day: int = Field(default=150, ge=1, le=10000)
+    lookback: str = "36h"  # events this recent are considered
+    frames: int = Field(default=8, ge=1, le=24)  # per clip, shown `frames_per_call` at a time
+    frames_per_call: int | None = Field(default=None, ge=1, le=8)  # default: the judge's
+    max_output_tokens: int = Field(default=600, ge=100, le=8000)
+    language: str | None = Field(default=None, max_length=40)  # default: the judge's
+    include_unjudged: bool = True  # events the live judge never reached (lowest priority)
+    min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)  # below: uncertain
+    # Before every request, ask the server's /slots (llama.cpp) and send only when at least
+    # this many slots are idle; `ignore` for servers without it (Ollama, cloud).
+    slots: Literal["check", "ignore"] = "check"
+    min_idle_slots: int = Field(default=1, ge=1, le=64)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    label_disputes: bool = True  # disputed and uncertain clips become review drafts
+
+    @model_validator(mode="after")
+    def _check(self) -> DeepConfig:
+        if not _WINDOW_RE.match(self.window):
+            raise ValueError(
+                f"understanding.deep.window '{self.window}' must look like 01:00-07:00"
+            )
+        _duration(self.trickle_every, "understanding.deep.trickle_every")
+        if _duration(self.lookback, "understanding.deep.lookback") < 3600:
+            raise ValueError("understanding.deep.lookback must be at least 1h")
+        return self
+
+    @property
+    def window_minutes(self) -> tuple[int, int]:
+        match = _WINDOW_RE.match(self.window)
+        assert match is not None
+        h1, m1, h2, m2 = (int(g) for g in match.groups())
+        return h1 * 60 + m1, h2 * 60 + m2
+
+    def in_window(self, minute_of_day: int) -> bool:
+        start, end = self.window_minutes
+        if start == end:
+            return True
+        if start < end:
+            return start <= minute_of_day < end
+        return minute_of_day >= start or minute_of_day < end
+
+    @property
+    def trickle_every_s(self) -> float:
+        return _duration(self.trickle_every, "trickle_every")
+
+    @property
+    def lookback_s(self) -> float:
+        return _duration(self.lookback, "lookback")
+
+
 class UnderstandingConfig(StrictModel):
     vlm: VlmConfig = VlmConfig()
+    deep: DeepConfig = Field(default_factory=DeepConfig)
+
+    @model_validator(mode="after")
+    def _deep_backend(self) -> UnderstandingConfig:
+        if self.deep.enabled and self.deep.backend == "cloud" and self.vlm.cloud is None:
+            raise ValueError(
+                "understanding.deep.backend is cloud but understanding.vlm has no cloud: section"
+            )
+        return self
 
 
 class Sensitivity(StrEnum):
@@ -494,6 +568,36 @@ def _default_identities_dir() -> Path:
     return (Path(base) if base else Path("~/vidette-data")).expanduser() / "identities"
 
 
+class IdentityMergeConfig(StrictModel):
+    """The merge pass (ADR-0018): identities that are certainly one person, joined after
+    the fact, every merge audited and reversible (`vidette people merge`)."""
+
+    auto: bool = True  # vidette serve runs it after new sightings, at most every `every`
+    every: str = "30m"
+    clear: float = Field(default=0.5, ge=0.3, le=0.95)  # best clear-face cosine
+    clear_floor: float = Field(default=0.4, ge=0.0, le=0.95)  # every clear pair at least
+    margin: float = Field(default=0.06, ge=0.0, le=0.3)  # over the next candidate, both ways
+    same_moment: float = Field(default=0.85, ge=0.5, le=1.0)  # any faces, one camera...
+    same_moment_within: str = "10m"  # ...this close in time
+
+    @model_validator(mode="after")
+    def _check(self) -> IdentityMergeConfig:
+        if _duration(self.every, "people.identities.merge.every") < 60:
+            raise ValueError("people.identities.merge.every must be at least 1m")
+        _duration(self.same_moment_within, "people.identities.merge.same_moment_within")
+        if self.clear_floor > self.clear:
+            raise ValueError("people.identities.merge.clear_floor cannot exceed clear")
+        return self
+
+    @property
+    def every_s(self) -> float:
+        return _duration(self.every, "every")
+
+    @property
+    def same_moment_within_s(self) -> float:
+        return _duration(self.same_moment_within, "same_moment_within")
+
+
 class IdentitiesConfig(StrictModel):
     """Anonymous identities for faces nobody enrolled (`people.track_unknown`, ADR-0014,
     ADR-0016): every person whose face the check found gets one.
@@ -502,6 +606,7 @@ class IdentitiesConfig(StrictModel):
     outside any git repository, owner-only, and pruned after `retention_days`."""
 
     dir: Path = Field(default_factory=_default_identities_dir)
+    merge: IdentityMergeConfig = Field(default_factory=IdentityMergeConfig)
     match: float = Field(default=0.5, ge=0.3, le=0.95)  # SFace cosine to join an identity
     margin: float = Field(default=0.06, ge=0.0, le=0.3)  # over the next-closest identity
     # readable faces smaller than this start a weak identity (joined by hand only)
@@ -840,6 +945,7 @@ class VidetteConfig(StrictModel):
 
 # --- honesty: designed-but-not-implemented warnings -------------------------------------------
 
+
 def designed_feature_warnings(config: VidetteConfig) -> list[str]:
     """One warning per configured feature that is not working yet, with where it lands.
 
@@ -875,9 +981,7 @@ def designed_feature_warnings(config: VidetteConfig) -> list[str]:
             "measure a policy first with `vidette eval` (docs/vlm.md)"
         )
     if not config.policies:
-        warnings.append(
-            "policies: none configured, so no incident is ever judged or notified"
-        )
+        warnings.append("policies: none configured, so no incident is ever judged or notified")
     if config.people.enabled and not config.people.dir.is_dir():
         warnings.append(
             f"people.dir {config.people.dir} does not exist yet; add someone with "

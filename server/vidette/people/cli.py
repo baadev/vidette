@@ -10,6 +10,9 @@
     vidette people remove Sam
     vidette people identities list               # anonymous identities (track_unknown)
     vidette people identities backfill           # the clip folders' old clips, oldest first
+    vidette people merge                         # what the merge pass would join (ADR-0018)
+    vidette people merge --apply                 # do it (a backup first, every merge audited)
+    vidette people merge --undo RUN | --unmerge ID | --log
 
 The folder comes from `people.dir` in the config (default `$VIDETTE_DATA/people`, else
 ~/vidette-data/people) or `--dir`; it must be outside any git repository. Docs:
@@ -172,6 +175,22 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     forget.add_argument("identity", type=int)
     forget.add_argument("--yes", action="store_true", help="do not ask")
 
+    merge = actions.add_parser(
+        "merge",
+        help="join anonymous identities that are certainly one person (dry run by default)",
+        description="The merge pass of ADR-0018: same-moment duplicates (one camera, minutes "
+        "apart, nearly the same face) and clear faces that match like a live join. Prints "
+        "what it would do and the score distribution behind its thresholds; --apply backs "
+        "the database up and merges, each merge audited and reversible.",
+    )
+    what = merge.add_mutually_exclusive_group()
+    what.add_argument("--apply", action="store_true", help="merge (after a backup)")
+    what.add_argument("--dry-run", action="store_true", help="only show the plan (default)")
+    what.add_argument("--undo", metavar="RUN", help="undo every merge of one run")
+    what.add_argument("--unmerge", metavar="ID", type=int, help="undo one merge")
+    what.add_argument("--log", action="store_true", help="the merges made so far")
+    merge.add_argument("--json", action="store_true", help="the plan as JSON (counts and ids)")
+
 
 def _config(args: argparse.Namespace) -> PeopleConfig:
     config, _source = cli_config(args.config)
@@ -211,6 +230,8 @@ def run(args: argparse.Namespace) -> int:
             return _sheet(config, args.name, args.out)
         if command == "identities":
             return _identities(config, args)
+        if command == "merge":
+            return _merge(config, args)
     except (
         ConfigError,
         StoreError,
@@ -560,6 +581,82 @@ def _identities(config: PeopleConfig, args: argparse.Namespace) -> int:
         print(f"deleted #{row.id} and everything stored for it")
         return 0
     return 2
+
+
+def _merge(config: PeopleConfig, args: argparse.Namespace) -> int:
+    from vidette.people.merge import apply_plan, plan_merges, run_name
+    from vidette.people.setup import merge_settings_for
+
+    store = identities_for(config)
+    if not store.db_path.exists():
+        raise IdentityError(f"no identities in {store.root} yet")
+    if args.unmerge is not None:
+        identity, moved = store.unmerge(args.unmerge)
+        print(f"merge {args.unmerge} undone: #{identity} is back with {moved} sighting(s)")
+        return 0
+    if args.undo:
+        undone = store.undo_run(args.undo)
+        back = sum(moved for _identity, moved in undone)
+        print(f"run {args.undo}: {len(undone)} merge(s) undone, {back} sighting(s) moved back")
+        return 0
+    if args.log:
+        rows = store.merge_log()
+        print(f"{len(rows)} merge(s) in {store.root}")
+        for row in rows:
+            note = f", undone {_when(row.undone_at)}" if row.undone_at else ""
+            print(
+                f"  {row.id}: run {row.run}, #{row.source} → #{row.target} ({row.rule} "
+                f"{row.score:.3f}, {row.sightings} sighting(s)){note}"
+            )
+        return 0
+    settings = merge_settings_for(config)
+    before = store.stats()
+    plan = plan_merges(store, settings)
+    if args.json:
+        print(json.dumps({
+            "identities": before["identities"], "considered": plan.considered,
+            "merges": plan.merges, "groups": [
+                {"target": g.target, "members": g.members,
+                 "links": [{"a": k.a, "b": k.b, "rule": k.rule, "score": round(k.score, 3)}
+                           for k in g.links]}
+                for g in plan.groups],
+            "blocked": dict(plan.blocked),
+        }, indent=1))  # fmt: skip
+    else:
+        print(
+            f"identities: {before['identities']} ({plan.considered} not promoted to a known "
+            f"person), sightings: {before['sightings']}"
+        )
+        print(
+            f"rules: clear faces >= {settings.clear:g} (every pair >= {settings.clear_floor:g}, "
+            f"margin {settings.margin:g}); same moment >= {settings.same_moment:g} on one camera "
+            f"within {settings.same_moment_within_s / 60:g} min"
+        )
+        print(f"  clear-face pairs, best score:  n={len(plan.clear_scores)}  "
+              f"{plan.histogram(plan.clear_scores)}")  # fmt: skip
+        print(f"  one camera, close in time:     n={len(plan.moment_scores)}  "
+              f"{plan.histogram(plan.moment_scores)}")  # fmt: skip
+        for why, count in plan.blocked.most_common():
+            print(f"  not merged: {why}: {count}")
+        print(f"plan: {plan.merges} merge(s) in {len(plan.groups)} group(s)")
+        for group in plan.groups:
+            joins = ", ".join(f"#{k.a}~#{k.b} {k.rule} {k.score:.3f}" for k in group.links)
+            print(f"  #{group.target} ← {', '.join(f'#{m}' for m in group.members[1:])}: {joins}")
+    if not args.apply:
+        if not args.json:
+            print("dry run: nothing changed (--apply to merge)")
+        return 0
+    applied = apply_plan(store, plan, run=run_name())
+    after = store.stats()
+    if applied.backup:
+        print(f"backup: {applied.backup}")
+    for skipped in applied.skipped:
+        print(f"  skipped {skipped}")
+    print(
+        f"run {applied.run}: {applied.merged} merge(s); identities {before['identities']} → "
+        f"{after['identities']} (undo: vidette people merge --undo {applied.run})"
+    )
+    return 0
 
 
 def _when(ts: float | None) -> str:

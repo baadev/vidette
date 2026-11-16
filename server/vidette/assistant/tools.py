@@ -371,9 +371,13 @@ class Tools:
         number = args.get("identity")
         if not isinstance(number, int):
             raise ToolError("нужен номер личности, например 12")
-        row = await asyncio.to_thread(self.identities.get, number)
+        current_id = await asyncio.to_thread(self.identities.resolve, number)  # after merges
+        row = (
+            None if current_id is None else await asyncio.to_thread(self.identities.get, current_id)
+        )
         if row is None:
             raise ToolError(f"нет личности №{number}")
+        number = row.id
         days = args.get("days") if isinstance(args.get("days"), int) else 7
         since = self._clock() - float(days or 7) * 86400
         sightings = [

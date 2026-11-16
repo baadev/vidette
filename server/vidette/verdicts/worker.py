@@ -160,6 +160,8 @@ class VerdictWorker:
         self._judge_cache: dict[VlmBackend, Judge] = {}
         self._queued: dict[str, float] = {}  # incident key → when it was taken off the bus
         self.status = WorkerStatus()
+        self.backlog = 0  # incidents waiting to be judged (deep analysis waits for these)
+        self.working = False  # judging one now
 
     @property
     def running(self) -> bool:
@@ -195,13 +197,17 @@ class VerdictWorker:
                 except asyncio.QueueEmpty:
                     break
             incident = self.next_incident(pending)
+            self.backlog = len(pending)
             if incident is None:
                 continue
+            self.working = True
             try:
                 await self.handle(incident)
             except Exception as exc:  # the loop survives anything
                 logger.exception("verdict worker failed on %s", incident.source_id)
                 await self._failed(f"{type(exc).__name__}: {exc}")
+            finally:
+                self.working = False
 
     def _take(self, pending: dict[str, Incident], message: tuple[str, dict[str, Any]]) -> None:
         """Closed incidents and early windows (partial) wait to be judged. An early window
@@ -368,8 +374,8 @@ class VerdictWorker:
                     **chosen.health.model_dump(mode="json"),
                     "interrupted": chosen.health.interrupted,
                 }
-        album_dir = self._media_dir / "judge-frames" / (
-            f"{row.id}/early" if incident.partial else row.id
+        album_dir = (
+            self._media_dir / "judge-frames" / (f"{row.id}/early" if incident.partial else row.id)
         )
         leading = alerting or decided
         album = await album_frames(
