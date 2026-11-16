@@ -27,6 +27,13 @@ from vidette.collect.continuous import (
 )
 from vidette.collect.disk import DiskLimits, dir_size, measure
 from vidette.collect.motion import OVERLAY_MASK, MotionSettings, Region, parse_fraction
+from vidette.collect.prune import (
+    PRUNE_AT,
+    PRUNE_TO,
+    Pruner,
+    PruneSettings,
+    default_serve_config,
+)
 from vidette.collect.ring import RING_DIR
 from vidette.collect.target import RtspTarget, TargetError, load_target
 from vidette.ffmpeg import ROTATIONS, MediaToolError, binary
@@ -82,6 +89,25 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--silence", default="8s", help="no video this long ends a clip")
     parser.add_argument("--max-size", default="5GB", help="hard cap on the dataset folder")
     parser.add_argument("--min-free", default="10GB", help="stop when the disk has less free")
+    parser.add_argument(
+        "--prune-oldest",
+        action="store_true",
+        help=f"past {PRUNE_AT:.0%} of --max-size, delete the oldest clips (with their key "
+        f"frames) down to {PRUNE_TO:.0%} instead of stopping; never labelled clips, clips "
+        "vidette serve alerted on or that were marked, the other cameras at that moment, "
+        "clips with faces, or clips younger than --prune-min-age".replace("%", "%%"),
+    )
+    parser.add_argument(
+        "--prune-min-age", default="24h", help="--prune-oldest never deletes a younger clip"
+    )
+    parser.add_argument(
+        "--serve-config",
+        type=Path,
+        default=None,
+        help="vidette serve's config, for --prune-oldest: its database and people folders "
+        "say which clips to keep (default $VIDETTE_CONFIG, then "
+        "~/.config/vidette/vidette.yaml if it exists)",
+    )
     parser.add_argument(
         "--no-probe",
         action="store_true",
@@ -214,6 +240,20 @@ def settings_from_args(args: argparse.Namespace) -> CollectSettings:
         base_station=args.base_station,
         wallclock_timestamps=args.wallclock_timestamps,
         early_s=parse_duration(args.early),
+        prune=prune_from_args(args),
+    )
+
+
+def prune_from_args(args: argparse.Namespace) -> PruneSettings | None:
+    if not args.prune_oldest:
+        return None
+    config = args.serve_config
+    return PruneSettings(
+        serve_config=(
+            config.expanduser().resolve() if config is not None else default_serve_config()
+        ),
+        min_age_s=parse_duration(args.prune_min_age),
+        span_s=parse_duration(args.max),
     )
 
 
@@ -372,6 +412,9 @@ async def _check(
         print(f"         not recording: {blocked}")
     else:
         print(f"         next clip may take up to {format_size(disk.clip_allowance_bytes)}")
+    if settings.prune is not None:
+        pruner = Pruner(settings.dataset, settings.prune)
+        print(f"prune    {pruner.preview(disk)}")
     if continuous is None:
         print(
             f"timing   probe every {format_duration(settings.probe_every_s)}, clips "

@@ -260,6 +260,8 @@ class ContinuousCollector(Collector):
                 settings.rotation,
                 measure(settings.dataset, settings.limits, skip=(RING_DIR,)).describe(),
             )
+            if self._pruner is not None:
+                logger.info("%s", self._pruner.describe(settings.limits.max_dataset_bytes))
             while not stop.is_set():
                 if await self._step(stop):
                     break
@@ -603,12 +605,17 @@ class ContinuousCollector(Collector):
         if not pieces:
             self._drop(f"motion at {moment} not kept: the ring holds no video for it")
             return
-        disk = measure(settings.dataset, settings.limits, skip=(RING_DIR,))
         need = 2 * sum(piece.estimated_bytes for piece in pieces) + FRAMES_RESERVE_BYTES
+        disk = await self._prune(
+            measure(settings.dataset, settings.limits, skip=(RING_DIR,)),
+            skip=(RING_DIR,),
+            need_bytes=need,
+        )
         blocked = disk.blocked_reason
         if blocked is None and need > disk.clip_allowance_bytes:
             blocked = f"the clip needs about {format_size(need)}, {disk.describe()}"
         if blocked is not None:
+            blocked = self._with_prune_note(blocked, disk)
             if blocked != self._clips_blocked:
                 logger.warning(
                     "motion at %s not kept: %s; the ring keeps recording", moment, blocked

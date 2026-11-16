@@ -49,6 +49,7 @@ numbers with the set's size, and nothing better than them.
 | Labelled set of 30 to 50 real clips (passer-by, courier, door handle, lingering, cat, headlights, night noise) | 🚧 being collected by `vidette collect`; synthetic 5-entry sample ships as a format demo |
 | `vidette collect`: wake periods of a battery camera become dataset clips (gentle wait loop, clean stops, hard disk caps, launchd template) | ✅ tested against a fake RTSP camera; run against real battery cameras |
 | `vidette collect --continuous`: a bounded ring and a motion gate cut clips with pre-roll from a streaming camera; `--rotate`, `--base-station` ([ADR-0011](docs/architecture/adr/0011-continuous-collect.md)) | ✅ tested against a fake continuous camera; run against a real camera ([measured](docs/collect.md#measured-on-a-real-camera)) |
+| `vidette collect --prune-oldest`: the oldest clips nothing needs make room under the folder cap; labels, alerts and marks, faces, the other cameras of an alert and the last 24 h are kept ([docs](docs/collect.md#pruning-the-oldest-clips---prune-oldest)) | ✅ tested on temporary datasets against the real database schemas; dry-run on real datasets |
 | Clip folders as an incident source: the pipeline without Frigate ([ADR-0010](docs/architecture/adr/0010-clip-folders.md)) | ✅ |
 
 ### Week 2: the differentiator

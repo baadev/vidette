@@ -10,7 +10,9 @@ stream and cuts a clip around each motion instead.
 It is a dataset tool, not a recorder ([ADR-0010](architecture/adr/0010-clip-folders.md),
 [ADR-0011](architecture/adr/0011-continuous-collect.md)): it keeps clips and, in
 continuous mode, a few hours of lookback that are overwritten; it never runs inside
-`vidette serve`, and it stops at hard disk limits.
+`vidette serve`, and it stops at hard disk limits (with
+[`--prune-oldest`](#pruning-the-oldest-clips---prune-oldest), the oldest clips nothing
+needs make room under the folder's cap first).
 
 Status: ✅ wake-period mode tested against a fake RTSP camera that sleeps, wakes, turns
 away a second client and holds dead sessions the way a battery camera did in v0.1;
@@ -183,7 +185,7 @@ Two hard limits, checked before every recording and once a second during it:
 
 | Limit | Default | What happens |
 |---|---|---|
-| Dataset folder size | `--max-size 5GB` | nothing new is recorded; a recording is capped by ffmpeg's `-fs` so it cannot cross the limit |
+| Dataset folder size | `--max-size 5GB` | nothing new is recorded; a recording is capped by ffmpeg's `-fs` so it cannot cross the limit. With [`--prune-oldest`](#pruning-the-oldest-clips---prune-oldest), the oldest clips nothing needs go first |
 | Free space on the disk | `--min-free 10GB` | nothing is recorded below it; a running recording stops cleanly |
 
 The folder never exceeds `--max-size`: each recording may use at most half of what is
@@ -191,6 +193,60 @@ left (finalizing briefly stores a clip twice). How far 5 GB goes depends on the 
 bitrate; at 2 Mbit/s a 30 s clip is about 8 MB with its frames, so roughly 600 clips. When
 a limit is reached, the log says so once and the collector checks again every minute.
 The log itself grows by a few lines per clip.
+
+### Pruning the oldest clips: `--prune-oldest`
+
+A camera that sees a lot fills any cap within days, and a full folder is a blind camera.
+With `--prune-oldest`, a folder past 95 % of `--max-size` loses its oldest clips until it
+is back under 90 %: one prune frees about a twentieth of the cap, so it runs now and then,
+not after every clip. A clip goes with everything made from it: its sidecar, its key
+frames (`frames/<id>/`), its face crops (`faces/<id>/`) and its early window
+(`.early/<id>.*`). The continuous ring has its own cap and is never touched; contact
+sheets in `review/` show labelled entries, which are kept.
+
+A clip is never pruned when something needs it:
+
+| Kept | How it is found |
+|---|---|
+| labelled | an entry of the folder's `labels.yaml`, whatever its status: a reviewed label, a model's draft waiting for review, a number on a contact sheet |
+| alert or mark | an event in `vidette serve`'s database whose verdict alerted (or the model said alert and a rule kept it quiet), or that was confirmed, sent to Telegram, answered with 👍/👎 or a reason, or starred |
+| near an alert | starts from 1 min before to 3 min after such an event, on any camera: the [other cameras](other-cameras.md) of the alert, with room for a camera whose video arrives late |
+| faces | a sighting of an anonymous identity, or a face decision about a known person that names the clip or its event ([people.md](people.md)): decisions can be taken back only while the clip is there |
+| young | younger than `--prune-min-age` (24 h): time for a verdict, an answer in Telegram or a label to arrive |
+
+`vidette serve`'s database and people folders come from its config:
+`--serve-config PATH` (default `$VIDETTE_CONFIG`, then `~/.config/vidette/vidette.yaml`
+if it exists). Only its `storage` and `people` sections are read, and the databases are
+opened read-only; secrets elsewhere in the file, such as a bot token from the environment,
+are not needed. Without a serve config, only labels and the default people folders
+(`~/vidette-data/people`, `~/vidette-data/identities`) keep clips, and the start-up line
+says that alerts are not known.
+
+It fails safe. When anything that says what to keep cannot be read (a `labels.yaml` that
+does not parse, a database that is missing or will not open), nothing is pruned and the
+collector stops at the cap as it does without the flag. When every clip old enough is
+kept for a reason, it stops too. Either way the "not recording" line says why, and the
+next try comes 10 minutes later. A prune is one line in the log:
+
+```
+pruned 41 oldest clip(s) up to 2026-01-17 09:58, 760 MB freed · dataset 14.3 GB → 13.5 GB of 15 GB (--max-size) · oldest kept 2026-01-16 18:40 · kept: 3 alert or mark, 20 faces, 12 labelled, 6 near an alert, 410 younger than 24.0 h
+not recording: the dataset folder holds 15 GB, the cap is 15 GB (--max-size); nothing left to prune (kept: 3 alert or mark, 20 faces, 900 labelled, 6 near an alert, 410 younger than 24.0 h); checking again every 1.0 min
+```
+
+`--check` shows what a prune would find now and deletes nothing:
+
+```
+prune    on: past 14.2 GB the oldest clips go until 13.5 GB; 301 clip(s), 1.53 GB could go now · kept: 3 alert or mark, 20 faces, 12 labelled, 6 near an alert, 410 younger than 24.0 h
+```
+
+`vidette serve` keeps its events of pruned clips; their clip link answers "Clip not
+available", as for any clip gone from a clip folder. A pruned clip is gone: label what you
+want to keep for `vidette eval` while it is in the folder.
+
+Budgets: a prune lists `clips/`, reads `labels.yaml`, the people folder and the two
+databases (read-only), and deletes files; measured on an Apple-silicon machine, finding
+what to keep and what could go takes about 0.1 s for 1,300 clips and 2,500 events. It
+runs in a thread, so a continuous camera's stream is not held up.
 
 ## Watched hours
 
@@ -293,7 +349,7 @@ ffmpeg -i clips/<id>.mp4 -noautorotate -frames:v 1 -vf transpose=cclock ccw.jpg
 | Limit | Default | What happens |
 |---|---|---|
 | Free space on the disk | `--min-free 10GB` | the ring gives up all but its last three segments; if that is not enough, recording stops cleanly and resumes when space comes back |
-| Clips (the folder without `ring/`) | `--max-size 5GB` | a motion is logged as "not kept"; the ring keeps recording |
+| Clips (the folder without `ring/`) | `--max-size 5GB` | a motion is logged as "not kept"; the ring keeps recording. With `--prune-oldest`, the oldest clips nothing needs go first |
 | The ring | `--ring-size 3GB`, `--ring-keep 24h` | oldest segments are deleted; the ring also never grows into the last 512 MB above the free-space floor, so clips always have room before it |
 
 Priority, highest first: the floor, the clips, the ring. Two collectors on one Mac share

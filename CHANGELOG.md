@@ -208,6 +208,15 @@ images published from it.
   finished) and an alert its `sent_at`; `/status` shows the stages of the last alert.
 - The VLM judge sends a prompt the server refused for its context size once more with
   the same frames 20 % smaller.
+- **`vidette collect --prune-oldest`**
+  ([docs/collect.md](docs/collect.md#pruning-the-oldest-clips---prune-oldest)): a folder
+  past 95 % of `--max-size` loses its oldest clips, each with its sidecar, key frames,
+  face crops and early window, until it is under 90 %, instead of stopping the camera.
+  Never pruned: labelled entries (any status), events of `vidette serve` that alerted or
+  were marked (read-only from its database, via `--serve-config`), clips on any camera
+  from 1 min before to 3 min after such an event, clips with face sightings or face
+  decisions, and clips younger than `--prune-min-age` (24 h). Anything unreadable means
+  no prune and the old stop, with the reason in the log. Off by default.
 - **launchd template for a second camera**:
   [deploy/macos/dev.vidette.collect.camera2.plist](deploy/macos/dev.vidette.collect.camera2.plist).
 - `server/uv.lock`; CI installs from it (`--locked`).

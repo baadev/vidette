@@ -47,7 +47,8 @@ from vidette.collect.clips import (
     reserve_id,
     write_early,
 )
-from vidette.collect.disk import DiskLimits, measure
+from vidette.collect.disk import DiskLimits, DiskState, measure
+from vidette.collect.prune import Pruner, PruneSettings
 from vidette.collect.session import CLUSTER_MS, Outcome, SessionResult, record_session
 from vidette.collect.target import RtspTarget
 from vidette.units import format_duration, format_size
@@ -88,6 +89,9 @@ class CollectSettings:
     # Write the first `early_s` seconds of each recording to .early/ while it goes on, so
     # an alert need not wait for the clip (0: off). See clips.write_early.
     early_s: float = 0.0
+    # `--prune-oldest`: near --max-size, delete the oldest clips nobody needs instead of
+    # stopping (collect/prune.py). None: off, the cap stops the collector.
+    prune: PruneSettings | None = None
 
 
 def backoff(streak: int, schedule: tuple[float, float]) -> float:
@@ -148,6 +152,11 @@ class Collector:
         self._last_save = 0.0
         self._disk_blocked: str | None = None
         self._early_id: str | None = None  # the id the early window of this session took
+        self._pruner = (
+            None
+            if settings.prune is None
+            else Pruner(settings.dataset, settings.prune, clock=clock)
+        )
 
     # --- paths, state, lock -------------------------------------------------------------
 
@@ -225,6 +234,36 @@ class Collector:
         if streak == 1 or streak % _REPEAT_LOG_EVERY == 0:
             logger.info(self.target.scrub(message), *args)
 
+    async def _prune(
+        self, disk: DiskState, *, skip: tuple[str, ...] = (), need_bytes: int = 0
+    ) -> DiskState:
+        """`--prune-oldest`: when the folder is near its cap, delete its oldest clips that
+        nothing needs (in a thread: it walks the folder) and measure again."""
+        pruner = self._pruner
+        if pruner is None:
+            return disk
+        if not pruner.wanted(disk, need_bytes):
+            pruner.settle()
+            return disk
+        if not pruner.due():
+            return disk
+        result = await asyncio.to_thread(pruner.run, disk)
+        if not result.pruned:
+            return disk
+        logger.info("%s", result.line())
+        self.stats.clips = max(0, self.stats.clips - result.pruned)
+        with contextlib.suppress(OSError):
+            self.save_state()
+        return measure(self.settings.dataset, self.settings.limits, skip=skip)
+
+    def _with_prune_note(self, blocked: str, disk: DiskState) -> str:
+        """The cap's block, with why pruning did not make room (the floor is not the
+        cap: pruning never runs for it)."""
+        note = self._pruner.note if self._pruner is not None else None
+        if note is None or disk.free_bytes < self.settings.limits.min_free_bytes:
+            return blocked
+        return f"{blocked}; {note}"
+
     def _disk_check(self, part_bytes: int) -> str | None:
         disk = measure(self.settings.dataset, self.settings.limits)
         if disk.free_bytes < self.settings.limits.min_free_bytes:
@@ -259,6 +298,8 @@ class Collector:
                 format_duration(settings.max_seconds),
                 measure(settings.dataset, settings.limits).describe(),
             )
+            if self._pruner is not None:
+                logger.info("%s", self._pruner.describe(settings.limits.max_dataset_bytes))
             while not stop.is_set():
                 if await self._step(stop):
                     break
@@ -272,9 +313,10 @@ class Collector:
     async def _step(self, stop: asyncio.Event) -> bool:
         """One pass of the loop; True when the collector should exit."""
         settings = self.settings
-        disk = measure(settings.dataset, settings.limits)
+        disk = await self._prune(measure(settings.dataset, settings.limits))
         blocked = disk.blocked_reason
         if blocked is not None:
+            blocked = self._with_prune_note(blocked, disk)
             if blocked != self._disk_blocked:
                 logger.warning("not recording: %s; checking again every %s", blocked,
                                format_duration(settings.disk_recheck_s))
