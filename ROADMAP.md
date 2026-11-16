@@ -39,7 +39,7 @@ numbers with the set's size, and nothing better than them.
 | Item | Status |
 |---|---|
 | Freeze the NVR core (tag `nvr-core`, deleted on `v0.2`), ADR-0009 | ✅ |
-| CI from a lockfile (`uv.lock`, `uv sync --locked`), node24 actions; ruff, mypy strict, pytest green | ✅ locally (Python 3.12 and 3.13); first GitHub run happens on push |
+| CI from a lockfile (`uv.lock`, `uv sync --locked`), node24 actions; ruff, mypy strict, pytest green | ✅ locally (Python 3.12 and 3.13) and on GitHub |
 | Frigate source: reviews, tracked objects, availability over MQTT; typed, lenient, filterable | ✅ |
 | Frigate HTTP client: review items, snapshots, recording frames, clips | ✅ |
 | Fixtures in recorded format + `vidette frigate check / tail --record / replay` | ✅ fixtures hand-built from Frigate 0.18 docs; real captures pending |
@@ -56,10 +56,10 @@ numbers with the set's size, and nothing better than them.
 
 | Item | Status |
 |---|---|
-| VLM judge: frame selection, structured JSON verdict, abstention, daily call budget, pace, timeouts, latency and cost; one client for OpenAI-compatible APIs with a `local` (Ollama) and a `cloud` (OpenAI, Gemini, OpenRouter, custom) backend ([docs/vlm.md](docs/vlm.md)) | ✅ tested on a fake OpenAI-compatible server; no real model run yet |
+| VLM judge: frame selection, structured JSON verdict, abstention, daily call budget, pace, timeouts, latency and cost; one client for OpenAI-compatible APIs with a `local` (Ollama) and a `cloud` (OpenAI, Gemini, OpenRouter, custom) backend ([docs/vlm.md](docs/vlm.md)) | ✅ tested on a fake OpenAI-compatible server; running live on a local model on a test deployment; not measured yet |
 | `vidette eval` compares judges side by side, VLM included: precision, recall, false alarms/day, abstentions by reason, measured cost and latency | ✅ |
 | Machine drafts in `labels.yaml` are not truth until reviewed (`status: draft`); reports count accepted-unchanged drafts | ✅ |
-| `vidette label draft / sheets / apply`: VLM drafts from the set's vocabulary, PNG contact sheets for a phone, replies by number in Russian or English ([docs/label.md](docs/label.md)) | ✅ tested with a fake model; no real model run yet |
+| `vidette label draft / sheets / apply`: VLM drafts from the set's vocabulary, PNG contact sheets for a phone, replies by number in Russian or English ([docs/label.md](docs/label.md)) | ✅ tested with a fake model; used with a local model on real clips |
 | Known people: local face recognition (YuNet + SFace, opt-in extra), one line of facts for the judge, `known_people: quiet` on a policy, People page, confirmations from the event card, `vidette people` and contact-sheet replies ([docs/people.md](docs/people.md), [ADR-0012](docs/architecture/adr/0012-known-people.md)) | 🚧 works end to end with a fake engine in tests and on real clips; no accuracy figure yet; encryption at rest not done |
 | Anonymous identities (opt-in `people.track_unknown`): everyone whose face is found gets one (weak ones for small faces), counted when they come back, never named; the sharpest moment of each face; answers that can be taken back; familiar people quiet like the household; recurrence facts for the judge, a `recurrence` rule that raises a policy's level, an Identities view (suggested duplicates, bulk merge, move a sighting, promote and take back), «Кто это?» and «незнакомец №12, 3-й раз» in Telegram, 30-day retention, `vidette people identities backfill` ([docs/people.md](docs/people.md#strangers-who-come-back), [ADR-0014](docs/architecture/adr/0014-anonymous-identities.md), [ADR-0016](docs/architecture/adr/0016-every-face-reversible-decisions.md)) | 🚧 tested with a fake engine; backfilled over real clips; thresholds from those clips, no accuracy figure |
 | Policy levels: scenarios grouped by severity, each level with a `wake` rule (always, unless quiet, unless only known people, never); the judge names a scenario ([docs/telegram.md](docs/telegram.md#levels-who-wakes-for-what), [ADR-0013](docs/architecture/adr/0013-telegram-bot.md)) | 🚧 tested with a fake model; running live; not measured by `vidette eval` yet |

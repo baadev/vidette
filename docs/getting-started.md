@@ -1,11 +1,11 @@
 # Getting started
 
-> **Status: v0.2 development line.** What works: Vidette reads Frigate's review items over
-> MQTT, mirrors them as `observed` events with snapshots and clips, and `vidette eval`
-> measures policies on labelled clips. What does not work yet: verdicts. Nothing is
-> confirmed and nothing notifies until the VLM verdict worker lands (week 2 of the plan in
-> [ROADMAP.md](../ROADMAP.md)). Published images are still the v0.1 NVR line, so everything
-> below builds from a checkout.
+> **Status: v0.2 development line.** Vidette reads Frigate's review items over MQTT (or
+> clips from a folder), judges each one with a VLM under your policy, and notifies only
+> for events the judge confirmed; `vidette eval` measures policies on labelled clips. No
+> accuracy numbers exist yet ([ROADMAP.md](../ROADMAP.md)). Published images are still the
+> v0.1 NVR line, so everything below builds from a checkout. Without Frigate, with a camera
+> of your own and Telegram: the [README's quickstart](../README.md#your-own-camera-without-frigate).
 
 There are two ways in. You can do the first one on a laptop in five minutes, without a
 camera.
@@ -22,7 +22,7 @@ uv run vidette eval ../datasets/synthetic-sample
 
 You get precision, recall and false alarms per day for four baselines on a five-entry
 synthetic set (its numbers mean nothing; it shows the format). Then build a set from your
-own camera's clips: [eval.md](eval.md#adding-your-own-clips-eufy-s3-pro-and-friends).
+own camera's clips: [eval.md](eval.md#adding-your-own-clips-battery-cameras-and-friends).
 
 ## B. Run it next to Frigate
 
@@ -63,8 +63,9 @@ What you need:
    the **System** page shows whether the broker is connected and how many messages arrived.
 
 Notifications (webhooks, Apprise, web push, MQTT) are configured as in
-[events-and-automations.md](events-and-automations.md), and stay quiet until verdicts
-exist: `observed` events never notify.
+[events-and-automations.md](events-and-automations.md), the Telegram bot with buttons as in
+[telegram.md](telegram.md). They fire only for events the judge confirmed
+([vlm.md](vlm.md)): `observed` events never notify.
 
 ## Remote access
 

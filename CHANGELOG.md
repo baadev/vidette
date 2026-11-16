@@ -6,9 +6,9 @@ All notable changes to Vidette are documented here. The format follows
 
 ## [Unreleased]
 
-Development line `v0.2`: Vidette becomes an intent layer on top of Frigate
-([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). Not released; no
-images published from it.
+Development line `v0.2`: Vidette becomes an intent layer on top of Frigate and of folders
+of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). Not
+released; no images published from it; the last release is v0.1.3.
 
 ### Added
 - **Quieter alerts that can be argued with**
@@ -222,6 +222,14 @@ images published from it.
 - `server/uv.lock`; CI installs from it (`--locked`).
 
 ### Changed
+- **README** describes v0.2 as it works today: incidents from Frigate or clip folders,
+  `vidette collect` (wake on motion, continuous, early windows, `--prune-oldest`), the
+  judge with policy levels (local or cloud), the Telegram bot with feedback and
+  questions, known people and anonymous identities, the other cameras, `vidette label`
+  and `vidette eval`; a quickstart for a camera without Frigate; what is not built yet
+  marked as roadmap. The badges say v0.2 is a development line and that the release
+  badge shows the last release (v0.1.3); CI's badge follows `v0.2`.
+  [Getting started](docs/getting-started.md) no longer says verdicts do not exist.
 - **No hourly Telegram digest.** `notifications.telegram.digest_at` (21:00) sends the
   day's digest once, silently, only when something needs a look (confirmed events that
   woke nobody, unanswered alerts), in plain lines; `/status` gives the same for today so
@@ -252,7 +260,8 @@ images published from it.
 - Config: new `frigate:` section; `cameras:`, retention, compaction, off-site, detector,
   tracker, faces and embeddings sections removed (a v0.1 config fails with a pointer to
   ADR-0009). Home Assistant discovery announces Frigate's cameras.
-- Web app: Events (default) and System pages only; the header fits a phone screen.
+- Web app: Events (default), People (with Identities) and System pages; the header fits a
+  phone screen.
 - CI actions moved to node24 releases; the image no longer installs ffmpeg; compose builds
   from the checkout and drops the go2rtc sidecar.
 - Release workflow: the `latest` image tag moves only to the newest stable tag

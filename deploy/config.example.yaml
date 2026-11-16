@@ -55,7 +55,7 @@ understanding:
     #   prices: {usd_per_mtok_in: 0, usd_per_mtok_out: 0}   # yours, for cost reports
 
 policies:
-  # Plain language. Stored today, judged from week 2 of the v0.2 plan; measure a policy
+  # Plain language, judged by the VLM above (docs/vlm.md); measure a policy
   # offline first with `vidette eval` (docs/eval.md).
   - name: entry-interest
     description: >
@@ -107,7 +107,7 @@ notifications:
   #   names: false           # names of recognized people go to Telegram when true
   #   digest_at: "21:00"     # the day's digest, only when something needs a look
   rules:
-    - when: event.confirmed  # nothing is confirmed until verdicts land (v0.2, week 2)
+    - when: event.confirmed  # an event the judge confirmed (docs/vlm.md)
       channels: [push, telegram, hooks]
     - when: system.*         # Frigate unreachable, broker down: it snitches on itself
       channels: [hooks]
