@@ -55,8 +55,7 @@ understanding:
     #   prices: {usd_per_mtok_in: 0, usd_per_mtok_out: 0}   # yours, for cost reports
   # deep:                  # a second look at the day's clips, one request at a time
   #   enabled: true        # (docs/deep.md); never replaces the live verdict
-  #   window: "01:00-07:00"
-  #   max_clips_per_day: 150
+  #   window: "01:00-07:00"  # every free moment of the slot; a turn by day when starved
 
 policies:
   # Plain language, judged by the VLM above (docs/vlm.md); measure a policy

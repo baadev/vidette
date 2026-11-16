@@ -118,9 +118,9 @@ understanding:
     enabled: false
     backend: local                # local | cloud: one of the endpoints above
     window: "01:00-07:00"         # local time, may wrap midnight; back to back inside it
-    outside_window: trickle       # trickle | off
-    trickle_every: 10m            # outside the window, at most one clip this often
-    max_clips_per_day: 150
+    outside_window: trickle       # trickle: free moments and turns | off
+    trickle_every: 30m            # outside the window: a turn after this long without a clip
+    max_clips_per_day: null       # a safety valve; null: no cap
     lookback: 36h                 # events this recent are queued
     frames: 8                     # per clip
     frames_per_call: null         # default: all of them in one look (at most 8)

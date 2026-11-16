@@ -239,7 +239,8 @@ class AppRuntime:
         endpoint = dataclasses.replace(
             endpoint_for(self.config, VlmBackend(deep.backend)),
             max_output_tokens=deep.max_output_tokens,
-            max_calls_per_day=deep.max_clips_per_day * 8,  # the clip cap is the real limit
+            # the clip cap, when set, is the real limit; the calls budget only stops a runaway
+            max_calls_per_day=(deep.max_clips_per_day or 2000) * 8,
         )
         client = VlmClient(endpoint, ledger=KeyedLedger(self.vlm_ledger, "deep-"))
         self._vlm_clients.append(client)

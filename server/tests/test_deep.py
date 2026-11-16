@@ -461,16 +461,29 @@ async def test_outside_the_window_the_worker_takes_a_turn_while_the_live_judge_w
         tmp_path, fake, [noon], window="01:00-07:00", trickle_every="10m"
     )
     worker._live_busy = lambda: True  # a busy day: the live judge never rests
-    await insert(
-        db,
-        tmp_path / "street",
-        "20261114-110000",
-        started=noon - 7200,
-        verdict=PASSER,
-        state="dismissed",
-    )
+    for clip in ("20261114-110000", "20261114-110100"):
+        await insert(db, tmp_path / "street", clip, started=noon - 7200, verdict=PASSER,
+                     state="dismissed")  # fmt: skip
+    assert await worker.step() == 5.0 and worker.status.waiting_for == "the live judge"
+    assert fake.requests == [], "no clip finished for a while yet: free moments only"
+    worker._last_progress = noon - 601  # starving for trickle_every: a turn of its own
     assert await worker.step() == 0.0
     [job] = await db.deep_jobs(state="done")
-    assert job.stats["mode"] == "trickle"
-    assert await worker.step() > 0  # the next one waits for the trickle
+    assert job.stats["mode"] == "turn"
+    assert await worker.step() == 5.0, "after a turn, free moments again"
+
+
+async def test_by_day_every_free_moment_of_the_slot_is_used(tmp_path: Path) -> None:
+    fake = FakeVlmApi(answer=answer, slots=[False])
+    noon = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).timestamp()
+    worker, db, _gate, _slept = await make_worker(
+        tmp_path, fake, [noon], window="01:00-07:00", trickle_every="30m"
+    )
+    for clip in ("20261114-110000", "20261114-110100"):
+        await insert(db, tmp_path / "street", clip, started=noon - 7200, verdict=PASSER,
+                     state="dismissed")  # fmt: skip
+    assert await worker.step() == 0.0 and await worker.step() == 0.0, "no cap, no pause"
+    jobs = await db.deep_jobs(state="done")
+    assert [j.stats["mode"] for j in jobs] == ["free", "free"]
+    await db.close()
     await db.close()

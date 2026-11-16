@@ -62,13 +62,13 @@ def run(args: argparse.Namespace) -> int:
             return 2
 
 
-def _status(conn: sqlite3.Connection, cap: int, last: int) -> int:
+def _status(conn: sqlite3.Connection, cap: int | None, last: int) -> int:
     today = datetime.now().date().isoformat()
     states = dict(conn.execute("SELECT state, COUNT(*) FROM deep_jobs GROUP BY state").fetchall())
     used = conn.execute(
         "SELECT COUNT(*) FROM deep_jobs WHERE day = ? AND state IN ('done', 'failed')", (today,)
     ).fetchone()[0]
-    print(f"queue: {json.dumps(states)}; today {used}/{cap}")
+    print(f"queue: {json.dumps(states)}; today {used}" + (f"/{cap}" if cap else ""))
     rows = conn.execute(
         "SELECT j.*, e.deep FROM deep_jobs j LEFT JOIN events e ON e.id = j.event_id"
         " WHERE j.state IN ('done', 'failed') ORDER BY j.done_at DESC LIMIT ?",

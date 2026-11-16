@@ -350,9 +350,12 @@ class DeepConfig(StrictModel):
     enabled: bool = False
     backend: Literal["local", "cloud"] = "local"  # which understanding.vlm endpoint
     window: str = "01:00-07:00"  # local time; may wrap midnight ("22:00-06:00")
+    # Outside the window, "trickle": every moment the slot is free (live calls take it back
+    # at once), and when no clip finished for `trickle_every`, one clip as a turn of its own
+    # that live calls wait for; "off": nothing outside the window.
     outside_window: Literal["trickle", "off"] = "trickle"
-    trickle_every: str = "10m"  # outside the window: at most one clip this often
-    max_clips_per_day: int = Field(default=150, ge=1, le=10000)
+    trickle_every: str = "30m"
+    max_clips_per_day: int | None = Field(default=None, ge=1)  # a safety valve; none: no cap
     lookback: str = "36h"  # events this recent are considered
     frames: int = Field(default=8, ge=1, le=24)  # per clip, shown `frames_per_call` at a time
     frames_per_call: int | None = Field(default=None, ge=1, le=8)  # default: the judge's

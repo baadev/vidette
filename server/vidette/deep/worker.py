@@ -9,16 +9,15 @@
      labels.yaml ◀── disputed / uncertain clips as review drafts (label_disputes)
 
 When it runs: always one request at a time, through the process's shared slot
-(vidette.vlm.gate). Inside `window` (01:00-07:00 by default) it runs back to back but
-only while the live judge rests: it waits while the live judge or the assistant use the
-slot, and a live call that arrives cancels the deep request (the job goes back to the
-queue, the frames already described are kept for the retry). Outside the window it takes
-one clip every `trickle_every` as a turn of its own, in line with live calls and not
-cancelled, so a live judge that never rests (a busy day) waits for one deep request now
-and then instead of starving it; `outside_window: off` leaves the day to the live judge.
-Before every request it asks the server's `/slots` and sends only when `min_idle_slots`
-are idle; otherwise it backs off, 15 s doubling to 5 min, so it never takes another
-tenant's slot. At most `max_clips_per_day` clips are analysed per local day.
+(vidette.vlm.gate), whenever that slot is free: the live judge and the assistant always
+come first, and a live call that arrives cancels the deep request in flight (the job goes
+back to the queue, the frames already described are kept for the retry). Outside
+`window` (01:00-07:00 by default) a live judge that never rests (a busy day) could starve
+it, so when no clip finished for `trickle_every` the next one is a turn of its own: in
+line with live calls and not cancelled. `outside_window: off` leaves the day to the live
+judge. Before every request it asks the server's `/slots` and sends only when
+`min_idle_slots` are idle; otherwise it backs off, 15 s doubling to 5 min, so it never
+takes another tenant's slot. `max_clips_per_day`, when set, is a safety valve.
 
 Why inside serve and not a separate agent: the one slot is shared with the live judge
 and the assistant, and only one process can see all three and let live calls go first;
@@ -149,9 +148,9 @@ class DeepWorker:
         self._live_busy = live_busy  # incidents waiting for the live judge
         self._task: asyncio.Task[None] | None = None
         self._last_refill = 0.0
-        self._last_started = 0.0
+        self._last_progress = clock()  # the last clip finished (a turn is due after a while)
         self._partial: dict[str, list[Look]] = {}  # looks of a preempted job, for its retry
-        self._preemptible = True  # night: yield to live calls; day trickle: a turn of its own
+        self._preemptible = True  # free moments yield to live calls; a turn does not
         self.status = DeepStatus()
 
     # --- lifecycle -------------------------------------------------------------------------
@@ -224,16 +223,18 @@ class DeepWorker:
         return self.deep.in_window(local.hour * 60 + local.minute)
 
     async def allowed_in(self) -> float:
-        """Seconds until the next clip may start (0: now), from the cap, the window and
-        the trickle pace."""
+        """Seconds until the next clip may start (0: now), from the cap (when set) and
+        `outside_window: off`."""
         now = self._clock()
         local = datetime.fromtimestamp(now)
         midnight_next = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() + 86400
-        counts = await self.db.deep_counts(day=_day(now))
-        used = counts.get("done", 0) + counts.get("failed", 0)
-        if used >= self.deep.max_clips_per_day:
-            self.status.waiting_for = f"daily cap {used}/{self.deep.max_clips_per_day}"
-            return max(60.0, midnight_next - now + 1)
+        cap = self.deep.max_clips_per_day
+        if cap is not None:
+            counts = await self.db.deep_counts(day=_day(now))
+            used = counts.get("done", 0) + counts.get("failed", 0)
+            if used >= cap:
+                self.status.waiting_for = f"daily cap {used}/{cap}"
+                return max(60.0, midnight_next - now + 1)
         minute = local.hour * 60 + local.minute
         if self.deep.in_window(minute):
             return 0.0
@@ -242,11 +243,14 @@ class DeepWorker:
             until = (start - minute) % 1440
             self.status.waiting_for = f"window {self.deep.window}"
             return max(60.0, until * 60.0 - local.second)
-        since = now - self._last_started
-        if since < self.deep.trickle_every_s:
-            self.status.waiting_for = f"trickle every {self.deep.trickle_every}"
-            return self.deep.trickle_every_s - since
         return 0.0
+
+    def turn_due(self) -> bool:
+        """Outside the window, after `trickle_every` without a finished clip: the next one
+        is a turn the live judge waits for."""
+        if self.in_window() or self.deep.outside_window != "trickle":
+            return False
+        return self._clock() - self._last_progress >= self.deep.trickle_every_s
 
     async def step(self) -> float:
         """One turn of the loop: refill, then run one job if allowed; how long to sleep."""
@@ -254,8 +258,8 @@ class DeepWorker:
         wait = await self.allowed_in()
         if wait > 0:
             return min(wait, IDLE_SLEEP_S)
-        night = self.in_window()
-        if night and (self._live_busy() or self.gate.busy or self.gate.live_waiting):
+        turn = self.turn_due()
+        if not turn and (self._live_busy() or self.gate.busy or self.gate.live_waiting):
             self.status.waiting_for = "the live judge"
             return 5.0
         now = self._clock()
@@ -266,8 +270,7 @@ class DeepWorker:
             self.status.waiting_for = "nothing queued"
             return IDLE_SLEEP_S
         self.status.waiting_for = None
-        self._last_started = now
-        await self.run_job(job, preemptible=night)
+        await self.run_job(job, preemptible=not turn)
         return 0.0
 
     # --- one job ---------------------------------------------------------------------------
@@ -375,6 +378,7 @@ class DeepWorker:
                 day=_day(self._clock()) if state == "failed" else None, stats=stats,
             )  # fmt: skip
             logger.info("deep %s: %s (%s)", row.id, message[:200], state)
+            self._last_progress = self._clock()
             if state == "failed" or not isinstance(error, DeepError):
                 await self._failed(message)
             return
@@ -393,7 +397,7 @@ class DeepWorker:
                 ],
                 "frames": len(result.frames.paths),
                 "agreement": record["agreement"],
-                "mode": "night" if preemptible else "trickle",
+                "mode": "free" if preemptible else "turn",
             }
         )  # fmt: skip
         if self.status.slot_checks > checks and self.status.slots:
@@ -405,6 +409,7 @@ class DeepWorker:
         )
         self.status.analysed += 1
         self.status.last_at = done
+        self._last_progress = done
         if record["agreement"] == "disputed":
             self.status.disputed += 1
         elif record["agreement"] == "uncertain":

@@ -35,16 +35,18 @@ judge should become labelling work, so a person reviews only where the judges pa
 - **A persistent queue** (`deep_jobs`, one row per event, in the server's database): the
   last 36 hours of events with people, faces, vehicles, alerts, or never judged, by
   priority (alerts first, never-judged last), newest first. Running jobs go back to the
-  queue at start; a job fails after three attempts; at most `max_clips_per_day`.
+  queue at start; a job fails after three attempts; `max_clips_per_day` is an optional
+  safety valve (no cap by default).
 - **One slot for everything** (`vidette.vlm.gate.SlotGate`): the live judge and the
   assistant take the process's slot in turn; deep analysis takes it only when it is free
   and nothing live waits, and a live call that arrives cancels the deep request (the job
   goes back, its finished looks kept). Before each request the worker reads the server's
   `GET /slots` and sends only when a slot is idle, backing off from 15 s to 5 min.
-- **When**: back to back inside `window` (01:00-07:00 by default), yielding to live calls
-  as above; outside it one clip every `trickle_every` (10 min) as a turn of its own (in
-  line with live calls, not cancelled: on a busy day the live judge never rests and a
-  yielding trickle would never run), or nothing (`outside_window: off`).
+- **When**: every moment the shared slot is free, day and night, yielding to live calls as
+  above. Outside `window` (01:00-07:00 by default), when no clip finished for
+  `trickle_every` (30 min), the next one is a turn of its own (in line with live calls, not
+  cancelled: on a busy day the live judge hardly rests and free moments alone could starve
+  it); `outside_window: off` keeps it to the window.
 - **Inside `vidette serve`**, not a separate agent: only one process can see the live
   judge, the assistant and deep analysis together and let the live ones go first; the
   event database has one writer (ADR-0008); the digest that quotes the deep descriptions
@@ -57,12 +59,17 @@ judge should become labelling work, so a person reviews only where the judges pa
 
 ## Consequences
 
-- At night live verdicts wait for nothing new: a deep request can be thrown away by a live
-  one. By day a live verdict may wait for one deep request once per `trickle_every`; on a
-  test deployment the live judge kept the slot busy all day, so without the turn deep
-  analysis would only ever run at night.
-- Deep calls are counted apart from the live judge's (`deep-local` in the usage ledger);
-  the clip cap is the real limit.
+- Live verdicts wait for nothing new: a deep request can be thrown away by a live one. Only
+  a turn makes a live verdict wait for one deep request, and only after `trickle_every`
+  without a finished clip; on a test deployment the live judge kept the slot busy most of
+  the day.
+- Deep calls are counted apart from the live judge's (`deep-local` in the usage ledger).
+  First a fixed cap (150 clips a day) was the limit; it left the slot idle at night while
+  thousands of clips waited, so the free slot itself is the limit now, a cap only a
+  safety valve.
+- A cancelled request is only free capacity if the server stops working on it when the
+  connection closes (llama.cpp does for closed connections); a server that does not would
+  run it to the end next to the live call.
 - More frames than the live judge are only as useful as the slot's context allows: with
   2048 tokens per slot eight 640-pixel frames fit in one look only because the policy is
   left out of it.

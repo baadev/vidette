@@ -29,9 +29,11 @@ released; no images published from it; the last release is v0.1.3.
   verdict (`events.deep`), compared with it (agree, disputed, uncertain, only deep);
   disputed and uncertain clips become `status: draft` entries in their dataset with both
   verdicts in `notes`. A persistent queue (`deep_jobs`) with priorities, retries, a
-  daily cap, a night window (01:00-07:00) and a trickle outside it. One model slot per
-  server for the whole process (`vidette.vlm.gate`): the live judge and the assistant go
-  first and take the slot back from a deep request; before each request the server's
+  night window (01:00-07:00); it uses every moment the slot is free, and outside the
+  window takes a turn of its own after `trickle_every` without a finished clip; no daily
+  cap unless `max_clips_per_day` is set. One model slot per server for the whole process
+  (`vidette.vlm.gate`): the live judge and the assistant go first and take the slot back
+  from a deep request; before each request the server's
   `/slots` must show an idle slot, else it backs off. The evening digest quotes deep
   descriptions and lists what only the deep look flagged. `vidette deep status | show`.
 - **Identity merge pass** ([ADR-0018](docs/architecture/adr/0018-identity-merge-pass.md),
