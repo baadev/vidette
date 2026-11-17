@@ -80,7 +80,8 @@ def rank(klass: TriageClass, reason: str | None) -> int:
         return RANK_SKIP
     if klass is TriageClass.later:
         return RANK_LATER
-    return RANK_SECOND if reason in SECOND_TIER else RANK_PEOPLE
+    base = (reason or "").removeprefix("early_")  # carried over from the early window
+    return RANK_SECOND if base in SECOND_TIER else RANK_PEOPLE
 
 
 @dataclass(frozen=True)

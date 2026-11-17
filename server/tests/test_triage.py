@@ -71,6 +71,8 @@ def test_a_person_or_a_weak_person_candidate_is_judged_now() -> None:
     assert rank(TriageClass.now, "person") == RANK_PEOPLE
     assert rank(TriageClass.now, "possible_person") == rank(TriageClass.now, "vehicle")
     assert rank(TriageClass.now, "possible_person") < rank(TriageClass.later, "motion")
+    assert rank(TriageClass.now, "early_possible_person") == rank(TriageClass.now, "vehicle")
+    assert rank(TriageClass.now, "early_person") == RANK_PEOPLE
 
 
 def test_parked_cars_do_not_count_and_a_moving_one_does() -> None:
