@@ -184,6 +184,13 @@ EN: dict[str, str] = {
     "linked.same_person": "the same person by face",
     "linked.person_no_face": "a person in view, no face to compare",
     "linked.nothing": "{names}: nothing recorded at that time (the camera slept or nothing moved)",
+    # the incident across cameras (ADR-0022)
+    "incident.face": "🔗 The same person (by face): {camera}, {time}",
+    "incident.look": "🔗 Probably the same person (clothes and timing): {camera}, {time}",
+    "incident.time": "🔗 At the same time a person: {camera}, {time}",
+    "incident.missed": " (the judge had let it pass)",
+    "incident.approx": "about {time}",
+    "incident.digest": "🔗 With it: {parts}",
     "event.deleted": "The event is already deleted.",
     "event.deleted_short": "The event is deleted",
     # the digest
@@ -501,6 +508,13 @@ RU: dict[str, str] = {
     "linked.same_person": "тот же человек по лицу",
     "linked.person_no_face": "человек в кадре, но лицо не сравнить",
     "linked.nothing": "{names}: в это время ничего не записано (камера спала или движения не было)",
+    # происшествие на нескольких камерах (ADR-0022)
+    "incident.face": "🔗 Тот же человек (по лицу): {camera}, {time}",
+    "incident.look": "🔗 Похоже, тот же человек (одежда и время): {camera}, {time}",
+    "incident.time": "🔗 В это же время человек: {camera}, {time}",
+    "incident.missed": " (судья это пропустил)",
+    "incident.approx": "около {time}",
+    "incident.digest": "🔗 Вместе с ним: {parts}",
     "event.deleted": "Событие уже удалено.",
     "event.deleted_short": "Событие удалено",
     "months": "января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря",

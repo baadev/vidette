@@ -17,7 +17,7 @@ from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from vidette.api.errors import problem
 from vidette.api.routers.people import EventPeopleOut, event_people
@@ -54,6 +54,50 @@ class GeometryOut(BaseModel):
     repeat_pass: int = 0
 
 
+class IncidentLinkOut(BaseModel):
+    event_id: str
+    camera: str
+    at: float
+    evidence: Literal["face", "look", "time"]  # look: clothes and timing, never a face
+    state: str | None = None
+    label: str | None = None
+    approximate: bool = False
+
+
+class IncidentOut(BaseModel):
+    """`role: alert`: this event alerted and `links` are the other cameras' events;
+    `role: linked`: this event is one of those, `links` holds the alert."""
+
+    id: str | None = None
+    role: Literal["alert", "linked"]
+    reopened: bool = False  # dismissed by the judge, the same person as a critical alert
+    links: list[IncidentLinkOut] = Field(default_factory=list)
+
+
+def event_incident(row: EventRow) -> IncidentOut | None:
+    raw = (row.intent or {}).get("incident")
+    if not isinstance(raw, dict) or raw.get("role") not in ("alert", "linked"):
+        return None
+    try:
+        if raw["role"] == "alert":
+            links = [
+                IncidentLinkOut.model_validate(link) for link in raw.get("links") or []
+                if isinstance(link, dict)
+            ]  # fmt: skip
+            return IncidentOut(id=raw.get("id"), role="alert", links=links)
+        alert = IncidentLinkOut(
+            event_id=str(raw.get("alert")), camera=str(raw.get("alert_camera") or ""),
+            at=float(raw.get("alert_at") or row.started_at),
+            evidence=raw.get("evidence") or "time", label=raw.get("alert_label"),
+            state="confirmed",
+        )  # fmt: skip
+        return IncidentOut(
+            id=raw.get("id"), role="linked", reopened=bool(raw.get("reopened")), links=[alert]
+        )
+    except (ValidationError, ValueError, TypeError):
+        return None
+
+
 class EventOut(BaseModel):
     id: str
     camera: str
@@ -72,6 +116,7 @@ class EventOut(BaseModel):
     source: str | None = None  # "frigate" since v0.2
     upstream: dict[str, Any] | None = None  # what Frigate said: severity, its GenAI summary
     people: EventPeopleOut | None = None  # the local face check, when known people are on
+    incident: IncidentOut | None = None  # the other cameras' events tied to it (ADR-0022)
 
 
 class FeedbackIn(BaseModel):
@@ -107,6 +152,7 @@ def _event_out(row: EventRow) -> EventOut:
         source=row.source,
         upstream=row.upstream,
         people=event_people(row.id, (row.intent or {}).get("people")),
+        incident=event_incident(row),
     )
 
 

@@ -49,6 +49,7 @@ from vidette.deep.worker import DeepWorker
 from vidette.events.intake import EventIntake
 from vidette.frigate.client import FrigateClient
 from vidette.frigate.source import FrigateSource
+from vidette.incident.service import IncidentService
 from vidette.notify.apprise_channel import AppriseNotifier
 from vidette.notify.dispatcher import NotificationDispatcher
 from vidette.notify.mqtt import MqttPublisher
@@ -149,6 +150,14 @@ class AppRuntime:
                     f"understanding.triage: {self.triage.error}; clips are ordered but none "
                     "is skipped until the detector loads (`vidette triage models`)"
                 )
+        # what happened across cameras (ADR-0022): incident mode and the links
+        self.incidents: IncidentService | None = None
+        if config.incident.enabled:
+            self.incidents = IncidentService(
+                config, self.db, self.bus,
+                detector=self.triage.detector if self.triage is not None else None,
+                work_dir=config.storage.media_dir,
+            )  # fmt: skip
         self.verdicts = VerdictWorker(
             config,
             self.bus,
@@ -162,6 +171,7 @@ class AppRuntime:
             calibration=self.calibration,
             triage=self.triage,
             slot_idle=self._slot_idle,
+            incidents=self.incidents,
         )
         self.telegram: TelegramService | None = None
         telegram = config.notifications.telegram
@@ -177,6 +187,7 @@ class AppRuntime:
                 judge_status=self.judge_line,
                 gate_for=self.gate_for,
                 calibration=self.calibration,
+                incidents=self.incidents,
             )
         self.deep: DeepWorker | None = None
         if config.understanding.deep.enabled:
@@ -384,6 +395,8 @@ class AppRuntime:
         self.notifier.start()  # sync: spawns one consumer task per notification rule
         self.mqtt.start()  # sync too; no-op unless integrations.mqtt.enabled
         self.intake.start()  # incidents → event rows, state observed
+        if self.incidents is not None:
+            self.incidents.start()  # alerts → incident mode and links (ADR-0022)
         self.verdicts.start()  # closed incidents → confirmed / dismissed (VLM judge)
         if self.telegram is not None:
             self.telegram.start()  # alerts, digests, commands and buttons (ADR-0013)
@@ -412,6 +425,8 @@ class AppRuntime:
             stops.append(("frigate source", self.frigate_source.stop))
         if self.telegram is not None:
             stops.append(("telegram", self.telegram.stop))
+        if self.incidents is not None:
+            stops.append(("incidents", self.incidents.stop))
         stops += [
             ("verdicts", self.verdicts.stop),
             ("intake", self.intake.stop),

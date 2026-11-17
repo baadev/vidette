@@ -165,6 +165,7 @@ class AlertFacts:
     video_note: str | None = None  # a link when the clip was too big to send
     stream_note: str | None = None  # "The recording paused…" (stream_note())
     late: float | None = None  # sent late: when it was due, and Telegram could not be reached
+    incident: tuple[str, ...] = ()  # the other cameras' events linked to it (ADR-0022)
 
 
 def alert_text(facts: AlertFacts, *, now: float) -> str:
@@ -182,6 +183,7 @@ def alert_text(facts: AlertFacts, *, now: float) -> str:
     lines.append(f"👤 {facts.who}")
     if facts.description:
         lines.append(f"💬 {escape(facts.description)}")
+    lines += [escape(line) for line in facts.incident]
     if facts.stream_note:
         lines.append(f"📼 {escape(facts.stream_note)}")
     if facts.video_note:
@@ -194,6 +196,47 @@ def alert_text(facts: AlertFacts, *, now: float) -> str:
     if facts.mark:
         lines.append(facts.mark)
     return truncate("\n".join(lines))
+
+
+def incident_lines(
+    incident: Mapping[str, Any] | None,
+    *,
+    camera_name: Callable[[str], str],
+    titles: Callable[[str | None], str],
+    now: float,
+    limit: int = 3,
+    same_person_only: bool = False,
+) -> list[str]:
+    """The alert's links to other cameras (ADR-0022), strongest first: one plain line each,
+    "the same person by face", "probably the same person", or "a person at the same
+    time", with that camera, its time (approximate for a camera whose video arrives late)
+    and what the judge said there."""
+    if not isinstance(incident, Mapping) or incident.get("role") != "alert":
+        return []
+    lines: list[str] = []
+    for link in (incident.get("links") or [])[:limit]:
+        if not isinstance(link, Mapping) or not isinstance(link.get("at"), int | float):
+            continue
+        evidence = str(link.get("evidence") or "time")
+        if same_person_only and evidence not in ("face", "look"):
+            continue
+        when = clock(float(link["at"]), now=now, seconds=False)
+        if link.get("approximate"):
+            when = t("incident.approx", time=when)
+        key = f"incident.{evidence}" if evidence in ("face", "look") else "incident.time"
+        line = t(key, camera=camera_name(str(link.get("camera"))), time=when)
+        what = link.get("rationale") or titles(link.get("label"))
+        if what:
+            line += f": {_short(str(what))}"
+        if link.get("state") == "dismissed" and evidence in ("face", "look"):
+            line += t("incident.missed")
+        lines.append(line)
+    return lines
+
+
+def _short(text: str, limit: int = 110) -> str:
+    text = " ".join(text.split()).rstrip(".")
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def upgrade_text(facts: AlertFacts, *, now: float) -> str:
@@ -419,6 +462,7 @@ class DayDigest:
     last_unanswered: tuple[float, str] | None = None  # (time, camera name)
     reasons: Counter[str] = field(default_factory=Counter)  # the reasons' short words
     notable: list[DigestItem] = field(default_factory=list)  # confirmed, did not wake here
+    incidents: list[str] = field(default_factory=list)  # alerts tied to other cameras (ADR-0022)
     ordinary: Counter[str] = field(default_factory=Counter)  # titles of ordinary scenarios
     unjudged: int = 0
     unjudged_why: Counter[str] = field(default_factory=Counter)
@@ -452,6 +496,7 @@ def day_digest_text(day: DayDigest, *, now: float, evening: bool) -> str:
         lines.append(t("digest.alerts", n=day.alerts, marks=said))
     else:
         lines.append(t("digest.no_alerts"))
+    lines += [escape(line) for line in day.incidents[-4:]]
     if day.reasons:
         common = ", ".join(f"{escape(word)} ({k})" for word, k in day.reasons.most_common(3))
         lines.append(t("digest.common_false", list=common))

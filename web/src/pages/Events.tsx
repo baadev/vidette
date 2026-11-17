@@ -10,6 +10,8 @@ import {
   type Identity,
   type SeenPerson,
   type Linked,
+  type EventIncident,
+  type IncidentLink,
 } from "../api";
 import "./pages.css";
 
@@ -391,6 +393,9 @@ function EventCard({
             </p>
           )}
           {event.summary && <p className="event-summary">{event.summary}</p>}
+          {event.incident && event.incident.links.length > 0 && (
+            <IncidentLine incident={event.incident} />
+          )}
           {!event.summary && event.upstream?.summary?.text && (
             <p className="event-summary muted">Frigate: {event.upstream.summary.text}</p>
           )}
@@ -461,6 +466,40 @@ function EventCard({
         </div>
       )}
     </li>
+  );
+}
+
+const EVIDENCE_WORDS: Record<IncidentLink["evidence"], string> = {
+  face: "the same person (face)",
+  look: "probably the same person (clothes, timing)",
+  time: "a person at the same time",
+};
+
+/**
+ * The incident across cameras (ADR-0022): for an alert, the other cameras' events tied to
+ * it; for one of those, the alert it belongs to. The same person only by a face, or
+ * "probably" by clothes and timing.
+ */
+function IncidentLine({ incident }: { incident: EventIncident }) {
+  const head =
+    incident.role === "alert"
+      ? "With this alert"
+      : `Part of an alert${incident.reopened ? " (the judge had let this one pass)" : ""}`;
+  return (
+    <div className="event-summary" aria-label="Incident across cameras">
+      <span>🔗 {head}:</span>
+      <ul className="linked-list">
+        {incident.links.map((link) => (
+          <li key={link.event_id} className="linked-item">
+            {link.camera} {link.approximate ? "≈" : ""}
+            {formatLocalClock(link.at)}
+            {link.label ? ` · ${link.label.replaceAll("_", " ")}` : ""}
+            {incident.role === "alert" ? ` · ${EVIDENCE_WORDS[link.evidence]}` : ""}
+            {link.state === "dismissed" && link.evidence !== "time" ? " · judged ordinary" : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

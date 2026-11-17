@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -79,6 +79,9 @@ from vidette.vlm.budget import MetaLedger
 from vidette.vlm.endpoint import VlmEndpoint
 from vidette.vlm.gate import SlotGate
 
+if TYPE_CHECKING:
+    from vidette.incident.service import IncidentService
+
 logger = logging.getLogger(__name__)
 
 EmitCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -91,6 +94,8 @@ RESEND_RETRY_S = (30.0, 300.0)  # the same for alerts waiting in the queue
 _REDO_RANK = {"edit": 0, "refresh": 1, "send": 2}  # what waits in the queue: more covers less
 COMMAND_MAX_AGE_S = 600.0  # commands sent while the bot was down longer ago are ignored
 ALERT_TOPIC = "event.confirmed"
+INCIDENT_WAIT_S = 8.0  # the alert waits this long for its links to other cameras, no more
+LINKED_MEDIA = 2  # the same person's other clips sent under an alert, at most
 REFRESH_TOPICS = frozenset({"event.updated", "event.dismissed"})  # the whole clip, judged
 EARLY_MARK = ".early"  # a clip path inside a dataset's early windows
 MAX_DIGEST_EVENTS = 5000
@@ -183,6 +188,7 @@ class TelegramService:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         gate_for: Callable[[VlmEndpoint], SlotGate] | None = None,
         calibration: Calibrator | None = None,
+        incidents: IncidentService | None = None,
     ) -> None:
         telegram = config.notifications.telegram
         if telegram is None:
@@ -200,6 +206,7 @@ class TelegramService:
         if calibration is not None:
             calibration.announce = self.announce_calibration
         self._identities = identities
+        self._incidents = incidents  # the other cameras' events linked to an alert
         # name prompts waiting for a reply: (chat, prompt message id) → (alert row, face,
         # status). In memory: after a restart the person taps the button again.
         self._prompts: dict[tuple[int, int], tuple[int, int, str]] = {}
@@ -457,9 +464,11 @@ class TelegramService:
     async def notify_event(self, row: EventRow, *, test: bool = False) -> list[TelegramMessageRow]:
         """Alert every recipient the routing says to wake. With `test`, every recipient
         gets it in the alerts topic, marked as a test, whatever the routing says."""
+        alert = row.state == EventState.confirmed.value
+        if alert and self._incidents is not None:
+            row = await self._with_incident(row)
         verdict = alerting_verdict(row.intent, row.policy)
         policy = self._policy(row.policy or verdict.get("policy"))
-        alert = row.state == EventState.confirmed.value
         wake = policy.wake_for(verdict.get("label")) if policy is not None else Wake.unless_quiet
         people = (row.intent or {}).get("people")
         people = people if isinstance(people, Mapping) and "seen" in people else None
@@ -497,6 +506,28 @@ class TelegramService:
             elif result is not None:
                 sent.append(result)
         return sent
+
+    async def _with_incident(self, row: EventRow) -> EventRow:
+        """The alert with its links to the other cameras (ADR-0022) when they are ready
+        within INCIDENT_WAIT_S; otherwise as it is, and the alert's text is edited once
+        they are."""
+        assert self._incidents is not None
+        work = asyncio.ensure_future(self._incidents.for_alert(row))
+        done, _pending = await asyncio.wait({work}, timeout=INCIDENT_WAIT_S)
+        if not done:
+
+            async def later() -> None:
+                await work
+                for message in await self.db.telegram_alerts_for_event(row.id):
+                    if message.kind == "alert" and message.message_id is not None:
+                        with contextlib.suppress(TelegramError):
+                            await self._render(message.id, keyboard="main")
+
+            self._spawn(later(), "incident links")
+            return row
+        if work.exception() is not None:
+            await self._failed("incident links", work.exception() or Exception())
+        return await self.db.get_event(row.id) or row
 
     @staticmethod
     def _why_digest(
@@ -559,6 +590,14 @@ class TelegramService:
             video_note=data.get("video_note"),
             stream_note=say.stream_note((row.intent or {}).get("stream")),
             late=float(data["late"]) if isinstance(data.get("late"), int | float) else None,
+            incident=tuple(
+                say.incident_lines(
+                    (row.intent or {}).get("incident"),
+                    camera_name=self.camera_name,
+                    titles=lambda label: self._scenario_title(policy, label) if label else "",
+                    now=self._clock(),
+                )
+            ),
         )
 
     async def _alert(
@@ -747,6 +786,11 @@ class TelegramService:
         except (TelegramError, OSError) as exc:
             failed = f"{type(exc).__name__}: {exc}"[:200]
             await self._failed("alert media", exc)
+        if failed is None:
+            try:
+                await self._send_linked(message, event)
+            except (TelegramError, OSError) as exc:
+                await self._failed("linked media", exc)
         early = EARLY_MARK in clip.parts if clip is not None else False
         data = await self._merge_data(
             row_id,
@@ -781,6 +825,43 @@ class TelegramService:
                 await self._attach_clip(latest, fresh, updated)
                 await self._merge_data(row_id, clip_attached=updated.get("clip_attached"),
                                        video_note=updated.get("video_note"))  # fmt: skip
+
+    async def _send_linked(self, message: TelegramMessageRow, event: EventRow) -> None:
+        """The same person on the other cameras (a face or the clothes said so): each
+        linked event's best frame, with its camera and time, then its clip, as replies to
+        the alert (ADR-0022)."""
+        incident = (event.intent or {}).get("incident")
+        if not isinstance(incident, Mapping) or incident.get("role") != "alert":
+            return
+        assert message.message_id is not None
+        links = [
+            link for link in incident.get("links") or []
+            if isinstance(link, Mapping) and link.get("evidence") in ("face", "look")
+        ][:LINKED_MEDIA]  # fmt: skip
+        for link in links:
+            linked = await self.db.get_event(str(link.get("event_id")))
+            if linked is None:
+                continue
+            frames, clip = self._media_for(linked)
+            lines = say.incident_lines(
+                {"role": "alert", "links": [link]}, camera_name=self.camera_name,
+                titles=lambda _label: "", now=self._clock(),
+            )  # fmt: skip
+            caption = escape(lines[0]) if lines else None
+            if frames:
+                upload = (frames[0].name, await asyncio.to_thread(frames[0].read_bytes),
+                          "image/jpeg")  # fmt: skip
+                await self.api.send_reply_file(
+                    message.chat_id, "photo", upload, reply_to=message.message_id,
+                    thread_id=message.thread_id, caption=caption,
+                )  # fmt: skip
+                caption = None
+            if clip is not None and clip.stat().st_size / 1_000_000 <= self.tg.max_video_mb:
+                upload = (clip.name, await asyncio.to_thread(clip.read_bytes), "video/mp4")
+                await self.api.send_reply_file(
+                    message.chat_id, "video", upload, reply_to=message.message_id,
+                    thread_id=message.thread_id, caption=caption,
+                )  # fmt: skip
 
     def _log_timing(
         self,
@@ -1947,6 +2028,14 @@ class TelegramService:
             review = review if isinstance(review, Mapping) else {}
             if row.id in alerted:
                 day.alerts += 1
+                strong = say.incident_lines(
+                    (row.intent or {}).get("incident"), camera_name=self.camera_name,
+                    titles=lambda _label: "", now=now, limit=3, same_person_only=True,
+                )  # fmt: skip
+                if strong:
+                    head = f"{say.clock(row.started_at, now=now)} {self.camera_name(row.camera)}"
+                    parts = "; ".join(line.removeprefix("🔗 ") for line in strong)
+                    day.incidents.append(t("incident.digest", parts=f"{head} ← {parts}"))
                 if row.feedback == "up":
                     day.right += 1
                 elif row.feedback == "down":

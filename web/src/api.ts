@@ -45,6 +45,29 @@ export type EventInfo = {
   upstream?: UpstreamFacts | null;
   /** The local face check (known people), when it is on; null when not checked. */
   people?: EventPeople | null;
+  /** The other cameras' events tied to this one (ADR-0022); null when there are none. */
+  incident?: EventIncident | null;
+};
+
+/** One event on another camera tied to an alert: by a face, by clothes and timing
+ * ("look", never a face), or only by time. */
+export type IncidentLink = {
+  event_id: string;
+  camera: string;
+  at: number;
+  evidence: "face" | "look" | "time";
+  state: string | null;
+  label: string | null;
+  approximate: boolean;
+};
+
+/** `alert`: this event alerted, `links` are the other cameras' events; `linked`: this
+ * event is one of those and `links` holds the alert. */
+export type EventIncident = {
+  id: string | null;
+  role: "alert" | "linked";
+  reopened: boolean;
+  links: IncidentLink[];
 };
 
 /** One person seen in an event: faces grouped across frames. */

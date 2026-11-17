@@ -172,6 +172,7 @@ def test_list_events_newest_first_full_shape(harness: Harness) -> None:
         "source": None,
         "upstream": None,
         "people": None,  # no face check: known people are off
+        "incident": None,  # no other camera tied to it (ADR-0022)
     }
     assert harness.db.list_calls == [(None, None, False, 50)]  # default limit is 50
 

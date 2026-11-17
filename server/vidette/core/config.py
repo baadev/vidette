@@ -1024,7 +1024,10 @@ class IncidentConfig(StrictModel):
     # Cameras a person can walk between in that time, camera → its neighbours (either
     # direction counts). Empty: every camera is every other's neighbour (one house).
     neighbours: dict[str, list[str]] = Field(default_factory=dict)
-    look: bool = True  # clothing colours as a cue when no face matches (needs OpenCV)
+    # Clothing colours (torso and legs, never the head) as a cue when no face matches,
+    # only to say "probably the same person" next to an alert (ADR-0022). Off by default:
+    # it is an appearance attribute, which Vidette otherwise never uses (ADR-0014).
+    look: bool = False
     look_threshold: float = Field(default=0.88, ge=0.5, le=1.0)  # coloured clothes
     look_threshold_grey: float = Field(default=0.95, ge=0.5, le=1.0)  # night infrared
     mode_file: Path | None = None  # default: incident-mode.json next to the database
