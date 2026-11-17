@@ -25,8 +25,10 @@ from vidette.collect.collector import CollectSettings
 from vidette.collect.continuous import (
     ContinuousCollector,
     ContinuousSettings,
+    chunks,
     clip_window,
     continuous_command,
+    uncovered,
 )
 from vidette.collect.disk import MB, DiskLimits
 from vidette.collect.motion import (
@@ -42,6 +44,7 @@ from vidette.collect.motion import (
 from vidette.collect.ring import Ring, Segment, cut, name_time, output_pattern, plan_cut
 from vidette.collect.target import RtspTarget
 from vidette.ffmpeg import probe
+from vidette.incident.mode import IncidentMode, IncidentWatch, read_incident, write_incident
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="needs ffmpeg"
@@ -217,6 +220,47 @@ def test_trim_keeps_size_age_open_segment_pending_clips_and_a_minimum(tmp_path: 
     assert [s.start for s in gone] == [1360.0, 1420.0]
 
 
+def test_trim_keeps_the_last_half_hour_past_the_size_cap_but_not_past_its_age(
+    tmp_path: Path,
+) -> None:
+    now = 10_000.0
+    ring = [seg(tmp_path, now - 3600 + 300 * n, size=100) for n in range(12)]
+    store = Ring(tmp_path)
+    # Over the size cap, but everything that ended in the last 30 min stays.
+    deleted = store.trim(
+        ring, max_bytes=100, max_age_s=10**9, now=now, min_keep=1, keep_after=now - 1800
+    )
+    assert all(s.end <= now - 1800 for s in deleted) and deleted
+    left = [s for s in ring if s not in deleted]
+    assert all(s.end > now - 1800 for s in left)
+    # Age still applies to young segments' elders (and the floor passes keep_after=None).
+    assert store.trim(left, max_bytes=0, max_age_s=10**9, now=now, min_keep=1) != []
+
+
+def test_uncovered_and_chunks_cover_what_no_clip_did() -> None:
+    assert uncovered(0, 30, [], min_s=0.5) == [(0, 30)]
+    assert uncovered(0, 30, [(5, 10), (8, 12), (20, 29.8)], min_s=0.5) == [(0, 5), (12, 20)]
+    assert uncovered(0, 10, [(0, 10)], min_s=0.5) == []
+    assert chunks(0, 70, 30) == [(0, 30), (30, 60), (60, 70)]
+
+
+def test_incident_file_merges_two_alerts_and_expires(tmp_path: Path) -> None:
+    path = tmp_path / "incident-mode.json"
+    first = IncidentMode(since=100.0, until=700.0, event_id="a", camera="front_door")
+    write_incident(path, first, now=150.0)
+    merged = write_incident(
+        path, IncidentMode(since=160.0, until=760.0, event_id="b", camera="street"), now=170.0
+    )
+    assert merged.since == 100.0 and merged.until == 760.0 and merged.event_id == "b"
+    assert read_incident(path) == merged
+    watch = IncidentWatch(path, clock=lambda: 700.0)
+    assert watch.active() == merged
+    assert IncidentWatch(path, clock=lambda: 800.0).active() is None
+    assert IncidentWatch(tmp_path / "missing.json").active() is None
+    path.write_text("{not json")
+    assert IncidentWatch(path).active() is None  # unreadable: no incident, never a crash
+
+
 @needs_ffmpeg
 async def test_cutting_at_a_segment_join_copies_from_both(tmp_path: Path) -> None:
     stream = encode_street_stream(tmp_path / "street.h264", seconds=8)
@@ -327,6 +371,7 @@ def continuous_for(**overrides: object) -> ContinuousSettings:
         "hwaccel": None,
         "stall_s": 5.0,
         "reconnect_s": (0.5, 2.0),
+        "ring_min_age_s": 0.0,  # the size bound is what most tests look at
     }
     values.update(overrides)
     return ContinuousSettings(**values)  # type: ignore[arg-type]
@@ -536,6 +581,100 @@ async def test_behind_a_base_station_404_means_asleep_and_is_checked_steadily(
     assert camera.stats.rejected_busy >= 5
     assert caplog.text.count("camera asleep (the base station") == 1
     assert collector.stats.clips == 1
+
+
+@pytest.fixture(scope="module")
+def still(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A street where nothing moves (only the masked clock blinks)."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("needs ffmpeg")
+    path = tmp_path_factory.mktemp("still") / "still.h264"
+    return encode_street_stream(path, motion=(100.0, 101.0))
+
+
+@needs_ffmpeg
+async def test_a_woken_stream_the_gate_saw_nothing_in_is_kept_whole(
+    tmp_path: Path, still: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """On a test deployment five woken streams of one incident were dropped because the
+    motion gate saw nothing; a base station's camera only streams when its sensor fired."""
+    camera = FakeRtspCamera(still)
+    await camera.reserve_port()
+    await camera.wake(6)  # a short wake, then asleep (closed)
+    dataset = tmp_path / "street"
+    collector = ContinuousCollector(
+        RtspTarget.parse(camera.url(), "t"),
+        settings_for(dataset, base_station=True, probe_every_s=0.3, min_seconds=3.0),
+        continuous_for(),
+    )
+    caplog.set_level(logging.INFO)
+    await run_until(collector, asyncio.Event(), lambda: collector.stats.clips >= 1, timeout=40)
+    await camera.sleep()
+    sidecars = sorted((dataset / "clips").glob("*.json"))
+    assert len(sidecars) == 1, caplog.text
+    meta = ClipMeta.model_validate(json.loads(sidecars[0].read_text()))
+    assert meta.trigger == "wake" and "woke" in meta.stop_reason
+    assert collector.counters.events == 0 and collector.counters.woken == 1
+    assert meta.duration_s >= 1.0
+
+
+@needs_ffmpeg
+async def test_a_base_station_camera_is_looked_at_again_at_once_after_each_wake(
+    tmp_path: Path, still: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No 5, 10, 20 s backoff while the camera keeps waking: the next wake is caught."""
+    camera = FakeRtspCamera(still)
+    await camera.reserve_port()
+    await camera.wake(2)
+    collector = ContinuousCollector(
+        RtspTarget.parse(camera.url(), "t"),
+        settings_for(tmp_path / "d", base_station=True, probe_every_s=0.3,
+                     base_reconnect_s=0.2),
+        continuous_for(reconnect_s=(5.0, 300.0)),
+    )  # fmt: skip
+    caplog.set_level(logging.INFO)
+
+    async def wakes_again() -> None:
+        for _ in range(2):
+            await asyncio.sleep(3.0)
+            await camera.wake(2)
+
+    waking = asyncio.create_task(wakes_again())
+    await run_until(collector, asyncio.Event(), lambda: collector.stats.sessions >= 3, timeout=40)
+    await waking
+    await camera.sleep()
+    assert collector.stats.sessions >= 3
+    assert "reconnecting in 5.0 s" not in caplog.text and "reconnecting in 10 s" not in caplog.text
+
+
+@needs_ffmpeg
+async def test_incident_mode_keeps_what_the_gate_did_not_cut(
+    tmp_path: Path, street: Path
+) -> None:
+    """During an incident every stretch of the stream is kept, not only the motion."""
+    camera = FakeRtspCamera(street)
+    await camera.reserve_port()
+    await camera.wake(120)
+    flag = tmp_path / "incident-mode.json"
+    write_incident(
+        flag, IncidentMode(since=time.time() - 5, until=time.time() + 600, event_id="e",
+                           camera="front_door"),
+    )  # fmt: skip
+    dataset = tmp_path / "street"
+    collector = ContinuousCollector(
+        RtspTarget.parse(camera.url(), "t"),
+        settings_for(dataset, incident_file=flag),
+        continuous_for(incident_chunk_s=3.0),
+    )
+    await run_until(
+        collector, asyncio.Event(), lambda: collector.counters.incident >= 2, timeout=40
+    )
+    await camera.sleep()
+    metas = [
+        ClipMeta.model_validate(json.loads(p.read_text()))
+        for p in sorted((dataset / "clips").glob("*.json"))
+    ]
+    assert any(m.trigger == "wake" and "incident" in m.stop_reason for m in metas)
 
 
 # --- command line ----------------------------------------------------------------------

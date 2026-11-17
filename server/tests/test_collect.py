@@ -473,6 +473,45 @@ async def test_short_wake_periods_are_dropped(tmp_path: Path, stream: Path) -> N
     assert not list((tmp_path / "d" / ".partial").glob("*"))
 
 
+@needs_ffmpeg
+async def test_a_short_wake_behind_a_base_station_is_kept_not_dropped(
+    tmp_path: Path, stream: Path
+) -> None:
+    """The camera's own sensor woke it: a 1-2 s stream is evidence, not noise (ADR-0022)."""
+    camera = FakeRtspCamera(stream)
+    await camera.reserve_port()
+    await camera.wake(1.5)
+    settings = fast_settings(
+        tmp_path / "d", min_seconds=3.0, base_station=True, wake_min_seconds=0.5
+    )
+    collector = Collector(RtspTarget.parse(camera.url(), "t"), settings)
+    stop = asyncio.Event()
+    await run_until(collector, stop, lambda: collector.stats.clips >= 1, timeout=15)
+    await camera.sleep()
+    assert collector.stats.clips == 1
+    assert len(list((tmp_path / "d" / "clips").glob("*.mp4"))) == 1
+
+
+def test_during_an_incident_anything_is_kept_and_a_base_station_wake_is_short(
+    tmp_path: Path,
+) -> None:
+    from vidette.incident.mode import IncidentMode, write_incident
+
+    flag = tmp_path / "incident-mode.json"
+    target = RtspTarget.parse("rtsp://127.0.0.1:1/x", "t")
+
+    def collector(**overrides: object) -> Collector:
+        return Collector(target, fast_settings(tmp_path / "d", min_seconds=3.0, **overrides))
+
+    assert collector().min_keep_s() == 3.0
+    assert collector(base_station=True, incident_file=flag).min_keep_s() == 0.5
+    write_incident(
+        flag, IncidentMode(since=time.time(), until=time.time() + 60, event_id="e", camera="c")
+    )
+    assert collector(base_station=True, incident_file=flag).min_keep_s() == 0.3
+    assert collector(incident_file=flag).min_keep_s() == 0.3
+
+
 async def test_one_collector_per_dataset(tmp_path: Path) -> None:
     target = RtspTarget.parse("rtsp://127.0.0.1:1/x", "t")
     first = Collector(target, fast_settings(tmp_path / "d"), prober=_never)

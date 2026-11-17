@@ -36,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from vidette.collect.clips import (
     CLIPS_DIR,
@@ -47,7 +48,13 @@ from vidette.collect.clips import (
     reserve_id,
     write_early,
 )
-from vidette.collect.collector import Collector, CollectSettings, CollectStats, backoff
+from vidette.collect.collector import (
+    INCIDENT_MIN_S,
+    Collector,
+    CollectSettings,
+    CollectStats,
+    backoff,
+)
 from vidette.collect.disk import FRAMES_RESERVE_BYTES, GB, MB, free_bytes, measure
 from vidette.collect.motion import FrameScorer, MotionDetector, MotionEvent, MotionSettings
 from vidette.collect.ring import RING_DIR, Ring, Segment, cut, output_pattern, plan_cut
@@ -92,6 +99,11 @@ class ContinuousSettings:
     stall_s: float = 20.0  # no analysis frame for this long: restart the stream
     reconnect_s: tuple[float, float] = (5.0, 300.0)  # after a drop: first wait, cap
     status_every_s: float = 3600.0
+    # Ring segments younger than this are never deleted for --ring-size (only for the
+    # free-space floor and the clips' reserve): the last half hour can always be cut out
+    # again, for an incident nobody saw as one at the time (ADR-0022).
+    ring_min_age_s: float = 1800.0
+    incident_chunk_s: float = 30.0  # a continuous stream in incident mode: clips this long
 
 
 def continuous_command(
@@ -147,6 +159,37 @@ class PendingClip:
     reason: str
     queued_mono: float
     entry_id: str | None = None  # the id its early window took
+    trigger: Literal["wake", "motion"] = "motion"  # wake: kept because the camera woke
+    min_s: float | None = None  # shortest kept (None: --min)
+
+
+def uncovered(
+    start: float, end: float, covered: list[tuple[float, float]], *, min_s: float
+) -> list[tuple[float, float]]:
+    """The stretches of [start, end] no window in `covered` reaches, at least `min_s` long."""
+    spans: list[tuple[float, float]] = []
+    cursor = start
+    for low, high in sorted(covered):
+        if high <= cursor:
+            continue
+        if low > cursor:
+            spans.append((cursor, min(low, end)))
+        cursor = max(cursor, high)
+        if cursor >= end:
+            break
+    if cursor < end:
+        spans.append((cursor, end))
+    return [(a, b) for a, b in spans if b - a >= min_s]
+
+
+def chunks(start: float, end: float, size: float) -> list[tuple[float, float]]:
+    """[start, end] in pieces of at most `size` (the last one may be shorter)."""
+    out: list[tuple[float, float]] = []
+    cursor = start
+    while cursor < end - 1e-6:
+        out.append((cursor, min(end, cursor + size)))
+        cursor += size
+    return out
 
 
 OPEN_SEGMENT_LAG_S = 2 * CLUSTER_MS / 1000  # the open segment is on disk up to this far back
@@ -183,6 +226,8 @@ class _Counters:
     events: int = 0
     clips: int = 0
     dropped: int = 0
+    woken: int = 0  # woken streams the motion gate saw nothing in, kept whole
+    incident: int = 0  # stretches kept because of incident mode
     frames: int = 0  # analysis frames (sessions that ended)
     active: int = 0
     light: int = 0
@@ -213,6 +258,12 @@ class ContinuousCollector(Collector):
         self._kept_this_run = 0
         self._early_ids: dict[float, str] = {}  # motion start → the id its early window took
         self._early_tasks: set[asyncio.Task[None]] = set()
+        # the session in progress: when its first and last frames came, what was queued
+        self._session_first: float | None = None
+        self._session_last: float | None = None
+        self._session_peak = 0.0
+        self._session_windows: list[tuple[float, float]] = []
+        self._incident_cursor: float | None = None  # kept up to here in incident mode
         max_event = settings.max_seconds - continuous.preroll_s - continuous.postroll_s
         self._max_event_s = max(1.0, max_event)
 
@@ -312,6 +363,12 @@ class ContinuousCollector(Collector):
             else:
                 self._short_streak += 1
             wait = backoff(max(1, self._short_streak), self.cont.reconnect_s)
+            if settings.base_station:
+                # a base station answers 404 while the camera sleeps: short wake after
+                # short wake is how someone who stays looks, never a reason to wait
+                # longer (on a test deployment 5, 10, 20 s waits left a camera blind in
+                # the middle of an incident)
+                wait = settings.base_reconnect_s
             logger.info(
                 "stream ended after %s (%s); reconnecting in %s",
                 format_duration(result.seconds),
@@ -367,6 +424,10 @@ class ContinuousCollector(Collector):
         self._detector = detector
         frames = 0
         last_frame_mono: float | None = None
+        self._session_first = self._session_last = None
+        self._session_peak = 0.0
+        self._session_windows = []
+        self._incident_cursor = None
 
         async def read_frames() -> None:
             nonlocal frames, last_frame_mono
@@ -379,7 +440,14 @@ class ContinuousCollector(Collector):
                     return
                 frames += 1
                 last_frame_mono = time.monotonic()
-                event = detector.feed(scorer.area(data), self._clock())
+                at = self._clock()
+                if self._session_first is None:
+                    self._session_first = at
+                self._session_last = at
+                area = scorer.area(data)
+                if area <= cont.motion.max_area:
+                    self._session_peak = max(self._session_peak, area)
+                event = detector.feed(area, at)
                 if event is not None:
                     self._queue(event, "motion longer than --max" if event.capped else "motion")
 
@@ -410,6 +478,7 @@ class ContinuousCollector(Collector):
                 if stop_reason is not None:
                     break
                 self._maybe_early()
+                self._keep_incident(final=False)
                 await self._housekeeping(writing=True)
                 self._status()
                 if now - self._last_save > 60:
@@ -431,6 +500,8 @@ class ContinuousCollector(Collector):
             if tail is not None:
                 self._queue(tail, "stream ended during motion")
             self._detector = None
+            self._keep_woken(frames)
+            self._keep_incident(final=True)
 
         stderr = self.target.scrub("\n".join(stderr_tail))
         outcome = classify(
@@ -461,7 +532,60 @@ class ContinuousCollector(Collector):
         self._pending.append(
             PendingClip(start, end, event, reason, time.monotonic(), entry_id)
         )
+        self._session_windows.append((start, end))
         self.counters.events += 1
+
+    def _queue_span(self, start: float, end: float, reason: str) -> None:
+        """A stretch kept without a motion event: a woken stream, or incident mode."""
+        span = MotionEvent(
+            start=start, end=end, active_s=0.0, peak_area=round(self._session_peak, 4),
+            capped=False,
+        )  # fmt: skip
+        self._pending.append(
+            PendingClip(start, end, span, reason, time.monotonic(), None, trigger="wake",
+                        min_s=self.min_keep_s())
+        )  # fmt: skip
+        self._session_windows.append((start, end))
+
+    def _keep_woken(self, frames: int) -> None:
+        """A base station's camera woke and streamed, and the motion gate cut nothing out
+        of it: the wake is evidence by itself (the camera's own motion sensor fired), so
+        the whole stream is kept as a clip. Never dropped silently (ADR-0022, 17.11: five
+        woken streams in an incident left nothing to judge). A stream longer than --max is
+        a camera that streams all the time: the gate's clips are what it keeps."""
+        first, last = self._session_first, self._session_last
+        if not self.settings.base_station or first is None or last is None or frames == 0:
+            return
+        if self._session_windows or last - first > self.settings.max_seconds:
+            return
+        start = first - self.cont.preroll_s
+        self._queue_span(start, last + 0.5, "camera woke; the motion gate saw nothing")
+        self.counters.woken += 1
+
+    def _keep_incident(self, *, final: bool) -> None:
+        """Incident mode: every stretch of this session since the incident began that no
+        clip covers is kept too, in pieces of `incident_chunk_s` while the stream goes on
+        (an alert minutes ago is waiting for them), the rest when it ends."""
+        mode = self.incident()
+        first, last = self._session_first, self._session_last
+        if mode is None or first is None or last is None:
+            if not final:
+                self._incident_cursor = None
+            return
+        detector = self._detector
+        if not final and detector is not None and detector.busy:
+            return  # the motion clip in progress covers this
+        cursor = self._incident_cursor
+        if cursor is None:
+            cursor = max(first - self.cont.preroll_s, mode.since - self.cont.preroll_s)
+        end = last + 0.5
+        if not final and end - cursor < self.cont.incident_chunk_s:
+            return
+        for low, high in uncovered(cursor, end, self._session_windows, min_s=INCIDENT_MIN_S):
+            for start, stop in chunks(low, high, self.cont.incident_chunk_s):
+                self._queue_span(start, stop, "incident mode: everything is kept")
+                self.counters.incident += 1
+        self._incident_cursor = end
 
     def _maybe_early(self) -> None:
         """`--early`: once a motion event has run `early_s`, its first seconds (with the
@@ -589,13 +713,17 @@ class ContinuousCollector(Collector):
                 self._ring_limited_logged = True
         elif budget >= self.cont.ring_max_bytes:
             self._ring_limited_logged = False
+        now = self._clock()
+        # the last `ring_min_age` stays even past --ring-size, unless the disk needs it
+        young = budget >= self.cont.ring_max_bytes and room > ring_bytes
         self.ring.trim(
             segments,
             max_bytes=budget,
             max_age_s=self.cont.ring_max_age_s,
-            now=self._clock(),
+            now=now,
             keep_from=self._keep_from(),
             min_keep=MIN_RING_SEGMENTS,
+            keep_after=now - self.cont.ring_min_age_s if young else None,
         )
 
     async def _cut(self, pending: PendingClip, segments: list[Segment]) -> None:
@@ -642,9 +770,9 @@ class ContinuousCollector(Collector):
             started_at=pieces[0].wall_start,
             ended_at=pieces[-1].wall_end,
             stop_reason=pending.reason,
-            min_seconds=settings.min_seconds,
+            min_seconds=self.min_keep_s() if pending.min_s is None else pending.min_s,
             rotation=settings.rotation,
-            trigger="motion",
+            trigger=pending.trigger,
             motion=MotionInfo(
                 active_s=event.active_s,
                 peak_area=event.peak_area,
@@ -663,16 +791,22 @@ class ContinuousCollector(Collector):
         self.stats.bytes_recorded += meta.size_bytes
         self.counters.clips += 1
         self._kept_this_run += 1
-        logger.info(
-            "clip %s · %s · %s · %d frames · motion %s, peak %.1f%% of the frame%s",
-            meta.id,
-            format_duration(meta.duration_s),
-            format_size(meta.size_bytes),
-            len(meta.frames),
-            format_duration(event.active_s),
-            event.peak_area * 100,
-            " · capped at --max" if event.capped else "",
-        )
+        if pending.trigger == "wake":
+            logger.info(
+                "clip %s · %s · %s · %d frames · %s", meta.id, format_duration(meta.duration_s),
+                format_size(meta.size_bytes), len(meta.frames), pending.reason,
+            )  # fmt: skip
+        else:
+            logger.info(
+                "clip %s · %s · %s · %d frames · motion %s, peak %.1f%% of the frame%s",
+                meta.id,
+                format_duration(meta.duration_s),
+                format_size(meta.size_bytes),
+                len(meta.frames),
+                format_duration(event.active_s),
+                event.peak_area * 100,
+                " · capped at --max" if event.capped else "",
+            )
         with contextlib.suppress(OSError):
             self.save_state()
 
@@ -700,13 +834,16 @@ class ContinuousCollector(Collector):
         ring_bytes = sum(p.stat().st_size for p in segments)
         frames = now.frames - last.frames
         logger.info(
-            "status · last %s: %d motion event(s), %d clip(s) kept, %d dropped · motion in "
+            "status · last %s: %d motion event(s), %d clip(s) kept, %d dropped, %d woken "
+            "stream(s) kept whole, %d incident stretch(es) · motion in "
             "%.1f%% of analysed frames, light changes in %.1f%% · ring %s in %d segment(s) · "
             "%s free",
             format_duration(self.cont.status_every_s),
             now.events - last.events,
             now.clips - last.clips,
             now.dropped - last.dropped,
+            now.woken - last.woken,
+            now.incident - last.incident,
             100 * (now.active - last.active) / max(1, frames),
             100 * (now.light - last.light) / max(1, frames),
             format_size(ring_bytes),

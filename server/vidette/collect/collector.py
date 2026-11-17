@@ -51,6 +51,7 @@ from vidette.collect.disk import DiskLimits, DiskState, measure
 from vidette.collect.prune import Pruner, PruneSettings
 from vidette.collect.session import CLUSTER_MS, Outcome, SessionResult, record_session
 from vidette.collect.target import RtspTarget
+from vidette.incident.mode import IncidentMode, IncidentWatch
 from vidette.units import format_duration, format_size
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ STATE_FILE = "collect-state.json"
 LOCK_FILE = "collect.lock"
 _STATE_SAVE_EVERY_S = 60.0
 _REPEAT_LOG_EVERY = 5  # streaks are logged on the 1st occurrence, then every 5th
+INCIDENT_MIN_S = 0.3  # during an incident a recording this long is still kept
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,16 @@ class CollectSettings:
     # `--prune-oldest`: near --max-size, delete the oldest clips nobody needs instead of
     # stopping (collect/prune.py). None: off, the cap stops the collector.
     prune: PruneSettings | None = None
+    # A base station's camera woke up (its PIR saw something): that is evidence by itself.
+    # Such a recording is kept down to this length even below `min_seconds` (ADR-0022).
+    wake_min_seconds: float = 0.5
+    # After a woken stream ends at a base station, look again this soon: the camera that
+    # just slept may wake again at once (a person still there), and every second of
+    # waiting is a second nobody records. Never grows (no backoff while it keeps waking).
+    base_reconnect_s: float = 1.0
+    # serve's incident-mode file (vidette.incident.mode): while an alert's incident lasts,
+    # everything a camera sees is kept. None: no incident mode.
+    incident_file: Path | None = None
 
 
 def backoff(streak: int, schedule: tuple[float, float]) -> float:
@@ -157,6 +169,30 @@ class Collector:
             if settings.prune is None
             else Pruner(settings.dataset, settings.prune, clock=clock)
         )
+        self._incident = IncidentWatch(settings.incident_file, clock=clock)
+        self._incident_said: str | None = None  # the incident the log announced last
+
+    def incident(self) -> IncidentMode | None:
+        """serve's incident mode in force now (said once in the log per incident)."""
+        mode = self._incident.active()
+        if mode is not None and mode.event_id != self._incident_said:
+            self._incident_said = mode.event_id
+            logger.info(
+                "incident mode until %s (alert %s on %s): every woken stream is kept whole",
+                datetime.fromtimestamp(mode.until).strftime("%H:%M:%S"),
+                mode.event_id,
+                mode.camera,
+            )
+        return mode
+
+    def min_keep_s(self) -> float:
+        """The shortest recording kept: anything during an incident; a base station's
+        woken stream down to `wake_min_seconds`; else `min_seconds`."""
+        if self.incident() is not None:
+            return min(self.settings.min_seconds, INCIDENT_MIN_S)
+        if self.settings.base_station:
+            return min(self.settings.min_seconds, self.settings.wake_min_seconds)
+        return self.settings.min_seconds
 
     # --- paths, state, lock -------------------------------------------------------------
 
@@ -387,10 +423,15 @@ class Collector:
 
         if outcome is Outcome.recorded:
             meta = await self._finalize(result)
-            if not result.clean_stop:
-                await self._wait(settings.busy_backoff_s[0], stop)
             if settings.once and meta is not None:
                 return True
+            if settings.base_station:
+                # the base station says 404 while the camera sleeps: no rest is needed to
+                # be gentle, and a camera that woke again at once must not wait for us
+                await self._wait(settings.base_reconnect_s, stop)
+                return False
+            if not result.clean_stop:
+                await self._wait(settings.busy_backoff_s[0], stop)
             await self._wait(settings.cooldown_s, stop)
             return False
         if result.part.exists():
@@ -494,7 +535,7 @@ class Collector:
             camera=self.settings.camera,
             started_at=started,
             stop_reason=result.stop_reason,
-            min_seconds=self.settings.min_seconds,
+            min_seconds=self.min_keep_s(),
             rotation=self.settings.rotation,
             entry_id=self._early_id,
             timeline=None if result.requested_at is None else {"requested": result.requested_at},

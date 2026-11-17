@@ -30,13 +30,16 @@ from vidette.collect.motion import OVERLAY_MASK, MotionSettings, Region, parse_f
 from vidette.collect.prune import (
     PRUNE_AT,
     PRUNE_TO,
+    ProtectionError,
     Pruner,
     PruneSettings,
     default_serve_config,
+    serve_stores,
 )
 from vidette.collect.ring import RING_DIR
 from vidette.collect.target import RtspTarget, TargetError, load_target
 from vidette.ffmpeg import ROTATIONS, MediaToolError, binary
+from vidette.incident.mode import incident_path
 from vidette.units import format_duration, format_size, parse_duration, parse_size
 
 logger = logging.getLogger("vidette.collect")
@@ -84,7 +87,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--min", default="3s", help="drop clips shorter than this")
     parser.add_argument("--max", default="2m", help="cut a clip at this length")
-    parser.add_argument("--probe-every", default="5s", help="port check while it sleeps")
+    parser.add_argument(
+        "--probe-every",
+        default=None,
+        help="check while it sleeps (default 5s; 2s with --base-station, whose 404 costs "
+        "the camera nothing)",
+    )
     parser.add_argument("--cooldown", default="10s", help="pause after each clip")
     parser.add_argument("--silence", default="8s", help="no video this long ends a clip")
     parser.add_argument("--max-size", default="5GB", help="hard cap on the dataset folder")
@@ -118,6 +126,25 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="the URL is a base station's (Eufy HomeBase): it answers 404 while the camera "
         "sleeps, so 404 means asleep: check every --probe-every instead of backing off",
+    )
+    parser.add_argument(
+        "--wake-min",
+        default="0.5s",
+        help="with --base-station: a woken stream this long is kept even below --min (the "
+        "camera's own motion sensor woke it: that is evidence)",
+    )
+    parser.add_argument(
+        "--base-reconnect",
+        default="1s",
+        help="with --base-station: look again this soon after a woken stream ends (never "
+        "grows while the camera keeps waking)",
+    )
+    parser.add_argument(
+        "--incident-file",
+        type=Path,
+        default=None,
+        help="vidette serve's incident-mode file: after an alert every camera keeps what "
+        "it sees for a while (default: next to the database named by --serve-config)",
     )
     parser.add_argument(
         "--wallclock-timestamps",
@@ -173,6 +200,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     continuous.add_argument(
         "--ring-keep", default="24h", help="delete ring segments older than this"
     )
+    continuous.add_argument(
+        "--ring-min-age",
+        default="30m",
+        help="never delete younger ring segments for --ring-size (the free-space floor "
+        "still wins): the last half hour can always be cut out again",
+    )
     continuous.add_argument("--preroll", default="3s", help="video kept before the motion")
     continuous.add_argument("--postroll", default="3s", help="video kept after the motion")
     continuous.add_argument(
@@ -227,7 +260,9 @@ def settings_from_args(args: argparse.Namespace) -> CollectSettings:
         camera=args.camera,
         min_seconds=parse_duration(args.min),
         max_seconds=parse_duration(args.max),
-        probe_every_s=parse_duration(args.probe_every),
+        probe_every_s=parse_duration(
+            args.probe_every or ("2s" if args.base_station else "5s")
+        ),
         cooldown_s=parse_duration(args.cooldown),
         silence_s=parse_duration(args.silence),
         limits=DiskLimits(
@@ -241,7 +276,27 @@ def settings_from_args(args: argparse.Namespace) -> CollectSettings:
         wallclock_timestamps=args.wallclock_timestamps,
         early_s=parse_duration(args.early),
         prune=prune_from_args(args),
+        wake_min_seconds=parse_duration(args.wake_min),
+        base_reconnect_s=parse_duration(args.base_reconnect),
+        incident_file=incident_file_from_args(args),
     )
+
+
+def incident_file_from_args(args: argparse.Namespace) -> Path | None:
+    """--incident-file, else next to the database of --serve-config (when given or found);
+    None when there is no serve to say anything (incident mode is then off)."""
+    if args.incident_file is not None:
+        return Path(args.incident_file).expanduser()
+    config = args.serve_config
+    path = config.expanduser().resolve() if config is not None else default_serve_config()
+    if path is None:
+        return None
+    try:
+        stores = serve_stores(path)
+    except ProtectionError as exc:
+        logger.warning("no incident mode: %s", exc)
+        return None
+    return None if stores.database is None else incident_path(stores.database)
 
 
 def prune_from_args(args: argparse.Namespace) -> PruneSettings | None:
@@ -276,6 +331,7 @@ def continuous_from_args(args: argparse.Namespace) -> ContinuousSettings:
         segment_s=parse_duration(args.segment),
         ring_max_bytes=parse_size(args.ring_size),
         ring_max_age_s=parse_duration(args.ring_keep),
+        ring_min_age_s=parse_duration(args.ring_min_age),
         preroll_s=parse_duration(args.preroll),
         postroll_s=parse_duration(args.postroll),
         motion=motion,

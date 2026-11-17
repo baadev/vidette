@@ -127,18 +127,20 @@ class Ring:
         now: float,
         keep_from: float | None = None,
         min_keep: int = 3,
+        keep_after: float | None = None,
     ) -> list[Segment]:
         """Delete the oldest segments until the ring fits `max_bytes` and `max_age_s`.
 
         Never deletes the newest `min_keep` segments, an open one, or one that ends after
-        `keep_from` (a clip waiting to be cut still needs it). Returns what was deleted;
+        `keep_from` (a clip waiting to be cut still needs it). A segment that ends after
+        `keep_after` is not deleted for size (only for age). Returns what was deleted;
         `segments` is not modified.
         """
         total = sum(segment.size_bytes for segment in segments)
         deletable = len(segments) - min_keep
         deleted: list[Segment] = []
         for segment in segments[: max(0, deletable)]:
-            too_big = total > max_bytes
+            too_big = total > max_bytes and (keep_after is None or segment.end <= keep_after)
             too_old = segment.complete and now - segment.end > max_age_s
             if not (too_big or too_old):
                 break
