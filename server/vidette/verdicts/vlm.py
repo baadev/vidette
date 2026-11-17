@@ -80,6 +80,8 @@ def describe_case(case: Case, frames: int, timing: FrameSet | None = None) -> st
     if detected:
         where = f" in zones {', '.join(incident.zones)}" if incident.zones else ""
         lines.append(f"The camera's detector reported: {detected}{where}.")
+    if case.context:
+        lines.append(case.context)
     lines.append(f"{frames} frame(s) follow.")
     text = " ".join(lines)
     told = timing_text(timing) if timing is not None else None
@@ -101,6 +103,8 @@ def timing_text(frames: FrameSet) -> str | None:
     if frames.method == "activity":
         text += " (where the picture changed)"
     lines = [text + "."]
+    if frames.note:
+        lines.append(frames.note)
     health = frames.health
     if health is not None:
         for n, (before, after) in enumerate(itertools.pairwise(times), start=1):

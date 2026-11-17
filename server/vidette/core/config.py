@@ -452,10 +452,36 @@ class TriageConfig(StrictModel):
         return _duration(self.later_max_age, "later_max_age")
 
 
+class WindowsConfig(StrictModel):
+    """A long clip with a person is judged in windows around the person (ADR-0022,
+    vidette.verdicts.windows): the detector's track says where they are; each window is
+    one judge call; one that wakes for anyone decides. Needs the pre-filter's detector."""
+
+    enabled: bool = True
+    long_clip: str = "30s"  # longer clips are judged in windows
+    window: str = "20s"  # one window covers at most this much of the person's presence
+    # windows around the person per clip, at most; the frames chosen as without windows
+    # are judged too, so a clip costs up to max_windows + 1 calls (3 while other clips
+    # with people wait)
+    max_windows: int = Field(default=3, ge=1, le=6)
+    track_every: str = "1s"  # the detector looks at a frame this often
+
+    @model_validator(mode="after")
+    def _check(self) -> WindowsConfig:
+        for key in ("long_clip", "window", "track_every"):
+            if _duration(getattr(self, key), f"understanding.windows.{key}") <= 0:
+                raise ValueError(f"understanding.windows.{key} must be more than 0")
+        return self
+
+    def seconds(self, key: Literal["long_clip", "window", "track_every"]) -> float:
+        return _duration(getattr(self, key), key)
+
+
 class UnderstandingConfig(StrictModel):
     vlm: VlmConfig = VlmConfig()
     deep: DeepConfig = Field(default_factory=DeepConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)
+    windows: WindowsConfig = Field(default_factory=WindowsConfig)
 
     @model_validator(mode="after")
     def _deep_backend(self) -> UnderstandingConfig:
@@ -983,6 +1009,45 @@ class CrossCameraConfig(StrictModel):
         return 0.0 if lag is None else _duration(lag, camera)
 
 
+class IncidentConfig(StrictModel):
+    """What happened across cameras (ADR-0022, docs/incidents.md).
+
+    When an alert goes out: events on the other cameras within `link_within` that had a
+    person are linked to it (the same face; else, on neighbouring cameras, similar
+    clothes and timing; else only "at the same time"), the alert says so in one line,
+    and every camera keeps everything it sees for `keep_for` (incident mode: the
+    collectors read a file next to the database)."""
+
+    enabled: bool = True
+    keep_for: str = "10m"  # incident mode after an alert; "0s": off
+    link_within: str = "3m"  # other cameras' events this close to the alert are looked at
+    # Cameras a person can walk between in that time, camera → its neighbours (either
+    # direction counts). Empty: every camera is every other's neighbour (one house).
+    neighbours: dict[str, list[str]] = Field(default_factory=dict)
+    look: bool = True  # clothing colours as a cue when no face matches (needs OpenCV)
+    look_threshold: float = Field(default=0.88, ge=0.5, le=1.0)  # coloured clothes
+    look_threshold_grey: float = Field(default=0.95, ge=0.5, le=1.0)  # night infrared
+    mode_file: Path | None = None  # default: incident-mode.json next to the database
+
+    @model_validator(mode="after")
+    def _check(self) -> IncidentConfig:
+        _duration(self.keep_for, "incident.keep_for")
+        _duration(self.link_within, "incident.link_within")
+        for camera, others in self.neighbours.items():
+            _check_camera_names([camera, *others], "incident.neighbours")
+        if self.mode_file is not None:
+            self.mode_file = self.mode_file.expanduser()
+        return self
+
+    def seconds(self, key: Literal["keep_for", "link_within"]) -> float:
+        return _duration(getattr(self, key), key)
+
+    def neighbours_of(self, a: str, b: str) -> bool:
+        if not self.neighbours:
+            return True
+        return b in self.neighbours.get(a, []) or a in self.neighbours.get(b, [])
+
+
 class AssistantConfig(StrictModel):
     """Questions to the bot in plain words, and the same tools over MCP (ADR-0017).
 
@@ -1008,6 +1073,7 @@ class VidetteConfig(StrictModel):
     people: PeopleConfig = Field(default_factory=PeopleConfig)
     notifications: NotificationsConfig = NotificationsConfig()
     cross_camera: CrossCameraConfig = Field(default_factory=CrossCameraConfig)
+    incident: IncidentConfig = Field(default_factory=IncidentConfig)
     assistant: AssistantConfig = Field(default_factory=AssistantConfig)
     integrations: IntegrationsConfig = IntegrationsConfig()
     telemetry: TelemetryConfig = TelemetryConfig()

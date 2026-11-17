@@ -72,9 +72,11 @@ class FrameSet:
 
     paths: list[Path]
     times: list[float | None] = field(default_factory=list)
-    method: str = "images"  # "activity", "spread" (a video, nothing moved) or "images"
+    method: str = "images"  # "activity", "spread" (a video, nothing moved), "images",
+    # or "person" (a window around a person, vidette.verdicts.windows)
     duration_s: float | None = None
     health: StreamHealth | None = None
+    note: str | None = None  # told to the judge after the frame times (a window's place)
 
     def timed(self) -> list[tuple[Path, float | None]]:
         times = self.times if len(self.times) == len(self.paths) else [None] * len(self.paths)
@@ -91,6 +93,7 @@ class Case:
     media: tuple[Path, ...] = field(default=())
     people: PeopleReport | None = None
     frames: FrameSet | None = None
+    context: str | None = None  # one line about an alert minutes before (incident mode)
 
 
 class Verdict(BaseModel):

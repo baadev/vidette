@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 from vidette.collect.clips import load_meta
 from vidette.ffmpeg import MediaToolError, sample_frames
 from vidette.triage.detector import Detection, ObjectDetector
+from vidette.triage.track import Sighting
 from vidette.verdicts.base import Case
 from vidette.verdicts.frames import (
     IMAGE_SUFFIXES,
@@ -92,6 +93,17 @@ class Observation(BaseModel):
     def cell_set(self) -> frozenset[int]:
         return unpack_cells(self.cells)
 
+    def sightings(self, min_score: float) -> list[Sighting]:
+        """The person boxes of the frames whose time in the clip is known (kept on the
+        event: the cross-camera link and the judge's windows read them)."""
+        return [
+            Sighting(frame.t, d.score, d.box)
+            for frame in self.frames
+            if frame.t is not None
+            for d in frame.detections()
+            if d.kind == "person" and d.score >= min_score
+        ]
+
 
 def pack_cells(cells: frozenset[int] | set[int]) -> str:
     """The changed cells of the 64×36 grid as a bitmap, compressed and base64-encoded
@@ -132,6 +144,20 @@ def _sidecar_facts(video: Path | None, observation: Observation) -> None:
         observation.motion_active_s = meta.motion.active_s
 
 
+def _key_times(video: Path | None) -> dict[str, float]:
+    """The collector's key frames by file name → their time in the clip (the sidecar's
+    `frame_times_s`); empty without a sidecar."""
+    if video is None:
+        return {}
+    meta = load_meta(video.with_suffix(".json"))
+    if meta is None:
+        return {}
+    return {
+        Path(name).name: float(at)
+        for name, at in zip(meta.frames, meta.frame_times_s, strict=False)
+    }
+
+
 def _activity_facts(activity: Activity, observation: Observation) -> None:
     observation.candidates = len(activity.shares)
     observation.activity_peak = round(activity.peak, 4)
@@ -160,6 +186,7 @@ async def observe(
     video = first_video(case)
     keyed = [p for p in case.media if p.suffix.lower() in IMAGE_SUFFIXES] if key_frames else []
     _sidecar_facts(video, observation)
+    key_times = _key_times(video)
     temp = Path(tempfile.mkdtemp(prefix="vidette-triage-", dir=work_dir))
     try:
         chosen: list[tuple[str, Path, float | None]] = []
@@ -176,7 +203,7 @@ async def observe(
                 if activity is not None:
                     _activity_facts(activity, observation)
                 chosen += [("activity", path, at) for path, at in picked.timed()]
-        chosen += [("key", path, None) for path in keyed if path.is_file()]
+        chosen += [("key", path, key_times.get(path.name)) for path in keyed if path.is_file()]
         if not chosen and observation.error is None:
             observation.error = "no frames"
         if detector is not None and chosen:

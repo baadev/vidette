@@ -78,12 +78,15 @@ from vidette.db import Database, EventRow
 from vidette.events.payload import canonical_payload
 from vidette.ffmpeg import MediaToolError, extract_frame
 from vidette.frigate.client import Frame
+from vidette.incident.mode import IncidentMode
 from vidette.people.check import CropWriter, crop_writer
 from vidette.people.report import PeopleReport
 from vidette.triage.rules import RANK_LATER, TriageClass, rank, weak_boxes
 from vidette.triage.service import Triager
-from vidette.verdicts.base import Case, FrameSet, Judge, Verdict, policy_text
+from vidette.triage.track import Sighting, pack, person_track
+from vidette.verdicts.base import Case, FrameSet, Judge, PolicyText, Verdict, policy_text
 from vidette.verdicts.frames import first_video, frame_set
+from vidette.verdicts.windows import Window, activity_window, plan, real_times, window_frames
 
 logger = logging.getLogger(__name__)
 
@@ -101,12 +104,21 @@ JudgeFactory = Callable[[VlmBackend], Judge]
 SlotIdle = Callable[[VlmBackend], bool]
 WAIT_FOR_SLOT_S = 2.0  # a later clip checks the slot again after this long
 WARM_LOOKBACK_S = 86400.0  # the usual movement is rebuilt from this much history
+BUSY_WINDOWS = 3  # with other clips waiting, a long clip's windows stop after this many
 
 
 class FaceCheck(Protocol):
     """The slice of PeopleCheck the worker uses."""
 
     async def check(self, case: Case, crops: CropWriter | None = None) -> PeopleReport: ...
+
+
+class IncidentHint(Protocol):
+    """The slice of IncidentService the worker uses (ADR-0022)."""
+
+    def active(self, at: float | None = None) -> IncidentMode | None: ...
+
+    def context(self, camera: str, at: float) -> str | None: ...
 
 
 class FrameSource(Protocol):
@@ -167,8 +179,10 @@ class VerdictWorker:
         calibration: Calibrator | None = None,
         triage: Triager | None = None,
         slot_idle: SlotIdle | None = None,
+        incidents: IncidentHint | None = None,
     ) -> None:
         self._triage = triage
+        self._incidents = incidents
         self._slot_idle = slot_idle
         self._later_max_age_s = (
             config.understanding.triage.later_max_age_s if triage is not None else max_age_s
@@ -400,11 +414,13 @@ class VerdictWorker:
         decision, observation = await self._triage.decide(
             case, camera=incident.camera, partial=incident.partial
         )
+        settings = self._config.understanding.triage
         record = decision.record(
             observation,
             phase="early" if incident.partial else "final",
-            weak=weak_boxes(observation, self._config.understanding.triage),
+            weak=weak_boxes(observation, settings),
         )
+        record["observed"]["persons"] = pack(observation.sightings(settings.possible_person))
         current = await self._db.get_event(row.id)  # the judge may have written since
         intent = dict((current or row).intent or {})
         previous = intent.get("triage")
@@ -421,6 +437,17 @@ class VerdictWorker:
         summary = None
         if klass is TriageClass.skip and not incident.partial and not intent.get("verdicts"):
             summary = f"not judged: {decision.why}"
+        if (
+            klass is not TriageClass.now
+            and not incident.partial
+            and self._incident_at(incident.started_at)
+        ):
+            # incident mode (ADR-0022): nothing from these minutes is skipped or left to
+            # an idle slot; judged right after the clips with people
+            record["incident"] = {"class": klass.value, "why": record.get("why")}
+            klass = TriageClass.now
+            record.update({"class": klass.value, "why": "incident mode", "reason": "incident"})
+            summary = None
         intent["triage"] = record
         self._decided[incident.key] = rank(klass, str(record.get("reason")))
         await self._db.update_event(row.id, intent=intent, summary=summary)
@@ -430,6 +457,19 @@ class VerdictWorker:
             klass.value, record["why"], observation.seconds,
         )  # fmt: skip
         return klass
+
+    def _others_waiting(self) -> bool:
+        """Clips judged now (people, moving vehicles) wait behind this one."""
+        return any(self._ranks.get(k, 0) < RANK_LATER for k in self._pending)
+
+    def _incident_at(self, at: float) -> bool:
+        if self._incidents is None:
+            return False
+        try:
+            return self._incidents.active(at) is not None
+        except Exception:  # a hint, never in the way
+            logger.exception("incident mode could not be read")
+            return False
 
     async def _failed(self, error: str) -> None:
         self.status.failed += 1
@@ -521,6 +561,11 @@ class VerdictWorker:
         judge = self._judge(backend)
         frames = self._config.understanding.vlm.frames_per_call
         case = await self._case(incident, row, frames)
+        if self._incidents is not None:
+            with contextlib.suppress(Exception):  # a hint for the judge, never in the way
+                case = replace(
+                    case, context=self._incidents.context(incident.camera, incident.started_at)
+                )
         chosen = await self._choose_frames(
             case, f"{row.id}/early" if incident.partial else row.id, frames
         )
@@ -539,9 +584,18 @@ class VerdictWorker:
             else:
                 case = replace(case, people=report)
                 people = report.model_dump(mode="json")
+        planned = None if incident.partial else await self._windows(case, chosen, row)
+        windowed: dict[str, Any] | None = None
         results: list[tuple[PolicyConfig, Verdict]] = []
         for policy in policies:
-            verdict = await judge.judge(case, policy_text(policy))
+            if planned is None:
+                verdict = await judge.judge(case, policy_text(policy))
+            else:
+                verdict, shown, windowed = await self._judge_windows(
+                    judge, case, policy, planned
+                )
+                chosen = shown
+                case = replace(case, frames=shown)
             results.append((policy, verdict))
 
         alerting = [(p, v) for p, v in results if counts_as_alert(p, v)]
@@ -561,6 +615,8 @@ class VerdictWorker:
             intent["people"] = people
         elif "people" in previous:
             intent["people"] = previous["people"]
+        if windowed is not None:
+            intent["windows"] = windowed
         if chosen is not None:
             intent["frames"] = [{"path": str(path), "t": at} for path, at in chosen.timed()]
             if chosen.health is not None:
@@ -629,6 +685,149 @@ class VerdictWorker:
         self.status.undecided += 1
         return await self._db.get_event(row.id)
 
+    async def _windows(
+        self, case: Case, chosen: FrameSet | None, row: EventRow
+    ) -> tuple[list[Sighting], list[Window], list[FrameSet]] | None:
+        """A long clip with a person in it: the person's track and the windows around
+        them, with their frames on disk (vidette.verdicts.windows); None for any other
+        clip, and whenever the track could not be made (the frames chosen as usual are
+        judged then)."""
+        settings = self._config.understanding.windows
+        detector = self._triage.detector if self._triage is not None else None
+        video = first_video(case)
+        duration = chosen.duration_s if chosen is not None else None
+        if not settings.enabled or detector is None or video is None or duration is None:
+            return None
+        if duration <= settings.seconds("long_clip"):
+            return None
+        triage = (row.intent or {}).get("triage")
+        facts = triage.get("facts") if isinstance(triage, dict) else None
+        person = facts.get("person") if isinstance(facts, dict) else None
+        threshold = self._config.understanding.triage.possible_person
+        if not isinstance(person, int | float) or person < threshold:
+            return None  # nobody seen by the pre-filter: no person to centre on
+        try:
+            track = await person_track(
+                video, detector, every_s=settings.seconds("track_every"),
+                work_dir=self._media_dir,
+            )  # fmt: skip
+        except (MediaToolError, OSError) as exc:
+            logger.info("no person track for %s: %s", row.id, exc)
+            return None
+        frames = self._config.understanding.vlm.frames_per_call
+        health = chosen.health if chosen is not None else None
+        windows = plan(
+            track, frames=frames, window_s=settings.seconds("window"),
+            max_windows=settings.max_windows,
+            gaps=[(a, b) for a, b in health.gaps] if health is not None else None,
+        )  # fmt: skip
+        if not windows:
+            return None
+        real = real_times(track, [(a, b) for a, b in health.gaps] if health is not None else [])
+        seen = (min(s.t for s in real), max(s.t for s in real))
+        out_dir = self._media_dir / "judge-frames" / row.id
+        sets = []
+        for index, window in enumerate(windows, start=1):
+            sets.append(
+                await window_frames(
+                    video, window, out_dir, duration_s=duration,
+                    health=chosen.health if chosen is not None else None, index=index,
+                    total=len(windows), seen=seen,
+                )
+            )  # fmt: skip
+        if not any(s.paths for s in sets):
+            return None
+        if chosen is not None and chosen.paths:
+            # the frames chosen as without windows come second: whatever they show is
+            # never lost by judging around the person (the detector misses people half
+            # out of the picture)
+            windows.insert(1, activity_window(chosen))
+            sets.insert(1, chosen)
+        logger.info(
+            "%s: %.0f s clip judged in %d window(s) around the person (seen %.0f-%.0f s)",
+            row.id, duration, len(windows), seen[0], seen[1],
+        )  # fmt: skip
+        return track, windows, sets
+
+    async def _judge_windows(
+        self,
+        judge: Judge,
+        case: Case,
+        policy: PolicyConfig,
+        planned: tuple[list[Sighting], list[Window], list[FrameSet]],
+    ) -> tuple[Verdict, FrameSet, dict[str, Any]]:
+        """Each window is judged in turn; one whose verdict wakes for anyone decides at
+        once. Else the highest alerting level wins, else the first window that decided
+        (the one with the last sighting). Returns the verdict (with every window's calls
+        and costs added up), the frames it was given, and what is kept on the event."""
+        track, windows, sets = planned
+        text: PolicyText = policy_text(policy)
+        judged: list[tuple[int, Verdict]] = []
+        held_back = 0
+        for index, frames in enumerate(sets):
+            if not frames.paths:
+                continue
+            if len(judged) >= BUSY_WINDOWS and self._others_waiting():
+                held_back = len(sets) - index  # other clips wait: the rest is not judged
+                break
+            verdict = await judge.judge(replace(case, frames=frames), text)
+            judged.append((index, verdict))
+            if counts_as_alert(policy, verdict) and early_may_alert(policy, verdict):
+                break
+        if not judged:
+            empty = Verdict(alert=False, abstained=True, rationale="no window frames")
+            return empty, sets[0], {"track": pack(track), "plan": []}
+        order = list(policy.levels)
+
+        def level_order(verdict: Verdict) -> int:
+            return order.index(verdict.level) if verdict.level in order else len(order)
+
+        alerting = [(i, v) for i, v in judged if counts_as_alert(policy, v)]
+        decided = [(i, v) for i, v in judged if not v.abstained]
+        usual = [(i, v) for i, v in decided if windows[i].activity]
+        if alerting:
+            index, verdict = min(alerting, key=lambda iv: level_order(iv[1]))
+        elif usual:  # nothing alerts: the clip's verdict is the one it always had
+            index, verdict = usual[0]
+        elif decided:
+            index, verdict = decided[0]
+        else:
+            index, verdict = judged[0]
+        verdicts = [v for _i, v in judged]
+        persons = [v.persons for v in verdicts if v.persons is not None]
+        verdict = verdict.model_copy(
+            update={
+                "vlm_calls": sum(v.vlm_calls for v in verdicts),
+                "images_sent": sum(v.images_sent for v in verdicts),
+                "latency_s": round(sum(v.latency_s or 0.0 for v in verdicts), 3),
+                "cost_usd": None
+                if any(v.cost_usd is None for v in verdicts)
+                else sum(v.cost_usd or 0.0 for v in verdicts),
+                "persons": max(persons) if persons else None,
+                "person_at_s": min(
+                    [track[0].t, *(v.person_at_s for v in verdicts if v.person_at_s is not None)]
+                ),
+            }
+        )
+        record = {
+            "track": pack(track),
+            "plan": [
+                {
+                    **windows[i].record(),
+                    "verdict": {
+                        "label": v.label, "level": v.level, "alert": counts_as_alert(policy, v),
+                        "abstained": v.abstained, "confidence": v.confidence,
+                        "rationale": v.rationale,
+                    },
+                }
+                for i, v in judged
+            ],
+            "decided_by": index,
+            "skipped": len(windows) - len(judged),
+            "held_back": held_back,
+        }  # fmt: skip
+        return verdict, sets[index], record
+
     async def _calibrated(
         self, policy: PolicyConfig, verdict: Verdict, camera: str
     ) -> dict[str, Any] | None:
@@ -674,9 +873,13 @@ class VerdictWorker:
         """`intent` with the pre-filter's newest decision on the event: the whole clip
         may have been looked at while its early window was judged."""
         current = await self._db.get_event(event_id)
-        triage = (current.intent or {}).get("triage") if current is not None else None
+        stored = (current.intent or {}) if current is not None else {}
+        triage = stored.get("triage")
         if triage is not None:
             intent["triage"] = triage
+        for key in ("incident", "review"):  # written meanwhile by the incident and the bot
+            if key in stored and key not in intent:
+                intent[key] = stored[key]
         return intent
 
     async def _settle(

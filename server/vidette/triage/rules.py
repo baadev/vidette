@@ -73,7 +73,7 @@ class TriageClass(StrEnum):
 
 ORDER = {TriageClass.now: 0, TriageClass.later: 1, TriageClass.skip: 2}
 RANK_PEOPLE, RANK_SECOND, RANK_LATER, RANK_SKIP = range(4)
-SECOND_TIER = frozenset({"vehicle", "possible_person"})
+SECOND_TIER = frozenset({"vehicle", "possible_person", "incident"})
 
 
 def rank(klass: TriageClass, reason: str | None) -> int:

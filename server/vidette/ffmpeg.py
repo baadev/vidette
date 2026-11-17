@@ -187,15 +187,31 @@ def scale_filter(max_side: int) -> str:
 
 
 async def extract_frame(
-    video: Path, at_s: float, out: Path, *, max_side: int = 1280, rotation: int = 0
+    video: Path,
+    at_s: float,
+    out: Path,
+    *,
+    max_side: int = 1280,
+    rotation: int = 0,
+    crop: tuple[float, float, float, float] | None = None,
 ) -> Path:
     """One JPEG at `at_s` seconds (accurate seek), at most `max_side` px on its long side.
 
     `rotation` (clockwise degrees) turns the picture explicitly and ignores rotation
-    metadata in the file, so the result is the same whatever the container carries."""
+    metadata in the file, so the result is the same whatever the container carries.
+    `crop`: only this part of the upright picture (x, y, width, height as fractions),
+    taken before shrinking, so a small person keeps the camera's own pixels."""
     out.parent.mkdir(parents=True, exist_ok=True)
     turn = rotation_filter(rotation)
-    filters = scale_filter(max_side) if turn is None else f"{turn},{scale_filter(max_side)}"
+    steps = [] if turn is None else [turn]
+    if crop is not None:
+        x, y, w, h = crop
+        steps.append(
+            f"crop=w='trunc(iw*{w:.4f}/2)*2':h='trunc(ih*{h:.4f}/2)*2'"
+            f":x='iw*{x:.4f}':y='ih*{y:.4f}'"
+        )
+    steps.append(scale_filter(max_side))
+    filters = ",".join(steps)
     no_autorotate = [] if turn is None else ["-noautorotate"]
     rc, _, stderr = await run(
         [
