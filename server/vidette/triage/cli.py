@@ -47,7 +47,7 @@ from vidette.triage.replay import (
     simulate_days,
     stratified_weights,
 )
-from vidette.triage.rules import RANK_LATER, RANK_PEOPLE, RANK_VEHICLES, classify
+from vidette.triage.rules import RANK_LATER, RANK_PEOPLE, RANK_SECOND, classify
 
 DEFAULT_CACHE = Path("~/.cache/vidette/triage-replay.jsonl")
 
@@ -202,29 +202,31 @@ def _item(item: Replayed) -> str:
 def _sim_lines(days: list[DaySimulation], durations: list[float]) -> list[str]:
     typical = statistics.median(durations) if durations else 45.0
     lines = [
-        f"The live judge's queue, simulated: one slot, {len(durations)} measured verdicts "
-        f"(median {typical:.0f} s) taken in turn, deep analysis' daytime turns included.",
+        f"The live judge's queue, simulated: one slot, the last day's {len(durations)} "
+        f"measured verdicts (median {typical:.0f} s) taken in turn, deep analysis' daytime "
+        "turns included.",
         f"{'day':<12}{'clips':>7}{'judged then':>13}{'simulated':>11}{'with pre-filter':>17}"
-        f"{'people':>9}{'vehicles':>10}{'later':>8}{'skipped':>9}",
+        f"{'people':>9}{'maybe/car':>11}{'later':>8}{'skipped':>9}",
     ]
     for day in days:
         before, after = day.before, day.after
         ranks = [
             _pct(after.by_rank.get(r, 0), after.offered_rank.get(r, 0))
-            for r in (RANK_PEOPLE, RANK_VEHICLES, RANK_LATER)
+            for r in (RANK_PEOPLE, RANK_SECOND, RANK_LATER)
         ]
         lines.append(
             f"{day.day:<12}{day.events:>7}{_pct(day.actual_judged, day.events):>13}"
             f"{_pct(before.judged_final, before.finals):>11}"
             f"{_pct(after.judged_final, after.finals):>17}"
-            f"{ranks[0]:>9}{ranks[1]:>10}{ranks[2]:>8}"
+            f"{ranks[0]:>9}{ranks[1]:>11}{ranks[2]:>8}"
             f"{_pct(after.offered.get('skip', 0), after.finals):>9}"
         )
     lines.append(
         "judged: whole clips the judge reached (early windows not counted); `judged then` "
         "is what the service really did, `simulated` the same queue modelled, to show how "
-        "far the model is off; people / vehicles / later: the share of each the judge "
-        "would reach with the pre-filter; skipped: the share of all clips."
+        "far the model is off; people / maybe/car (a weaker person candidate or a moving "
+        "vehicle) / later: the share of each the judge would reach with the pre-filter; "
+        "skipped: the share of all clips."
     )
     return lines
 
@@ -269,7 +271,9 @@ async def _replay(args: argparse.Namespace, config: VidetteConfig) -> int:
     weights = stratified_weights(rows, looked)
     replayed = classify_all(rows, looked, settings, weights)
     table = checks(replayed, known, config)
-    durations = measured_durations(rows)
+    durations = measured_durations(r for r in rows if r.started_at >= until - 86400)
+    if len(durations) < 50:
+        durations = measured_durations(rows)
     deep_seconds = [
         float(r.deep["seconds"])
         for r in rows

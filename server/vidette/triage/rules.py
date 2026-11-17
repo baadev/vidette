@@ -10,6 +10,9 @@ First match wins:
 4. A vehicle that moves (not in the same place in every frame): **now** (or **later**
    with `vehicles: later`). A car hit while parking, a car driving in.
 5. An animal: **later**. Never an alert by itself; the judge may still see more.
+5a. The light changed (a lamp switched on) while things moved, nobody found: **now**. A
+    floodlight's own sensor saw something warm; the detector can miss a person
+    over-exposed at the frame's edge.
 6. An early window with none of the above: **skip**. The whole clip follows and is
    looked at again.
 7. Fewer than `MIN_FRAMES` frames looked at: **later**. Too little to throw it away.
@@ -19,8 +22,8 @@ First match wins:
     camera (a tree, an awning): **skip**.
 11. Anything else, something moved and nothing was recognised: **later**.
 
-Within *now*, people and anything unclear go before moving vehicles with nobody seen
-(`rank`): the judge's time goes to people first.
+Within *now*, people go before weaker person candidates and moving vehicles with nobody
+seen (`rank`): the judge's time goes to people first.
 
 Parked cars are in every frame at the same place and do not count as vehicles. Nothing
 here knows about scenarios or levels: a clip that could matter to any of them is never
@@ -64,18 +67,20 @@ class TriageClass(StrEnum):
 
 
 ORDER = {TriageClass.now: 0, TriageClass.later: 1, TriageClass.skip: 2}
-RANK_PEOPLE, RANK_VEHICLES, RANK_LATER, RANK_SKIP = range(4)
+RANK_PEOPLE, RANK_SECOND, RANK_LATER, RANK_SKIP = range(4)
+SECOND_TIER = frozenset({"vehicle", "possible_person"})
 
 
 def rank(klass: TriageClass, reason: str | None) -> int:
-    """The order the live judge takes clips in: *now* with a person or anything unclear
-    first, then *now* for a moving vehicle with nobody seen, then *later*; newest first
-    within each. Skipped clips are never taken."""
+    """The order the live judge takes clips in, newest first within each: *now* with a
+    person (or not checked) first; then *now* for a weaker person candidate or a moving
+    vehicle with nobody seen (on a test deployment nine in ten of each were ordinary
+    traffic or no person at all); then *later*. Skipped clips are never taken."""
     if klass is TriageClass.skip:
         return RANK_SKIP
     if klass is TriageClass.later:
         return RANK_LATER
-    return RANK_VEHICLES if reason == "vehicle" else RANK_PEOPLE
+    return RANK_SECOND if reason in SECOND_TIER else RANK_PEOPLE
 
 
 @dataclass(frozen=True)
@@ -197,6 +202,13 @@ def classify(
         return Decision(klass, "a vehicle moves", "vehicle", facts)
     if facts.animal >= settings.animal:
         return Decision(TriageClass.later, "an animal", "animal", facts)
+    light = observation.light or 0.0
+    if light >= LIGHT and (observation.activity_peak or 0.0) > LIGHT_RESIDUAL:
+        # a lamp switched on (a floodlight's own motion sensor) while things moved: on a
+        # test deployment, a person at the gate at night, over-exposed at the frame's edge
+        return Decision(
+            TriageClass.now, "the light changed and something moved", "light_motion", facts
+        )
     if not settings.skip:
         return Decision(TriageClass.later, "nobody seen", "nobody", facts)
     if partial:

@@ -25,12 +25,13 @@ from vidette.triage.replay import Arrival, simulate, stratified_weights
 from vidette.triage.rules import (
     RANK_LATER,
     RANK_PEOPLE,
-    RANK_VEHICLES,
+    RANK_SECOND,
     Decision,
     Facts,
     TriageClass,
     UsualMovement,
     classify,
+    rank,
 )
 from vidette.triage.service import Triager
 from vidette.verdicts.base import Case, PolicyText, Verdict
@@ -67,6 +68,9 @@ def test_a_person_or_a_weak_person_candidate_is_judged_now() -> None:
     assert weak.klass is TriageClass.now and weak.reason == "possible_person"
     noise = classify(obs([det("person", 0.1)], [], [], []), SETTINGS)
     assert noise.klass is TriageClass.later  # below possible_person: something moved
+    assert rank(TriageClass.now, "person") == RANK_PEOPLE
+    assert rank(TriageClass.now, "possible_person") == rank(TriageClass.now, "vehicle")
+    assert rank(TriageClass.now, "possible_person") < rank(TriageClass.later, "motion")
 
 
 def test_parked_cars_do_not_count_and_a_moving_one_does() -> None:
@@ -85,6 +89,14 @@ def test_animals_wait_and_early_windows_without_anyone_are_skipped() -> None:
     assert early.klass is TriageClass.skip and early.reason == "early"
     person_early = classify(obs([det("person", 0.9)], [], [], []), SETTINGS, partial=True)
     assert person_early.klass is TriageClass.now
+
+
+def test_a_lamp_switching_on_while_things_move_is_judged_now() -> None:
+    lamp = classify(obs(light=0.3, activity_peak=0.6), SETTINGS)
+    assert lamp.klass is TriageClass.now and lamp.reason == "light_motion"
+    assert rank(lamp.klass, lamp.reason) == RANK_PEOPLE
+    cat = classify(obs([det("cat", 0.8)], [], [], [], light=0.3, activity_peak=0.6), SETTINGS)
+    assert cat.reason == "animal", "an animal explains the lamp"
 
 
 def test_light_change_and_tiny_motion_are_skipped_more_motion_waits() -> None:
@@ -335,7 +347,7 @@ async def test_now_before_later_newest_first_and_later_only_when_idle(tmp_path: 
     pending: dict[str, Incident] = {}
     old_now, new_now, later = item("cam-now", ended_ago=60), item("cam-now"), item("cam-later")
     car = item("cam-now", ended_ago=1, name="car")
-    for incident, order in ((later, RANK_LATER), (old_now, RANK_PEOPLE), (car, RANK_VEHICLES),
+    for incident, order in ((later, RANK_LATER), (old_now, RANK_PEOPLE), (car, RANK_SECOND),
                             (new_now, RANK_PEOPLE)):  # fmt: skip
         pending[incident.key] = incident
         worker._ranks[incident.key] = order
