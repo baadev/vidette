@@ -210,7 +210,8 @@ def main(argv: list[str] | None = None) -> int:
 
     policy = subparsers.add_parser(
         "policy",
-        help="list or take back calibration steps (docs/calibration.md)",
+        help="dry-run a policy over stored verdicts; list or take back calibration "
+        "(docs/calibration.md)",
     )
     policy_cli.add_arguments(policy)
 

@@ -4,5 +4,7 @@
              safety floor for protected scenarios; pure
 - `service`  `Calibrator` inside `vidette serve`: reviews after every mark, applies
              steps to new alerts, takes them back
-- `cli`      `vidette policy calibration`
+- `dryrun`   `vidette policy dry-run`: stored verdicts replayed through a policy and
+             calibration, nothing sent
+- `cli`      `vidette policy calibration` and `vidette policy dry-run`
 """

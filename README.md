@@ -158,7 +158,8 @@ alert ([docs/other-cameras.md](docs/other-cameras.md)).
   database with no model call, over several datasets at once ([docs/eval.md](docs/eval.md)).
 - **Calibration**: 👍/👎 quiet one scenario on one camera a step at a time (a confidence
   bar, then the digest only), never a critical one; each step said in one line with an
-  Undo button ([docs/calibration.md](docs/calibration.md)).
+  Undo button. **`vidette policy dry-run`** replays the last days' stored verdicts through
+  a policy and calibration and shows what would have woken you ([docs/calibration.md](docs/calibration.md)).
 
 ### The web app
 
@@ -333,8 +334,8 @@ everything else: [ROADMAP.md](ROADMAP.md).
 | Signed webhooks, Apprise (100+ services), web push, MQTT + Home Assistant discovery | ✅ on confirmed events only |
 | The bot in English (default) or Russian (`language: ru`), one catalog per language | ✅ tested in both languages |
 | A plain-language policy shown back as an inspectable spec | 📐 levels are written by hand |
-| Dry run of a policy over past events | 📐 |
-| Calibration from 👍 / 👎, never past the floor of critical scenarios | ✅ tested against fakes |
+| Dry run of a policy over past events, Frigate and clip folders alike, with calibration | ✅ read-only over the stored verdicts |
+| Calibration from 👍 / 👎, never past the floor of critical scenarios | ✅ tested against fakes; replayed over a test deployment |
 | Published accuracy on a labelled set of real clips | 🚧 first numbers on a test deployment (32 reviewed clips, 3 positives) |
 | v0.2.0 release with its own images | 📐 |
 

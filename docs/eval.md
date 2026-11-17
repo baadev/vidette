@@ -103,7 +103,8 @@ vidette eval ~/vidette-data/porch ~/vidette-data/garden \
   not look at it, or the judge gave no answer). An abstention counts as no alert, which
   is what happened at home.
 - The stored `alert` is what the service decided then, under the policy as it was that
-  day; a policy edited since is not re-applied.
+  day; a policy edited since is not re-applied (that is what [`vidette policy
+  dry-run`](calibration.md#dry-run-what-a-policy-would-have-done) is for).
 - Only `status: reviewed` entries (and hand-written ones) are truth; machine drafts are
   not scored unless `--include-drafts` says so, loudly.
 

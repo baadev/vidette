@@ -8,9 +8,11 @@ on something calibration kept in the digest brings it back at once. Your policy 
 never changed; every step is stored, said in one line and can be taken back with one tap.
 Design and guardrails: [ADR-0020](architecture/adr/0020-calibration-from-marks.md).
 
-Status: ✅ tested against a fake Telegram API, a temporary database and the web API.
-Calibration changes routing only; it is not measured by `vidette eval` (which scores the
-judge, not who was woken).
+Status: ✅ tested against a fake Telegram API, a temporary database and the web API;
+replayed over a test deployment's real marks with
+[`vidette policy dry-run`](#dry-run-what-a-policy-would-have-done)
+([measured](#measured-on-a-test-deployment)). Calibration changes routing only; it is not
+measured by `vidette eval` (which scores the judge, not who was woken).
 
 ## The rule
 
@@ -99,6 +101,65 @@ calibration:
 
 `vidette validate` refuses a `protect` name that no policy has, and a `protected_bar`
 above `bar`.
+
+## Dry run: what a policy would have done
+
+`vidette policy dry-run` replays the stored verdicts of the last days through the current
+policy (or one you propose) and calibration, and prints what would have woken someone,
+gone to the digest or stayed silent, per day and per scenario and camera. It works for
+every event in the database, clip folders and Frigate alike. Nothing is sent, no model is
+called, and the database is opened read-only, so it is safe next to a running service.
+
+```bash
+vidette policy --config ~/.config/vidette/serve.yaml dry-run --days 7
+vidette policy --config ~/.config/vidette/serve.yaml dry-run --calibration off
+vidette policy --config ~/.config/vidette/serve.yaml dry-run --policy-file proposed.yaml
+```
+
+| Option | |
+|---|---|
+| `--calibration replay` (default) | no steps at the start, then every 👍/👎 at the time it was given, every step it would have made applied to the events after it: what calibration would have done had it been on |
+| `--calibration active` | the steps in force now, as if they had held all along |
+| `--calibration off` | the policy exactly as written |
+| `--policy-file FILE` | a YAML file with `policies:` (and optionally `calibration:`) used instead of the config's |
+| `--verdicts live \| deep \| best` | the live judge's verdicts (default), deep analysis' ([deep.md](deep.md)), or the live ones and deep analysis where the live judge gave none |
+| `--days N`, `--db PATH`, `--json`, `--env-file FILE` | |
+
+The output's shape (an illustration, not a measurement):
+
+```
+day           events   wake  (written)  digest  silent  unjudged  sent then  marked 👎/👍
+2026-01-14       100      3          3       0      60        37          3          2/1
+2026-01-15       100      1          2       1      60        38          2          1/0
+total            200      4          5       1     120        75          5          3/1
+
+Calibration moved 1 alert(s) to the digest.
+Steps:
+  01-14 18:20  person_at_house on Porch: wakes only from 90 % sure (4 × 👎: walked past 4)
+```
+
+`wake` is with the chosen calibration, `(written)` without it, `sent then` the alerts the
+bot really sent (quiet hours, collapsed series and policy edits since then make it
+differ), `marked` the 👎/👍 those days' events got. `unjudged`: the event has no stored
+verdict (the live queue never reached it, or the judge gave none).
+
+What a replay cannot show: a change in a scenario's *wording*. The judge read the old
+wording; only judging the clips again tells what the new one does
+([`vidette eval`](eval.md) on a labelled set). Moving a scenario to another level,
+changing a `wake` rule, `sensitivity` and calibration are replayed exactly; quiet hours are
+not (they are per chat and per moment).
+
+### Measured on a test deployment
+
+Clip-folder cameras, its first four days (the `--days 7` window reaches back to its
+start), stored live verdicts. As written, the policy would have woken someone 16 times;
+the bot really sent 18 alerts (two were early alerts the whole clip then called ordinary)
+and they got 13 👎 and 1 👍. Calibration replayed from those marks makes one step on the
+second morning (a 90 % bar for one scenario on one camera, after four 👎 without a
+reason) and moves 3 of the 16 to the digest: two the household had marked false and one
+nobody answered; none it had marked right, and no critical scenario. About two thirds of
+the clips have no live verdict at all (the shared model did not keep up), which no
+calibration fixes.
 
 ## Budgets
 

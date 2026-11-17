@@ -11,6 +11,14 @@ of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). 
 released; no images published from it; the last release is v0.1.3.
 
 ### Added
+- **`vidette policy dry-run`** ([docs/calibration.md](docs/calibration.md#dry-run-what-a-policy-would-have-done)):
+  the last N days of stored verdicts, from Frigate and clip folders alike, routed again
+  through the config's policy or a proposed one (`--policy-file`) and calibration
+  (`--calibration replay`: from the marks in the order they were given; `active`: the
+  steps in force now; `off`), per day (events, would wake, as written, digest, silent,
+  unjudged, really sent, marked 👎/👍) and per scenario and camera, with the steps the
+  replay made. The database is opened read-only; nothing is sent and no model is called.
+  `--verdicts live | deep | best`, `--json`.
 - **`vidette eval` on stored verdicts** ([docs/eval.md](docs/eval.md#scoring-what-the-service-already-said)):
   `--judge stored-live | stored-deep | stored-best` score what a running service already
   said, read-only from its database (`--db`, default the config's), matched by clip path,
