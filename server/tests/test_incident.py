@@ -189,11 +189,15 @@ async def test_the_alert_says_where_else_the_same_person_was_and_sends_that_clip
               "gap_s": -60.0, "evidence": "look", "score": 0.91, "state": "dismissed",
               "label": "passer_by", "level": "none", "rationale": "Человек у стены дома.",
               "approximate": True}  # fmt: skip
-    intent = dict(row.intent or {}, incident={"id": "inc", "role": "alert", "links": [record]})
+    nearby = dict(record, event_id="other", evidence="time", gap_s=-100.0,
+                  rationale="Кто-то проходит мимо.")  # fmt: skip
+    intent = dict(row.intent or {},
+                  incident={"id": "inc", "role": "alert", "links": [record, nearby]})  # fmt: skip
     await b.db.update_event(event_id, intent=intent)
     await alert(b, event_id)
     text = b.fake.all("sendMessage")[0].params["text"]
     assert "Похоже, тот же человек (одежда и время)" in text and "около" in text
+    assert "Кто-то проходит мимо" not in text, "only the same person when there is one"
     assert "Человек у стены дома" in text and "судья это пропустил" in text
     captions = [c.params.get("caption") or "" for c in b.fake.calls if c.method == "sendPhoto"]
     assert any("Похоже, тот же человек" in c for c in captions), "its best frame follows"

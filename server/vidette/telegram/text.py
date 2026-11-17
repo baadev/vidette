@@ -206,15 +206,22 @@ def incident_lines(
     now: float,
     limit: int = 3,
     same_person_only: bool = False,
+    brief: bool = False,
 ) -> list[str]:
     """The alert's links to other cameras (ADR-0022), strongest first: one plain line each,
     "the same person by face", "probably the same person", or "a person at the same
     time", with that camera, its time (approximate for a camera whose video arrives late)
-    and what the judge said there."""
+    and what the judge said there. `brief` (the alert itself): only the same person's
+    links when there are any, else the one nearest in time."""
     if not isinstance(incident, Mapping) or incident.get("role") != "alert":
         return []
+    links = [link for link in incident.get("links") or [] if isinstance(link, Mapping)]
+    if brief:
+        strong = [link for link in links if link.get("evidence") in ("face", "look")]
+        nearest = sorted(links, key=lambda link: abs(float(link.get("gap_s") or 0.0)))
+        links = strong or nearest[:1]
     lines: list[str] = []
-    for link in (incident.get("links") or [])[:limit]:
+    for link in links[:limit]:
         if not isinstance(link, Mapping) or not isinstance(link.get("at"), int | float):
             continue
         evidence = str(link.get("evidence") or "time")

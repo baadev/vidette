@@ -595,7 +595,7 @@ class TelegramService:
                     (row.intent or {}).get("incident"),
                     camera_name=self.camera_name,
                     titles=lambda label: self._scenario_title(policy, label) if label else "",
-                    now=self._clock(),
+                    now=self._clock(), limit=2, brief=True,
                 )
             ),
         )
