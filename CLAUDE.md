@@ -28,7 +28,9 @@ do not resurrect it on this line. See [ROADMAP.md](ROADMAP.md) for what exists.
    anonymous identities of ADR-0014 (unknown faces counted as numbers, retention, off by
    default) — no naming of strangers from any source, no third-party identity databases,
    no cloud biometrics, no appearance attributes (age, gender, skin colour) in matching,
-   suspicion or policy, and uncertain matches never suppress. Do not add "just a version check" HTTP calls.
+   suspicion or policy (one opt-in exception: ADR-0022's clothing colours, only for
+   "probably the same person" next to an alert, never stored, never a reason to alert),
+   and uncertain matches never suppress. Do not add "just a version check" HTTP calls.
 5. **Security defaults do not weaken.** No default credentials, auth on by default, webhooks
    signed, secrets never logged, config files never contain bootstrap passwords. See
    [docs/architecture/security-model.md](docs/architecture/security-model.md).

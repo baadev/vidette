@@ -166,14 +166,21 @@ English and Russian whatever the setting. The examples below are in English; wit
 [Who is it?] [Not sure]
 ```
 
-- Above the text, an album: up to `frames` (3) frames that show the subject, and the clip
-  when it is at most `max_video_mb` (20 MB; Telegram's limit for bots is 50). The frames
+- The text with the buttons goes first, to every recipient at once: it is a few hundred
+  bytes and arrives within seconds whatever the uplink does. Then, as replies to it: the
+  best frame alone, then the other frames with the clip as one album. Up to `frames` (3)
+  frames that show the subject, and the clip when it is at most `max_video_mb` (20 MB;
+  Telegram's limit for bots is 50). A failed upload leaves the text, with a note that the
+  frames were not sent. The log has one line per alert and recipient with how long the
+  verdict, the text, the frame and the album took. The frames
   are the best moment of each face the check found (largest first), then the judge's own
   frames that it said show what its verdict is about; never an empty street. An event
   judged before this existed shows the judged frames from the first one with a person.
   A bigger clip becomes a link to `clip_url` (default `server.base_url`), which works
   only where that address does.
-- The album arrives silently; the text with the buttons is what buzzes.
+- The frames arrive silently; the text with the buttons is what buzzes.
+- `🔗` lines: where else the same person was, or someone at the same time, on the other
+  cameras ([incidents.md](incidents.md)); the same person's best frame and clip follow.
 - One camera's alerts within `collapse` (5 min) at the same or a lower level edit the
   first message ("More on this camera: 2" and their times) instead of buzzing again; a
   higher level is a new alert.

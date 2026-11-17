@@ -200,7 +200,10 @@ policies:
   suggests them.
 - Nothing about how anyone looks is used: no age, gender, skin colour or clothing, not in
   matching, not in the judge's facts, not in rules. Only the face embedding, the time and
-  the camera.
+  the camera. One opt-in exception, outside face matching: `incident.look` compares the
+  colours of the clothes (never the head) between an alert and the other cameras' events
+  of the same minutes, only to say "probably the same person" next to the alert; never
+  stored, never a reason to alert ([incidents.md](incidents.md#the-clothing-cue-incidentlook-off-by-default)).
 
 ### Change your mind
 

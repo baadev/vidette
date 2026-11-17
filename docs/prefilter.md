@@ -47,6 +47,10 @@ The rules, first match wins:
     camera (below): *skip*.
 12. Anything else: *later*.
 
+During [incident mode](incidents.md#incident-mode) (the minutes after an alert), a whole
+clip that would be *later* or *skip* is *now* instead, judged right after the clips with
+people; the class it would have had is kept (`intent.triage.incident`).
+
 ## What it looks at
 
 - **Up to `frames` (8) frames where the picture changed**, chosen exactly as the judge's

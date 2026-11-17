@@ -11,6 +11,29 @@ of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). 
 released; no images published from it; the last release is v0.1.3.
 
 ### Added
+- **Incidents across cameras** ([docs/incidents.md](docs/incidents.md),
+  [ADR-0022](docs/architecture/adr/0022-incidents-across-cameras.md)). When an alert goes
+  out, the other cameras' events with a person within `incident.link_within` (3 min) are
+  linked: the same face; else, with the opt-in `incident.look`, similar clothing colours
+  on neighbouring cameras ("probably the same person"; never stored, never a reason to
+  alert); else only "at the same time". The alert gets one `🔗` line per link and the same
+  person's best frame and clip; the links are kept on both events (`intent.incident`),
+  returned by the events API, shown on the web app's event card and in the evening
+  digest; a linked event the judge had dismissed is marked `reopened`. **Incident mode**:
+  for `incident.keep_for` (10 min) after an alert, every collector keeps everything it
+  sees, the pre-filter skips nothing and the judge is told about the alert.
+- **Long clips are judged around the person** (`understanding.windows`): a clip longer
+  than 30 s in which the pre-filter saw a person gets a detector track (a frame a second)
+  and up to three windows of at most 20 s, the one with the last sighting first, small or
+  far people enlarged, next to the frames it was always judged on; a window that wakes
+  for anyone decides. On a test deployment an 81 s clip judged ordinary on four activity
+  frames became a critical alert.
+- **`vidette collect`: woken streams are evidence.** With `--base-station`, a woken stream
+  the motion gate cut nothing out of is kept whole (trigger `wake`), short wakes down to
+  `--wake-min` (0.5 s); after a woken stream the next look comes after `--base-reconnect`
+  (1 s), asleep checks every 2 s; ring segments younger than `--ring-min-age` (30 min)
+  survive `--ring-size`; `--incident-file` (found through `--serve-config`) for incident
+  mode. On a test deployment 130 to 220 woken streams a day had been dropped on one camera.
 - **A pre-filter before the live judge** ([docs/prefilter.md](docs/prefilter.md),
   [ADR-0021](docs/architecture/adr/0021-pre-filter-before-the-judge.md)), opt-in
   (`understanding.triage`): every clip-folder clip is looked at on the machine that runs
@@ -373,6 +396,16 @@ released; no images published from it; the last release is v0.1.3.
   Setup pages. Dependencies `numpy` and `onnxruntime`.
 
 ### Fixed
+- **Telegram: an alert's text no longer waits for its frames and clip.** The text with
+  the buttons goes to every recipient at once, first; the best frame, then the other frames
+  with the clip follow as replies. A slow upload had held the text back 430 s for the
+  first recipient and 480 s more for the second. One log line per alert and recipient
+  times each step.
+- **The assistant never sends the model's tool transcript** ("[tool_result] {…}"): copied
+  tool calls and results are stripped, a call written as text is run, an empty answer is
+  asked for again, then given plainly. "It was me, a test" marks an alert right and as a
+  test, never a false alarm for calibration; "what about the other camera" is answered
+  from the alert's incident links.
 - **A Telegram outage no longer loses the evening digest or the alerts.** A digest
   Telegram did not take (no connection, `429`, `5xx`) is tried again with a growing pause,
   at once when the bot hears Telegram again, until `notifications.telegram.digest_until`

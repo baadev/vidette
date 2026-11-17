@@ -29,4 +29,5 @@ the old one (both stay). New ADRs land as PRs with a comment window. Template:
 | [0018](0018-identity-merge-pass.md) | A merge pass joins identities that are certainly one person, audited and reversible | accepted, amends 0014 and 0016 |
 | [0019](0019-deep-analysis.md) | Deep analysis: a second look at the day's clips, on one shared slot, inside serve | accepted, amends 0013 and 0017; amended by 0021 |
 | [0020](0020-calibration-from-marks.md) | Calibration: 👍/👎 move a scenario on a camera a step quieter, never past a floor | accepted, amends 0013 |
-| [0021](0021-pre-filter-before-the-judge.md) | A pre-filter before the live judge: a local detector decides what waits for the model | accepted, amends 0019 |
+| [0021](0021-pre-filter-before-the-judge.md) | A pre-filter before the live judge: a local detector decides what waits for the model | accepted, amends 0019; amended by 0022 |
+| [0022](0022-incidents-across-cameras.md) | Incidents across cameras: nothing woken is dropped, long clips are judged around the person, an alert names the other cameras | accepted, amends 0011, 0013, 0014, 0017 and 0021 |

@@ -104,7 +104,10 @@ uv run vidette collect ~/vidette-data/front-door --camera front_door --base-stat
 ```
 
 With `--base-station`, a 404 means asleep: no TCP check (the port tells nothing), a
-request every `--probe-every` (5 s) without backoff, one log line per sleep. A real
+request every `--probe-every` (2 s with `--base-station`) without backoff, one log line per
+sleep. A woken stream is evidence (the camera's own sensor fired): it is kept down to
+`--wake-min` (0.5 s) even below `--min`, and after it ends the next look comes after
+`--base-reconnect` (1 s), never a growing backoff. A real
 second client (VLC, the Home Assistant RTSP integration) now looks like a camera that
 never wakes, so keep the one-client rule.
 
@@ -114,7 +117,17 @@ works but reacts to motion more slowly. `--no-probe` skips the port check.
 
 Options: `--min 3s` (drop shorter clips), `--max 2m` (cut longer ones), `--probe-every 5s`,
 `--cooldown 10s`, `--silence 8s`, `--camera NAME`, `--rotate 90|180|270`
-([rotation](#a-camera-on-its-side---rotate)), `--base-station`, `--early 8s`.
+([rotation](#a-camera-on-its-side---rotate)), `--base-station`, `--wake-min 0.5s`,
+`--base-reconnect 1s`, `--early 8s`, `--incident-file PATH`.
+
+### Incident mode
+
+After an alert, `vidette serve` writes `incident-mode.json` next to its database
+([incidents.md](incidents.md#incident-mode)). A collector started with `--serve-config`
+finds it there (or give `--incident-file`); until it expires, every woken stream is kept
+whole whatever its length, and in continuous mode the stretches the motion gate did not
+cut are kept in 30 s pieces (trigger `wake`, the reason in `stop_reason`). The log says
+`incident mode until …` once per incident.
 
 ### Early windows: `--early 8s`
 
@@ -268,9 +281,10 @@ account on the same Mac could see it with `ps` while a recording runs.
 For a camera that streams all the time (a mains camera), `--continuous` keeps a ring of
 the stream and cuts a clip around each motion, with a few seconds before and after it. It
 also works for a camera that streams only while awake: each wake period goes into the
-ring and the gate cuts the motion out of it. Motion that is over within the first seconds
-of a wake, before the stream reaches the collector, is not seen; without `--continuous`
-the whole wake period is kept instead.
+ring and the gate cuts the motion out of it. With `--base-station`, a wake the gate cut
+nothing out of is kept whole (trigger `wake`, "camera woke; the motion gate saw nothing"):
+the camera's own sensor fired, which is evidence the gate cannot see. Without
+`--continuous` the whole wake period is kept anyway.
 
 ```bash
 uv run vidette collect ~/vidette-data/street --camera street \
@@ -294,6 +308,8 @@ flowchart LR
   client at a time is never asked twice.
 - **The ring** is `ring/<local time with UTC offset>.mkv`, one file per `--segment` (60 s,
   split on key frames). It is trimmed to `--ring-size` (3 GB) and `--ring-keep` (24 h),
+  never deletes for size what is younger than `--ring-min-age` (30 min: the last half
+  hour can always be cut out again; the free-space floor still wins),
   keeps at least its newest three segments and whatever a waiting clip still needs, and
   is not a recording: nothing indexes or plays it, and it is overwritten within hours.
 - **The gate** decodes the stream a second time at 4 fps (VideoToolbox on a Mac,

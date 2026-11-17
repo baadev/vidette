@@ -134,6 +134,12 @@ cross_camera:
   after: 45s
   # lag_up_to: {porch: 2m}   # cameras whose video can reach the collector late
 
+# An alert's links to the other cameras, and incident mode after it (docs/incidents.md).
+# incident:
+#   keep_for: 10m            # every camera keeps everything this long after an alert
+#   link_within: 3m
+#   look: false              # opt-in: clothing colours for "probably the same person"
+
 # Questions in plain words to the Telegram bot, and the same tools over MCP
 # (docs/assistant.md). local: the judge's own server; cloud never gets names or faces.
 assistant:

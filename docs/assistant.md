@@ -21,15 +21,24 @@ take one to three minutes.
 | `clips_at` | what every camera recorded around a moment ([other-cameras.md](other-cameras.md)) |
 | `identity_sightings` | where and when an anonymous identity was seen (by face) |
 | `send_clips` | the mosaic of every camera at that moment, sent to the chat |
-| `mark_event` | the same as the alert's buttons: right, false (with a reason), not sure |
+| `mark_event` | the same as the alert's buttons: right, false (with a reason), not sure; `test`: right, staged by one of us |
 | `today` | today's digest |
 
 Anything else gets a short list of what it can do. It never describes how people look,
 and two clips are «the same person» only when a face says so.
 
 **Three questions skip the model** and answer in seconds: the other cameras at the
-moment of the alert you replied to, where else the person in it was seen, and today's
+moment of the alert you replied to (from its [incident links](incidents.md) when it has
+them, with the same person's clips), where else the person in it was seen, and today's
 digest. Everything else goes to the model with the tools, at most `max_steps` rounds.
+
+"It was me, a test" (a test word with "it was me" or "right", in English or Russian) in a
+reply to an alert marks it right and as a test: never a false alarm for
+[calibration](calibration.md). The rest of the message is answered as usual.
+
+Only words reach the chat: a tool call or a tool's result the model copied into its
+answer, special tokens and bare JSON are removed; a tool call written as text is run; an
+answer with nothing left is asked for once more, then given plainly from the facts.
 
 ## The model
 

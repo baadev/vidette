@@ -362,7 +362,9 @@ everything else: [ROADMAP.md](ROADMAP.md).
   among people who agreed to be enrolled; and, off by default,
   [anonymous identities](docs/people.md#strangers-who-come-back): unknown faces counted as
   numbers, never named from any source, kept on your machine for 30 days unless you mark
-  them. No age, gender, skin colour or clothing is used to match or flag anyone.
+  them. No age, gender or skin colour is used to match or flag anyone; clothing colours
+  only with the opt-in `incident.look`, to say "probably the same person" next to an alert
+  ([incidents](docs/incidents.md)), never to flag anyone.
 
 Threat model and hardening: [security-model.md](docs/architecture/security-model.md).
 

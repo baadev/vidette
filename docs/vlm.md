@@ -87,7 +87,12 @@ the clip itself when there is one (chosen once for all policies, kept under
 `media_dir/judge-frames/<event id>/` and used for the Telegram album), else from
 Frigate's recordings over the incident (event snapshots if the camera does not record).
 The clip's [stream health](collect.md#stream-health) is kept with the event
-(`intent.stream`). The System page shows how many were judged.
+(`intent.stream`). A clip longer than 30 s in which the pre-filter saw a person is judged
+in up to three windows around the person as well, the one with their last sighting first,
+small or far people enlarged; the usual frames are still judged, and one window that
+wakes for anyone decides
+([incidents.md](incidents.md#long-clips-are-judged-around-the-person)). The System page
+shows how many were judged.
 
 ## What the judge sees and answers
 

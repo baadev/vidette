@@ -58,7 +58,9 @@ Only by face: a clip shows "the same person by face" when an anonymous identity
 ([people.md](people.md#strangers-who-come-back)) or an enrolled person is in both the
 event's and that clip's face reports. A clip whose event saw a person without a comparable
 face says "a person in view, no face to compare"; one that was never judged says nothing about
-people. Clothes, height or colour are never used: that would be profiling.
+people. Clothes, height or colour are never used here: that would be profiling. (An
+alert's own [incident links](incidents.md) may use the colours of clothes when a
+deployment turns `incident.look` on, only to say "probably the same person".)
 
 ## The video
 

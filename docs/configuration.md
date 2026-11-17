@@ -147,6 +147,12 @@ understanding:
     possible_person: 0.2          # an unclear one (still judged now),
     vehicle: 0.45                 # a vehicle,
     animal: 0.35                  # an animal
+  windows:                        # long clips judged around the person: docs/incidents.md
+    enabled: true                 # needs the pre-filter's detector
+    long_clip: 30s                # longer clips with a person are judged in windows
+    window: 20s                   # one window covers at most this much of their presence
+    max_windows: 3                # windows around the person (1 to 6); the usual frames too
+    track_every: 1s               # the detector looks at a frame this often
 ```
 
 The v0.1 keys `provider` and `send` are rejected with a pointer here. `vidette validate`
@@ -345,6 +351,23 @@ cross_camera:
   after: 45s                      # ...and this long after it
   lag_up_to: {}                   # camera → how late its video can arrive, e.g. {porch: 2m}
   max_video_mb: 19                # a longer mosaic is encoded smaller, then cut into parts
+```
+
+### `incident`
+
+What happened across cameras ([incidents.md](incidents.md)): the alert's links to the
+other cameras, and incident mode after it.
+
+```yaml
+incident:
+  enabled: true
+  keep_for: 10m                   # incident mode after an alert; 0s: off
+  link_within: 3m                 # other cameras' events this close to the alert
+  neighbours: {}                  # camera → [cameras a person walks to]; empty: all
+  look: false                     # clothing colours as a cue (opt-in; never stored)
+  look_threshold: 0.88            # similarity for coloured clothes
+  look_threshold_grey: 0.95       # for night infrared
+  mode_file: null                 # default: incident-mode.json next to storage.database
 ```
 
 ### `assistant`
