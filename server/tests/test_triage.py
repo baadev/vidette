@@ -28,6 +28,7 @@ from vidette.triage.rules import (
     RANK_SECOND,
     Decision,
     Facts,
+    Fixtures,
     TriageClass,
     UsualMovement,
     classify,
@@ -146,6 +147,26 @@ def test_the_usual_movement_is_learned_from_empty_clips_and_skips_only_inside_it
     for _ in range(10):
         memory.learn("yard", frozenset())
     assert memory.usual("yard") == frozenset(), "old clips are forgotten"
+
+
+def test_a_person_like_shape_that_is_always_there_stops_counting_but_is_never_skipped() -> None:
+    fixtures = Fixtures(keep=20, clips=3)
+    shape = [0.40, 0.30, 0.03, 0.08]
+    for _ in range(3):
+        fixtures.learn("yard", [(0.41, 0.30, 0.03, 0.08)])  # the camera wobbles a little
+    check = fixtures.check("yard")
+    weak = obs([det("person", 0.25, shape)], [], [], [], activity_peak=0.08)
+    assert classify(weak, SETTINGS).reason == "possible_person", "unknown spot: maybe a person"
+    known = classify(weak, SETTINGS, fixtures=check)
+    assert known.klass is TriageClass.later and known.facts.fixture
+    quiet = obs([det("person", 0.25, shape)], [], [], [], activity_peak=0.002, activity_active=0)
+    still = classify(quiet, SETTINGS, fixtures=check)
+    assert still.klass is TriageClass.later and still.reason == "fixture", "never skipped"
+    sure = obs([det("person", 0.6, shape)], [], [], [])
+    assert classify(sure, SETTINGS, fixtures=check).reason == "person", "a confident person counts"
+    elsewhere = obs([det("person", 0.25, [0.8, 0.6, 0.03, 0.08])], [], [], [])
+    assert classify(elsewhere, SETTINGS, fixtures=check).reason == "possible_person"
+    assert not fixtures.check("street")((0.41, 0.30, 0.03, 0.08)), "per camera"
 
 
 def test_cells_pack_small_and_read_back_old_hex() -> None:

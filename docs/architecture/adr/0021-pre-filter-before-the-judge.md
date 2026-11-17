@@ -62,6 +62,11 @@ alert is worse than a late one.
   A clip whose changes are all inside them is skipped. A clip with a person is never
   learned from. The memory is rebuilt after a restart from the decisions stored on the
   last day's events.
+- **Person-like shapes that are always there are learned per camera** too: a weak
+  person candidate at a spot where one was found in 6 of the camera's last 150 clips
+  (on a test deployment, shapes in a yard at night, on almost every clip) no longer
+  makes a clip *now*. Only weak candidates are discounted, and such a clip is never
+  skipped.
 - **An early window with someone in it carries over:** its whole clip is judged now even
   when the person has left the frame by then.
 - **Deep analysis reads the class:** a clip the live judge never reached is ranked by

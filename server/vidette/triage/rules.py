@@ -40,6 +40,7 @@ skipped by this rule.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -58,6 +59,10 @@ USUAL_KEEP = 300  # nothing-detected clips per camera the usual movement is lear
 USUAL_MIN = 30  # fewer than this learned: no usual movement yet
 USUAL_SHARE = 0.2  # a cell that changed in this share of them is usual
 USUAL_OUTSIDE = 3  # at most this many changed cells outside the usual ones
+FIXTURE_KEEP = 150  # clips per camera the person-like shapes are remembered from
+FIXTURE_CLIPS = 6  # a weak candidate seen at one spot in this many of them is a fixture
+FIXTURE_NEAR = 0.04  # same spot: centres this close (fraction of the frame)...
+FIXTURE_SIZE = 2.0  # ...and sizes within this factor (the camera may wobble a little)
 
 
 class TriageClass(StrEnum):
@@ -94,6 +99,7 @@ class Facts:
     animal: float = 0.0
     frames: int = 0
     usual: float | None = None  # share of the changed cells that are usual here
+    fixture: bool = False  # the only person-like shapes are ones always there (Fixtures)
 
     def record(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -105,6 +111,8 @@ class Facts:
         }
         if self.usual is not None:
             out["usual"] = round(self.usual, 3)
+        if self.fixture:
+            out["fixture"] = True
         return out
 
 
@@ -115,8 +123,11 @@ class Decision:
     reason: str  # a stable code: person, possible_person, vehicle, animal, early, light, …
     facts: Facts = field(default_factory=Facts)
 
-    def record(self, observation: Observation, *, phase: str) -> dict[str, Any]:
-        """What is kept on the event (`intent.triage`)."""
+    def record(
+        self, observation: Observation, *, phase: str, weak: list[Box] | None = None
+    ) -> dict[str, Any]:
+        """What is kept on the event (`intent.triage`); `weak`: the weak person
+        candidates' boxes, so the fixtures can be learned again after a restart."""
         return {
             "v": 1,
             "class": self.klass.value,
@@ -134,6 +145,7 @@ class Decision:
                 "cells": observation.cells,
                 "error": observation.error,
                 "seconds": observation.seconds,
+                "weak": [[round(v, 4) for v in box] for box in (weak or [])[:6]],
             },
         }
 
@@ -149,11 +161,30 @@ def _moved(detection: Detection, frames: list[list[Detection]], own: int) -> boo
     )
 
 
+def weak_boxes(observation: Observation, settings: TriageConfig) -> list[Box]:
+    """Weak person candidates (from `possible_person` to `person`), one per spot."""
+    boxes: list[Box] = []
+    for frame in observation.frames:
+        for d in frame.detections():
+            weak = d.kind == "person" and settings.possible_person <= d.score < settings.person
+            if weak and not any(same_spot(d.box, b) for b in boxes):
+                boxes.append(d.box)
+    return boxes
+
+
 def facts_of(
-    observation: Observation, settings: TriageConfig, usual: frozenset[int] | None = None
+    observation: Observation,
+    settings: TriageConfig,
+    usual: frozenset[int] | None = None,
+    fixtures: FixtureCheck | None = None,
 ) -> Facts:
     frames = [frame.detections() for frame in observation.frames]
     person = max((d.score for dets in frames for d in dets if d.kind == "person"), default=0.0)
+    fixture = False
+    if fixtures is not None and settings.possible_person <= person < settings.person:
+        weak = weak_boxes(observation, settings)
+        if weak and all(fixtures(box) for box in weak):
+            person, fixture = 0.0, True  # only the shapes that are always there
     animal = max((d.score for dets in frames for d in dets if d.kind == "animal"), default=0.0)
     moving = 0.0
     still = 0
@@ -175,7 +206,7 @@ def facts_of(
         cells = observation.cell_set()
         if cells:
             share = len(cells & usual) / len(cells)
-    return Facts(person, moving, still, animal, len(frames), share)
+    return Facts(person, moving, still, animal, len(frames), share, fixture)
 
 
 def classify(
@@ -184,9 +215,27 @@ def classify(
     *,
     partial: bool = False,
     usual: frozenset[int] | None = None,
+    fixtures: FixtureCheck | None = None,
 ) -> Decision:
     """The class of one clip (see the module docstring for the table)."""
-    facts = facts_of(observation, settings, usual)
+    decision = _classify(observation, settings, partial, usual, fixtures)
+    if decision.facts.fixture and decision.klass is TriageClass.skip:
+        # a person-like shape that is always there never makes a clip skippable
+        return Decision(
+            TriageClass.later, "a person-like shape that is always there", "fixture",
+            decision.facts,
+        )  # fmt: skip
+    return decision
+
+
+def _classify(
+    observation: Observation,
+    settings: TriageConfig,
+    partial: bool,
+    usual: frozenset[int] | None,
+    fixtures: FixtureCheck | None,
+) -> Decision:
+    facts = facts_of(observation, settings, usual, fixtures)
     quiet = _quiet(observation)
     if not observation.checked:
         missing = observation.error or "no detector"
@@ -276,6 +325,47 @@ class UsualMovement:
 
     def learned(self, camera: str) -> int:
         return len(self._clips.get(camera) or ())
+
+
+Box = tuple[float, float, float, float]
+FixtureCheck = Callable[[Box], bool]
+
+
+def same_spot(a: Box, b: Box) -> bool:
+    """Two boxes at one place: centres close, sizes alike (a camera may wobble)."""
+    ax, ay = a[0] + a[2] / 2, a[1] + a[3] / 2
+    bx, by = b[0] + b[2] / 2, b[1] + b[3] / 2
+    if abs(ax - bx) > FIXTURE_NEAR or abs(ay - by) > FIXTURE_NEAR:
+        return False
+    big = max(a[2] * a[3], b[2] * b[3])
+    small = max(min(a[2] * a[3], b[2] * b[3]), 1e-9)
+    return big / small <= FIXTURE_SIZE * FIXTURE_SIZE
+
+
+class Fixtures:
+    """Person-like shapes that are always there, per camera: weak person candidates
+    (from `possible_person` to `person`) at a spot where one was seen in at least
+    `clips` of the camera's last `keep` clips. Only weak ones are remembered and only
+    weak ones are discounted: a confident person is never a fixture, and a clip whose
+    only candidates are fixtures is never skipped (`classify`)."""
+
+    def __init__(self, *, keep: int = FIXTURE_KEEP, clips: int = FIXTURE_CLIPS) -> None:
+        self._keep = keep
+        self._clips = clips
+        self._seen: dict[str, deque[list[Box]]] = {}
+
+    def learn(self, camera: str, boxes: list[Box]) -> None:
+        seen = self._seen.setdefault(camera, deque(maxlen=self._keep))
+        seen.append(list(boxes))
+
+    def check(self, camera: str) -> FixtureCheck:
+        seen = list(self._seen.get(camera) or ())
+
+        def known(box: Box) -> bool:
+            hits = sum(1 for boxes in seen if any(same_spot(box, b) for b in boxes))
+            return hits >= self._clips
+
+        return known
 
 
 LEARN_FROM = frozenset({"early", "light", "tiny", "usual", "motion", "few_frames", "nobody"})

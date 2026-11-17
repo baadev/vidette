@@ -269,7 +269,9 @@ async def _replay(args: argparse.Namespace, config: VidetteConfig) -> int:
     known = {row.id: row for row in rows}
     looked = {k: v for k, v in observations.items() if k in known}
     weights = stratified_weights(rows, looked)
-    replayed = classify_all(rows, looked, settings, weights)
+    replayed = classify_all(
+        rows, looked, settings, weights, looked_share=len(looked) / max(1, len(rows))
+    )
     table = checks(replayed, known, config)
     durations = measured_durations(r for r in rows if r.started_at >= until - 86400)
     if len(durations) < 50:

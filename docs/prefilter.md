@@ -28,7 +28,8 @@ The rules, first match wins:
    check**, on any camera and whatever the policy says, a `wake: always` level included.
 2. A person (detector score from `person`, 0.35): *now*.
 3. A weaker person candidate (from `possible_person`, 0.2): *now*. Unclear goes to the
-   judge.
+   judge, unless it is a person-like shape that is always there (below): a clip whose
+   only candidates are such shapes is *later* at most, never skipped.
 4. A vehicle that moves: *now* (`vehicles: later` makes it *later*). Parked cars are in
    every frame at the same place and do not count.
 5. An animal: *later*.
@@ -68,8 +69,14 @@ The rules, first match wins:
 nobody: a cell of the 64×36 grid that changed in at least a fifth of the last 300 such
 clips is "usual" (a tree, an awning, a flag). A clip whose changes all fall inside the
 usual cells (three cells of slack) is skipped. A clip with a person is never learned
-from, so a person never becomes "usual". After a restart the memory is rebuilt from the
-decisions kept on the last day's events.
+from, so a person never becomes "usual".
+
+**Person-like shapes that are always there** are learned the same way: a weak person
+candidate (score 0.2 to 0.35) at a spot where one was found in at least 6 of the
+camera's last 150 clips (a plant, a bag hanging on a wall, at night) no longer makes a
+clip *now*. Only weak candidates are remembered and discounted; a confident person never
+is, and a clip whose only candidates are such shapes is never skipped. After a restart
+both memories are rebuilt from the decisions kept on the last day's events.
 
 ## Turn it on
 
@@ -160,13 +167,15 @@ have. No model call.
 | day | clips | now | later | skip |
 |---|---|---|---|---|
 | 15 Nov | 1,975 | 973 (49 %) | 388 (20 %) | 614 (31 %) |
-| 16 Nov | 2,011 | 1,076 (54 %) | 488 (24 %) | 447 (22 %) |
-| 17 Nov | 1,748 | 804 (46 %) | 442 (25 %) | 502 (29 %) |
+| 16 Nov | 2,011 | 975 (48 %) | 577 (29 %) | 459 (23 %) |
+| 17 Nov | 1,748 | 804 (46 %) | 430 (25 %) | 514 (29 %) |
 
 Over the three days, of the *now* clips about two in five had a person (1,061) or a lamp
-switching on with motion (11), and three in five a weak person candidate (526) or only a
-moving car (1,292). The skips were tiny motion (1,558) and the usual movement (36); the
-usual-movement memory is cold at the start of a replay and of a service.
+switching on with motion (11), and three in five a weak person candidate (418) or only a
+moving car (1,299). The skips were tiny motion (1,558) and the usual movement (60); 17
+clips went to *later* as person-like shapes that are always there. Both memories are
+cold at the start of a replay, and a replay that looks at a sample of the clips learns
+them more slowly than a service that sees all of them.
 
 **What it would have skipped of what is known** (the rows that must be 0 are 0):
 
@@ -179,7 +188,7 @@ usual-movement memory is cold at the start of a replay and of a service.
 | a waking scenario by the live judge | 19 | 0 | **0** |
 | a waking scenario by deep analysis | 4 | 0 | **0** |
 | readable faces | 72 | 0 | **0** |
-| faces the face check could not read | 274 | 21 | 17 |
+| faces the face check could not read | 274 | 22 | 17 |
 | people counted by the live judge | 431 | 10 | 3 |
 | people counted by deep analysis | 146 | 2 | 0 |
 
@@ -209,16 +218,16 @@ turn, deep analysis' daytime turns, early windows; next to what the service real
 
 | day | judged then | simulated as it ran | with the pre-filter | clips with a person, then | with the pre-filter: person / weak candidate or car / later |
 |---|---|---|---|---|---|
-| 15 Nov | 38 % | 53 % | 48 % | 48 % | 99 % / 75 % / 30 % |
-| 16 Nov | 33 % | 37 % | 36 % | 40 % | 94 % / 36 % / 16 % |
-| 17 Nov | 39 % | 35 % | 37 % | 50 % | 94 % / 61 % / 16 % |
+| 15 Nov | 38 % | 53 % | 48 % | 48 % | 98 % / 76 % / 30 % |
+| 16 Nov | 33 % | 37 % | 37 % | 40 % | 93 % / 41 % / 20 % |
+| 17 Nov | 39 % | 32 % | 37 % | 50 % | 95 % / 58 % / 15 % |
 
 The share of all clips the judge reaches hardly changes: the slot was busy before and is
 busy after. What changes is which clips it spends itself on: clips with a person went
-from about half reached (and which half was chance) to 94 % or more, and the judge no
+from about half reached (and which half was chance) to 93 % or more, and the judge no
 longer spends about 30 % of its verdicts on clips with nobody in them (41 % of the clips
 the pre-filter skips had been judged). 15 November's simulation is off by 15 points because
-its verdicts were slower (a longer prompt that day); the other days are within 5.
+its verdicts were slower (a longer prompt that day); the other days are within 7.
 
 ## Budgets
 

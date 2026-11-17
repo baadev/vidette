@@ -47,7 +47,16 @@ from vidette.triage.observe import (
     observe,
     wants_dense,
 )
-from vidette.triage.rules import TriageClass, UsualMovement, classify, rank, teaches
+from vidette.triage.rules import (
+    FIXTURE_KEEP,
+    Fixtures,
+    TriageClass,
+    UsualMovement,
+    classify,
+    rank,
+    teaches,
+    weak_boxes,
+)
 from vidette.verdicts.base import Case
 
 logger = logging.getLogger(__name__)
@@ -310,19 +319,26 @@ def classify_all(
     observations: Mapping[str, Observation],
     settings: TriageConfig,
     weights: Mapping[str, float],
+    *,
+    looked_share: float = 1.0,
 ) -> list[Replayed]:
-    """Every observed event classified in time order, with the usual movement learned
-    as the service would have learned it (from the clips looked at before)."""
+    """Every observed event classified in time order, with the usual movement and the
+    fixtures learned as the service would have learned them (from the clips looked at
+    before). `looked_share`: the share of all clips looked at, so the fixtures' memory
+    spans as much time as it would live."""
     memory = UsualMovement()
+    fixtures = Fixtures(keep=max(1, round(FIXTURE_KEEP * looked_share)))
     out: list[Replayed] = []
     for row in sorted(rows, key=lambda r: (r.started_at, r.id)):
         observation = observations.get(row.id)
         if observation is None:
             continue
         usual = memory.usual(row.camera) if settings.usual_movement else None
-        decision = classify(observation, settings, usual=usual)
+        decision = classify(observation, settings, usual=usual, fixtures=fixtures.check(row.camera))
         if observation.checked and teaches(decision):
             memory.learn(row.camera, observation.cell_set())
+        if observation.checked and decision.facts.person < settings.person:
+            fixtures.learn(row.camera, weak_boxes(observation, settings))
         out.append(
             Replayed(
                 event_id=row.id, camera=row.camera, at=row.started_at,

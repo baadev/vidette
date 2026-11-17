@@ -21,7 +21,15 @@ from vidette.core.config import TriageConfig
 from vidette.db import EventRow
 from vidette.triage.detector import DetectorUnavailableError, ObjectDetector, load_detector
 from vidette.triage.observe import Observation, observe, unpack_cells
-from vidette.triage.rules import Decision, TriageClass, UsualMovement, classify, teaches
+from vidette.triage.rules import (
+    Decision,
+    Fixtures,
+    TriageClass,
+    UsualMovement,
+    classify,
+    teaches,
+    weak_boxes,
+)
 from vidette.verdicts.base import Case
 
 logger = logging.getLogger(__name__)
@@ -54,6 +62,7 @@ class Triager:
         self.error = error  # why there is no detector when one was asked for
         self.work_dir = work_dir
         self.memory = UsualMovement()
+        self.fixtures = Fixtures()
         self.status = TriageStatus()
 
     @classmethod
@@ -86,9 +95,15 @@ class Triager:
         if self.detector is None and self.error and observation.error is None:
             observation.error = f"no detector: {self.error}"[:200]
         usual = self.memory.usual(camera) if self.config.usual_movement else None
-        decision = classify(observation, self.config, partial=partial, usual=usual)
-        if not partial and observation.checked and teaches(decision):
-            self.memory.learn(camera, observation.cell_set())
+        decision = classify(
+            observation, self.config, partial=partial, usual=usual,
+            fixtures=self.fixtures.check(camera),
+        )  # fmt: skip
+        if not partial and observation.checked:
+            if teaches(decision):
+                self.memory.learn(camera, observation.cell_set())
+            if decision.facts.person < self.config.person:
+                self.fixtures.learn(camera, weak_boxes(observation, self.config))
         self.status.classes[decision.klass.value] += 1
         self.status.reasons[decision.reason] += 1
         self.status.seconds += observation.seconds
@@ -110,6 +125,26 @@ class Triager:
             if observed.get("error"):
                 continue
             self.memory.learn(row.camera, unpack_cells(observed.get("cells")))
+            learned += 1
+        return learned
+
+    def warm_fixtures(self, rows: Iterable[EventRow]) -> int:
+        """Learn the person-like shapes that are always there from stored decisions."""
+        learned = 0
+        for row in sorted(rows, key=lambda r: r.started_at):
+            record = (row.intent or {}).get("triage")
+            if not isinstance(record, dict) or record.get("phase") != "final":
+                continue
+            observed: Any = record.get("observed") or {}
+            weak = observed.get("weak") if isinstance(observed, dict) else None
+            if not isinstance(weak, list) or observed.get("error"):
+                continue
+            boxes = [
+                (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+                for b in weak
+                if isinstance(b, list) and len(b) == 4
+            ]
+            self.fixtures.learn(row.camera, boxes)
             learned += 1
         return learned
 

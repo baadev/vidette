@@ -80,7 +80,7 @@ from vidette.ffmpeg import MediaToolError, extract_frame
 from vidette.frigate.client import Frame
 from vidette.people.check import CropWriter, crop_writer
 from vidette.people.report import PeopleReport
-from vidette.triage.rules import RANK_LATER, TriageClass, rank
+from vidette.triage.rules import RANK_LATER, TriageClass, rank, weak_boxes
 from vidette.triage.service import Triager
 from vidette.verdicts.base import Case, FrameSet, Judge, Verdict, policy_text
 from vidette.verdicts.frames import first_video, frame_set
@@ -239,6 +239,7 @@ class VerdictWorker:
         try:
             rows = await self._db.list_events(since_ts=self._clock() - WARM_LOOKBACK_S, limit=20000)
             learned = self._triage.warm(rows)
+            self._triage.warm_fixtures(rows)
         except Exception:  # a cold memory only means fewer skips for a while
             logger.exception("pre-filter: the usual movement could not be rebuilt")
             return
@@ -399,7 +400,11 @@ class VerdictWorker:
         decision, observation = await self._triage.decide(
             case, camera=incident.camera, partial=incident.partial
         )
-        record = decision.record(observation, phase="early" if incident.partial else "final")
+        record = decision.record(
+            observation,
+            phase="early" if incident.partial else "final",
+            weak=weak_boxes(observation, self._config.understanding.triage),
+        )
         current = await self._db.get_event(row.id)  # the judge may have written since
         intent = dict((current or row).intent or {})
         previous = intent.get("triage")
