@@ -183,9 +183,12 @@ def known_people(*statuses: str, names: tuple[str, ...] = ("Sam",)) -> dict[str,
 
 
 async def alert(b: Bot, event_id: str) -> list[Any]:
+    """The alert's text, then (awaited here) its frames and clip; the rows as they end."""
     row = await b.db.get_event(event_id)
     assert row is not None
-    return await b.service.notify_event(row)
+    sent = await b.service.notify_event(row)
+    await b.service.media_settled()
+    return [await b.db.get_telegram_message(message.id) for message in sent]
 
 
 def callback(
@@ -410,28 +413,55 @@ async def test_the_worker_judges_the_newest_incident_first(tmp_path: Path) -> No
 # --- alerts ------------------------------------------------------------------------------
 
 
-async def test_an_alert_is_an_album_and_a_text_with_buttons_once(tmp_path: Path) -> None:
+async def test_an_alert_is_its_text_first_then_the_best_frame_and_the_album_as_replies(
+    tmp_path: Path,
+) -> None:
     b = await bot(tmp_path)
     event_id = await event(b, "20260115-101500", people=known_people("unknown"))
     sent = await alert(b, event_id)
     assert len(sent) == 1, "recipients: first: the trial goes to the owner only"
-    album = b.fake.last("sendMediaGroup")
-    assert album.params["chat_id"] == str(OWNER)
-    assert album.params["message_thread_id"] == str(ALERTS)
-    media = json.loads(album.params["media"])
-    assert [m["type"] for m in media] == ["photo"] * 3 + ["video"]
-    assert set(album.files) == {"frame0", "frame1", "frame2", "clip"}
+    order = [m for m in b.fake.methods() if m in ("sendMessage", "sendPhoto", "sendMediaGroup")]
+    assert order == ["sendMessage", "sendPhoto", "sendMediaGroup"], "the text never waits"
     message = b.fake.last("sendMessage").params
     assert message["chat_id"] == OWNER and message["message_thread_id"] == ALERTS
+    assert "reply_parameters" not in message
     text = message["text"]
     assert "Тревога: критично" in text and "Дверь" in text and "незнакомец" in text
     assert "Человек открывает щиток." in text and "—" not in text
     buttons = [b["text"] for row in message["reply_markup"]["inline_keyboard"] for b in row]
     assert buttons == ["👍 верно", "👎 ложная", "Не знаю"], "no face of a known person to name"
-    assert message["reply_parameters"]["message_id"] == 101, "the text answers the album"
+    photo = b.fake.last("sendPhoto")
+    assert json.loads(photo.params["reply_parameters"])["message_id"] == 101
+    assert photo.params["message_thread_id"] == str(ALERTS) and "file" in photo.files
+    album = b.fake.last("sendMediaGroup")
+    assert album.params["chat_id"] == str(OWNER)
+    assert album.params["message_thread_id"] == str(ALERTS)
+    assert json.loads(album.params["reply_parameters"])["message_id"] == 101
+    media = json.loads(album.params["media"])
+    assert [m["type"] for m in media] == ["photo"] * 2 + ["video"]
+    assert set(album.files) == {"frame0", "frame1", "clip"}
+    row = sent[0]
+    assert row.data["media"] == "sent" and row.data["clip_attached"] is True
+    assert row.data["frame"] == 102 and row.data["album"] == [103, 104, 105]
+    timing = row.data["timing"]
+    assert timing["text"] <= timing["frame"] <= timing["media"]
 
     assert await alert(b, event_id) == [], "one alert per event and chat"
     assert len(b.fake.all("sendMessage")) == 1
+    await b.db.close()
+
+
+async def test_every_recipient_gets_the_text_before_anyone_gets_media(tmp_path: Path) -> None:
+    """17.11: the second recipient's alert waited for the first one's album and clip."""
+    b = await bot(tmp_path, recipients="all")
+    event_id = await event(b, "20260115-101500")
+    sent = await alert(b, event_id)
+    assert len(sent) == 2
+    calls = [c for c in b.fake.calls if c.method in ("sendMessage", "sendPhoto", "sendMediaGroup")]
+    first_media = next(i for i, c in enumerate(calls) if c.method != "sendMessage")
+    texts = [c for c in calls if c.method == "sendMessage"]
+    assert len(texts) == 2 and all(i < first_media for i, c in enumerate(calls)
+                                   if c.method == "sendMessage")  # fmt: skip
     await b.db.close()
 
 
@@ -450,8 +480,9 @@ async def test_an_interrupted_recording_is_said_and_the_album_shows_what_the_jud
         b, "20260115-101500", extra={"frames": judged, "stream": stream}
     )
     await alert(b, event_id)
+    assert b.fake.last("sendPhoto").files["file"][0] == "1.jpg"
     media = json.loads(b.fake.last("sendMediaGroup").params["media"])
-    assert [m["type"] for m in media] == ["photo", "photo", "video"]
+    assert [m["type"] for m in media] == ["photo", "video"]
     assert "📼 Запись прерывалась: 38 пауз, до 13 с" in b.fake.last("sendMessage").params["text"]
     await b.db.close()
 
@@ -472,10 +503,11 @@ async def test_the_album_shows_the_subject_not_an_empty_street(tmp_path: Path) -
              {"path": judged[2]["path"], "t": 3.0, "why": "subject"}]  # fmt: skip
     with_album = await event(b, "20260115-101500", extra={"frames": judged, "album": album})
     await alert(b, with_album)
+    assert b.fake.last("sendPhoto").files["file"][0] == "face-1.jpg", "the best frame first"
     media = json.loads(b.fake.last("sendMediaGroup").params["media"])
-    assert [m["type"] for m in media] == ["photo", "photo", "video"]
+    assert [m["type"] for m in media] == ["photo", "video"]
     sent = b.fake.last("sendMediaGroup").files
-    assert sent["frame0"][0] == "face-1.jpg" and sent["frame1"][0] == "3.jpg"
+    assert sent["frame0"][0] == "3.jpg"
 
     b.clock[0] += 600  # past `collapse`: a new alert, not a line in the first one
     older = await event(b, "20260115-101600", extra={"frames": judged})
@@ -484,8 +516,9 @@ async def test_the_album_shows_the_subject_not_an_empty_street(tmp_path: Path) -
     row.intent["verdicts"][0]["person_at_s"] = 3.0
     await b.db.update_event(older, intent=row.intent)
     await alert(b, older)
+    assert b.fake.last("sendPhoto").files["file"][0] == "3.jpg"
     sent = b.fake.last("sendMediaGroup").files
-    assert [sent[k][0] for k in sorted(sent) if k.startswith("frame")] == ["3.jpg", "4.jpg"]
+    assert [sent[k][0] for k in sorted(sent) if k.startswith("frame")] == ["4.jpg"]
     await b.db.close()
 
 
@@ -1132,13 +1165,14 @@ async def test_an_alert_telegram_could_not_take_goes_late_once(tmp_path: Path) -
     restarted = await bot(tmp_path)
     restarted.clock[0] = b.clock[0] + 3600
     assert await restarted.service.resend_pending() is True
+    await restarted.service.media_settled()
     media = json.loads(restarted.fake.last("sendMediaGroup").params["media"])
-    assert [m["type"] for m in media] == ["photo"] * 3 + ["video"]
+    assert [m["type"] for m in media] == ["photo"] * 2 + ["video"]
     message = restarted.fake.last("sendMessage").params
     due = datetime.fromtimestamp(waiting.created_at).strftime("%H:%M:%S")
     assert f"С опозданием: в {due} Telegram был недоступен." in message["text"]
     assert "Тревога: критично" in message["text"] and message["message_thread_id"] == ALERTS
-    assert message["reply_parameters"]["message_id"] == 101, "the text answers the album"
+    assert "reply_parameters" not in message, "the text goes first, the media answer it"
     sent = await restarted.db.get_telegram_message(waiting.id)
     assert sent is not None and sent.message_id is not None and "pending" not in sent.data
     assert await restarted.service.resend_pending() is True
@@ -1178,13 +1212,13 @@ async def test_alerts_that_waited_too_long_are_not_sent_and_the_chat_hears_it(
 async def test_late_alerts_and_edits_follow_the_usual_rules(tmp_path: Path) -> None:
     b = await bot(tmp_path)
     b.clock[0] = today_at(12)
-    # the album went out, the text did not: later only the text goes, answering the album
+    # the text did not go out: nothing else did either; later the text, then its media
     first = await event(b, "20260115-101500")
     for _ in range(4):
         b.fake.fail("sendMessage", 502, "Bad Gateway")
     assert await alert(b, first) == []
     [waiting] = await b.db.pending_telegram_messages()
-    assert waiting.data["album"] == [101, 102, 103, 104]
+    assert "album" not in waiting.data and not b.fake.all("sendMediaGroup")
     # a lower level on the same camera, due within `collapse`, while Telegram is away
     b.fake.offline = True
     b.clock[0] += 60
@@ -1199,9 +1233,13 @@ async def test_late_alerts_and_edits_follow_the_usual_rules(tmp_path: Path) -> N
     b.fake.offline = False
     b.clock[0] += 600
     assert await b.service.resend_pending() is True
-    assert len(b.fake.all("sendMediaGroup")) == 1, "the album is not sent twice"
-    [late] = [c.params for c in b.fake.all("sendMessage") if "С опозданием" in c.params["text"]]
-    assert late["reply_parameters"]["message_id"] == 101
+    await b.service.media_settled()
+    assert len(b.fake.all("sendMediaGroup")) == 1, "the album is sent once"
+    assert [c for c in b.fake.all("sendMessage") if "С опозданием" in c.params["text"]]
+    album = b.fake.last("sendMediaGroup").params
+    went = await b.db.get_telegram_message(waiting.id)
+    assert went is not None and went.message_id is not None
+    assert json.loads(album["reply_parameters"])["message_id"] == went.message_id
     edit = b.fake.last("editMessageText").params["text"]
     assert "Ещё на этой камере: 1\n＋ 12:00:00" in edit, "folded in, as it would have been"
     assert len(b.fake.all("sendMessage")) == 5, "four refused tries and one late alert"

@@ -323,6 +323,7 @@ class TelegramApi:
         thread_id: int | None = None,
         silent: bool = False,
         timeout: float = 120.0,
+        reply_to: int | None = None,
     ) -> list[dict[str, Any]]:
         result = await self.call(
             "sendMediaGroup",
@@ -331,6 +332,11 @@ class TelegramApi:
                 "message_thread_id": None if thread_id is None else str(thread_id),
                 "media": media,
                 "disable_notification": "true" if silent else None,
+                "reply_parameters": (
+                    None
+                    if reply_to is None
+                    else {"message_id": reply_to, "allow_sending_without_reply": True}
+                ),
             },
             files=files,
             timeout=timeout,

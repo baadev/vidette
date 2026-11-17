@@ -1,9 +1,13 @@
 """The Telegram bot inside `vidette serve` (docs/telegram.md, ADR-0013).
 
     event.confirmed ─▶ routing (level's wake rule, face check, quiet hours)
-                          ├─ alert ─▶ album (key frames + clip) + a text with buttons
-                          │           in the chat's alerts topic, once per event and chat;
-                          │           one camera's alerts within `collapse` edit the first
+                          ├─ alert ─▶ every recipient at once: the text with buttons (a
+                          │           few hundred bytes: it arrives within seconds whatever
+                          │           the uplink does), then off the alert path, as
+                          │           replies: the best frame, then the other frames with
+                          │           the clip; in the chat's alerts topic, once per event
+                          │           and chat; one camera's alerts within `collapse` edit
+                          │           the first
                           └─ digest ─▶ (nothing now: the hourly digest reads the database)
 
     getUpdates (long poll) ─▶ only `allowed_chats`
@@ -126,6 +130,13 @@ def subject_frames(row: EventRow) -> list[Path]:
     return [Path(path) for path in paths if isinstance(path, str) and Path(path).is_file()]
 
 
+def _verdict_at(row: EventRow) -> float | None:
+    """When the judge finished with the event (`intent.timeline.judge_finished`)."""
+    timeline = (row.intent or {}).get("timeline")
+    value = timeline.get("judge_finished") if isinstance(timeline, Mapping) else None
+    return float(value) if isinstance(value, int | float) else None
+
+
 def _midnight(now: float) -> float:
     """Local midnight before `now`, as epoch seconds."""
     return (
@@ -199,6 +210,7 @@ class TelegramService:
         self._tasks: list[asyncio.Task[None]] = []
         self._send_lock = asyncio.Lock()  # alerts one at a time: collapsing needs order
         self._work: set[asyncio.Task[None]] = set()  # slow answers in flight
+        self._media_tasks: dict[int, asyncio.Task[None]] = {}  # alert row → its media step
         self._question_lock = asyncio.Lock()  # one question at a time, any chat
         self._asking_chat: int | None = None  # whose question is being answered
         self._assistant: Assistant | None = assistant
@@ -414,9 +426,12 @@ class TelegramService:
         self, message: TelegramMessageRow, row: EventRow, data: dict[str, Any]
     ) -> None:
         """The whole clip under an early alert: the album's last item becomes the clip,
-        or the clip answers the alert when there is no album. Too big: a link."""
+        or the clip answers the alert when there is no album. Too big: a link. While the
+        alert's own media are still going out, nothing: that step attaches it."""
         clip = Path(row.clip_path) if row.clip_path else None
         if clip is None or not clip.is_file() or EARLY_MARK in clip.parts:
+            return
+        if data.get("media") == "pending":
             return
         size_mb = clip.stat().st_size / 1_000_000
         if size_mb > self.tg.max_video_mb:
@@ -450,24 +465,37 @@ class TelegramService:
         people = people if isinstance(people, Mapping) and "seen" in people else None
         persons = verdict.get("persons") if isinstance(verdict.get("persons"), int) else None
         calibrated = say.calibrated(row.intent)
+        targets: list[tuple[int, str | None]] = []
+        for chat in self.tg.recipient_chats:
+            quiet_until = await self.quiet_until(chat)
+            quiet = quiet_until is not None and quiet_until > self._clock()
+            route = decide(wake, people, persons, quiet=quiet) if alert else "digest"
+            if route == "alert" and calibrated is not None:
+                route = "digest"  # a step of calibration (ADR-0020); the digest lists it
+            note = None
+            if test and route != "alert":
+                note = self._why_digest(alert, wake, people, persons, quiet, verdict)
+                if alert and calibrated is not None and note == t("why.plain"):
+                    note = t("why.calibrated")
+            elif route != "alert":
+                continue
+            targets.append((chat, note))
+        if not targets:
+            return []
+        async with self._send_lock:  # only the texts: the media go out after, unlocked
+            results = await asyncio.gather(
+                *(
+                    self._alert(chat, row, verdict, policy, test=test, note=note)
+                    for chat, note in targets
+                ),
+                return_exceptions=True,
+            )
         sent: list[TelegramMessageRow] = []
-        async with self._send_lock:
-            for chat in self.tg.recipient_chats:
-                quiet_until = await self.quiet_until(chat)
-                quiet = quiet_until is not None and quiet_until > self._clock()
-                route = decide(wake, people, persons, quiet=quiet) if alert else "digest"
-                if route == "alert" and calibrated is not None:
-                    route = "digest"  # a step of calibration (ADR-0020); the digest lists it
-                note = None
-                if test and route != "alert":
-                    note = self._why_digest(alert, wake, people, persons, quiet, verdict)
-                    if alert and calibrated is not None and note == t("why.plain"):
-                        note = t("why.calibrated")
-                elif route != "alert":
-                    continue
-                message = await self._alert(chat, row, verdict, policy, test=test, note=note)
-                if message is not None:
-                    sent.append(message)
+        for result in results:
+            if isinstance(result, BaseException):
+                await self._failed("alert", result)
+            elif result is not None:
+                sent.append(result)
         return sent
 
     @staticmethod
@@ -575,23 +603,22 @@ class TelegramService:
         policy: PolicyConfig | None,
         data: dict[str, Any],
     ) -> bool:
-        """Send one alert row: its album (unless that went out already), then the text
-        with the buttons. When Telegram could not take it (`TelegramError.transient`), the
-        row stays with `data.pending` and goes when Telegram answers again
-        (`resend_pending`); any other failure deletes it, and the digest lists the event
-        instead. True when it was sent."""
+        """Send one alert row: the text with the buttons, at once. The best frame, the
+        other frames and the clip follow as replies, off the alert path (`_send_media`):
+        on 17.11 a slow uplink made one album with its clip take 430 s, and the text
+        waited behind it for every recipient in turn. When Telegram could not take the
+        text (`TelegramError.transient`), the row stays with `data.pending` and goes when
+        Telegram answers again (`resend_pending`); any other failure deletes it, and the
+        digest lists the event instead. True when it was sent."""
         may_wait = self._may_wait(bool(data.get("test")))
+        started = self._clock()
         try:
-            if not isinstance(data.get("album"), list):
-                data["album"] = await self._send_album(chat, thread, row, data, may_wait=may_wait)
-            album = [m for m in data["album"] if isinstance(m, int)]
             facts = self._facts(row, verdict, policy, data)
             sent = await self.api.send_message(
                 chat,
                 say.alert_text(facts, now=self._clock()),
                 thread_id=thread,
                 reply_markup=self._keyboard(row_id, row),
-                reply_to=album[0] if album else None,
             )
         except Exception as exc:
             if isinstance(exc, TelegramError) and exc.transient and may_wait:
@@ -608,10 +635,180 @@ class TelegramService:
         data["sent_at"] = self._clock()
         clip = row.clip_path or ""
         data["early"] = EARLY_MARK in Path(clip).parts
-        data["clip_attached"] = bool(clip) and not data["early"]
+        data["clip_attached"] = False  # the media step attaches it
+        data["media"] = "pending"
+        data["timing"] = {"verdict": _verdict_at(row), "text_started": started,
+                          "text": data["sent_at"]}  # fmt: skip
         await self.db.update_telegram_message(row_id, message_id=int(sent["message_id"]), data=data)
         self.status.alerts_sent += 1
+        self._media_tasks[row_id] = self._spawn(self._send_media(row_id), "alert media")
         return True
+
+    def _spawn(self, work: Awaitable[Any], what: str) -> asyncio.Task[None]:
+        """`_background`, returning the task (the media of an alert can be awaited)."""
+
+        async def run() -> None:
+            try:
+                await work
+            except Exception as exc:
+                await self._failed(what, exc)
+
+        task = asyncio.create_task(run(), name=f"telegram:{what}")
+        self._work.add(task)
+        task.add_done_callback(self._work.discard)
+        return task
+
+    async def media_settled(self) -> None:
+        """Wait until every alert's media went out or failed (tests, a clean stop)."""
+        while self._media_tasks:
+            tasks = list(self._media_tasks.values())
+            self._media_tasks.clear()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _merge_data(self, row_id: int, **changes: Any) -> dict[str, Any] | None:
+        """Set some keys of an alert row's data on its newest version (a button pressed
+        while the media went out must not be undone by this step)."""
+        fresh = await self.db.get_telegram_message(row_id)
+        if fresh is None:
+            return None
+        data = dict(fresh.data)
+        for key, value in changes.items():
+            if value is None:
+                data.pop(key, None)
+            else:
+                data[key] = value
+        await self.db.update_telegram_message(row_id, data=data)
+        return data
+
+    async def _send_media(self, row_id: int) -> None:
+        """After the text of an alert: the best frame as a reply, then the other frames
+        with the clip as one album replying to the text. Each step is timed, and one line
+        per alert and recipient says where the time went. A failure leaves the text as it
+        is, with a note that the frames were not sent."""
+        message = await self.db.get_telegram_message(row_id)
+        if message is None or message.message_id is None or message.event_id is None:
+            return
+        event = await self.db.get_event(message.event_id)
+        if event is None:
+            return
+        chat, thread, reply = message.chat_id, message.thread_id, message.message_id
+        frames, clip = self._media_for(event)
+        timing = dict(message.data.get("timing") or {})
+        frame_id: int | None = None
+        album: list[int] = []
+        sent_clip: Path | None = None
+        video_note: str | None = None
+        failed: str | None = None
+        try:
+            if frames:
+                upload = (frames[0].name, await asyncio.to_thread(frames[0].read_bytes),
+                          "image/jpeg")  # fmt: skip
+                one = await self.api.send_reply_file(
+                    chat, "photo", upload, reply_to=reply, thread_id=thread
+                )
+                frame_id = int(one["message_id"])
+                timing["frame"] = self._clock()
+                await self._merge_data(row_id, frame=frame_id, timing=timing)
+            media: list[dict[str, Any]] = []
+            files: dict[str, Upload] = {}
+            for index, frame in enumerate(frames[1:]):
+                key = f"frame{index}"
+                files[key] = (frame.name, await asyncio.to_thread(frame.read_bytes), "image/jpeg")
+                media.append({"type": "photo", "media": f"attach://{key}"})
+            if clip is not None:
+                size_mb = clip.stat().st_size / 1_000_000
+                if size_mb <= self.tg.max_video_mb:
+                    files["clip"] = (clip.name, await asyncio.to_thread(clip.read_bytes),
+                                     "video/mp4")  # fmt: skip
+                    media.append(
+                        {"type": "video", "media": "attach://clip", "supports_streaming": True}
+                    )
+                    sent_clip = clip
+                else:
+                    base = self.tg.clip_url or self.config.server.base_url
+                    link = f"{base.rstrip('/')}/api/v1/events/{event.id}/clip.mp4" if base else None
+                    video_note = t("video.too_big", mb=f"{size_mb:.0f}") + (
+                        f'<a href="{link}">{t("video.watch_home")}</a>'
+                        if link
+                        else t("video.watch_app")
+                    )
+            if len(media) == 1:
+                key = next(iter(files))
+                one = await self.api.send_reply_file(
+                    chat, media[0]["type"], files[key], reply_to=reply, thread_id=thread
+                )
+                album = [int(one["message_id"])]
+            elif media:
+                group = await self.api.send_media_group(
+                    chat, media, files, thread_id=thread, silent=True, reply_to=reply
+                )
+                album = [int(item["message_id"]) for item in group]
+            timing["media"] = self._clock()
+        except (TelegramError, OSError) as exc:
+            failed = f"{type(exc).__name__}: {exc}"[:200]
+            await self._failed("alert media", exc)
+        early = EARLY_MARK in clip.parts if clip is not None else False
+        data = await self._merge_data(
+            row_id,
+            album=album,
+            frame=frame_id,
+            timing=timing,
+            media="failed" if failed else "sent",
+            clip_attached=sent_clip is not None and not early,
+            video_note=video_note,
+        )
+        if data is None:
+            return
+        self._log_timing(message, event, timing, failed)
+        if failed is not None or video_note is not None:
+            if failed is not None:
+                await self._merge_data(
+                    row_id, note=(data.get("note") or "") + t("alert.frames_failed")
+                )
+            with contextlib.suppress(TelegramError):
+                await self._render(row_id, keyboard="main")
+        fresh = await self.db.get_event(event.id)
+        if (
+            fresh is not None
+            and fresh.state == EventState.confirmed.value
+            and early
+            and fresh.clip_path
+            and EARLY_MARK not in Path(fresh.clip_path).parts
+        ):  # the whole clip arrived while the early one went out: it takes its place
+            latest = await self.db.get_telegram_message(row_id)
+            if latest is not None and not latest.data.get("clip_attached"):
+                updated = dict(latest.data)
+                await self._attach_clip(latest, fresh, updated)
+                await self._merge_data(row_id, clip_attached=updated.get("clip_attached"),
+                                       video_note=updated.get("video_note"))  # fmt: skip
+
+    def _log_timing(
+        self,
+        message: TelegramMessageRow,
+        event: EventRow,
+        timing: Mapping[str, Any],
+        failed: str | None,
+    ) -> None:
+        """One line per alert and recipient: where the time went (recipients by number:
+        a chat id never goes to the log)."""
+        chats = self.tg.recipient_chats
+        number = chats.index(message.chat_id) + 1 if message.chat_id in chats else 0
+
+        def since(key: str, base: str) -> str:
+            a, b = timing.get(key), timing.get(base)
+            if not isinstance(a, int | float) or not isinstance(b, int | float):
+                return "-"
+            return f"{a - b:.1f} s"
+
+        timing = {**timing, "event": event.started_at}
+        logger.info(
+            "alert %s %s → recipient %d/%d: verdict %s after the clip started, text %s after "
+            "the verdict (sending took %s), best frame %s after the text, frames and clip "
+            "%s after the text%s",
+            event.id, event.camera, number, len(chats), since("verdict", "event"),
+            since("text", "verdict"), since("text", "text_started"), since("frame", "text"),
+            since("media", "text"), f"; media failed: {failed}" if failed else "",
+        )  # fmt: skip
 
     async def _collapse(
         self, chat: int, last: TelegramMessageRow, row: EventRow, verdict: Mapping[str, Any]
@@ -676,60 +873,6 @@ class TelegramService:
         if not frames and row.snapshot_path and Path(row.snapshot_path).is_file():
             frames = [Path(row.snapshot_path)]
         return spread(frames, self.tg.frames), clip if clip and clip.is_file() else None
-
-    async def _send_album(
-        self,
-        chat: int,
-        thread: int | None,
-        row: EventRow,
-        data: dict[str, Any],
-        *,
-        may_wait: bool = False,
-    ) -> list[int]:
-        """The album above an alert; [] when there is nothing to show or it failed (the
-        text then says the frames were not sent). With `may_wait`, a failure that says
-        Telegram cannot be reached is raised instead: the whole alert waits for it."""
-        frames, clip = self._media_for(row)
-        media: list[dict[str, Any]] = []
-        files: dict[str, Upload] = {}
-        for index, frame in enumerate(frames):
-            key = f"frame{index}"
-            files[key] = (frame.name, await asyncio.to_thread(frame.read_bytes), "image/jpeg")
-            media.append({"type": "photo", "media": f"attach://{key}"})
-        if clip is not None:
-            size_mb = clip.stat().st_size / 1_000_000
-            if size_mb <= self.tg.max_video_mb:
-                files["clip"] = (clip.name, await asyncio.to_thread(clip.read_bytes), "video/mp4")
-                media.append(
-                    {"type": "video", "media": "attach://clip", "supports_streaming": True}
-                )
-            else:
-                base = self.tg.clip_url or self.config.server.base_url
-                link = f"{base.rstrip('/')}/api/v1/events/{row.id}/clip.mp4" if base else None
-                data["video_note"] = t("video.too_big", mb=f"{size_mb:.0f}") + (
-                    f'<a href="{link}">{t("video.watch_home")}</a>'
-                    if link
-                    else t("video.watch_app")
-                )
-        if not media:
-            return []
-        try:
-            if len(media) == 1:  # an album needs two items: one file goes alone
-                key = next(iter(files))
-                one = await self.api.send_file(
-                    chat, media[0]["type"], files[key], thread_id=thread, silent=True
-                )
-                return [int(one["message_id"])]
-            sent = await self.api.send_media_group(
-                chat, media, files, thread_id=thread, silent=True
-            )
-        except TelegramError as exc:
-            if exc.transient and may_wait:
-                raise
-            await self._failed("album", exc)
-            data["note"] = (data.get("note") or "") + t("alert.frames_failed")
-            return []
-        return [int(message["message_id"]) for message in sent]
 
     def _keyboard(
         self,
