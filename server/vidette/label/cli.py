@@ -109,9 +109,9 @@ def run(args: argparse.Namespace) -> int:
             return asyncio.run(_draft(root, args))
         if args.label_command == "sheets":
             dataset = load_dataset(root)
-            pending = [e for e in dataset.labels.entries if pending(e)]
-            paths = asyncio.run(_sheets(dataset, pending, args.per_sheet))
-            _print_sheets(root, paths, len(pending))
+            todo = [e for e in dataset.labels.entries if pending(e)]
+            paths = asyncio.run(_sheets(dataset, todo, args.per_sheet))
+            _print_sheets(root, paths, len(todo))
             return 0
         return _apply(root, args.reply, dry_run=args.dry_run, config_path=args.config)
     except (
