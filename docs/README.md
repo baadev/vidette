@@ -17,6 +17,7 @@ the top; absence of a banner means it describes reality.
 | See what every camera recorded at that moment | [other-cameras.md](other-cameras.md) |
 | Ask the bot in plain words, or connect an assistant over MCP | [assistant.md](assistant.md) |
 | Have the big model look again at the day's clips, overnight | [deep.md](deep.md) |
+| Spend the model's time on clips with people, skip the empty ones | [prefilter.md](prefilter.md) |
 | Understand the system | [architecture/overview.md](architecture/overview.md) |
 | Know why it changed course | [ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md) |
 | Configure everything | [configuration.md](configuration.md) + annotated [config.example.yaml](../deploy/config.example.yaml) |

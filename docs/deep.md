@@ -73,7 +73,11 @@ skipped, with the attempt count, the local day it finished and per-request
 timings. It survives restarts (a running job is queued again) and never analyses an event
 twice. Priority: alerts, then alert-level verdicts below the bar, unsure verdicts with a
 person, faces, people, vehicles, and last the clips the live judge never reached; newest
-first within each.
+first within each. With the [pre-filter](prefilter.md) on, a clip the live judge never
+reached is ranked by what the pre-filter saw (a person as a person, a moving vehicle as a
+vehicle), and a clip it skipped (nobody there) is not queued at all. Deep analysis waits
+for the live judge's *now* clips, not for its *later* ones: those, like deep analysis,
+take the slot only when it is free.
 
 ```bash
 vidette deep --config ~/.config/vidette/serve.yaml status      # queue, today's count, last clips

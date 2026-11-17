@@ -100,6 +100,12 @@ vibe, and a security system that runs on vibes gets switched off.
   their times and where the stream stalled, and names the frames that show its subject. A
   scenario that no frame shows is an abstention, not an alert. Daily call budgets,
   timeouts; no verdict means no alert.
+- **A pre-filter before the model** (opt-in): a small object detector on this machine
+  looks at every clip first. Clips with people or moving vehicles are judged first, clips
+  where something moved but nobody was seen only while the model is idle, and clips with
+  nobody in them and only light or the usual movement are not judged at all, with the
+  reason kept. Nothing is skipped without the detector having looked
+  ([docs/prefilter.md](docs/prefilter.md)).
 
 ### Telegram: alerts you can argue with
 
@@ -336,6 +342,7 @@ everything else: [ROADMAP.md](ROADMAP.md).
 | A plain-language policy shown back as an inspectable spec | 📐 levels are written by hand |
 | Dry run of a policy over past events, Frigate and clip folders alike, with calibration | ✅ read-only over the stored verdicts |
 | Calibration from 👍 / 👎, never past the floor of critical scenarios | ✅ tested against fakes; replayed over a test deployment |
+| Pre-filter before the live judge: now / later / skip from a local detector and the clip's motion, never a skip without a detector check | 🚧 replayed over a test deployment's stored events; running live there |
 | Published accuracy on a labelled set of real clips | 🚧 first numbers on a test deployment (32 reviewed clips, 3 positives) |
 | v0.2.0 release with its own images | 📐 |
 

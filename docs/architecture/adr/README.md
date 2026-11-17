@@ -27,5 +27,6 @@ the old one (both stay). New ADRs land as PRs with a comment window. Template:
 | [0016](0016-every-face-reversible-decisions.md) | Every face gets an identity, its sharpest moment, and decisions that can be taken back | accepted, amends 0014 |
 | [0017](0017-subject-frames-other-cameras-and-questions.md) | Alerts that show their subject and can be argued with, the other cameras at that moment, and questions in plain words | accepted; amended by 0019 |
 | [0018](0018-identity-merge-pass.md) | A merge pass joins identities that are certainly one person, audited and reversible | accepted, amends 0014 and 0016 |
-| [0019](0019-deep-analysis.md) | Deep analysis: a second look at the day's clips, on one shared slot, inside serve | accepted, amends 0013 and 0017 |
+| [0019](0019-deep-analysis.md) | Deep analysis: a second look at the day's clips, on one shared slot, inside serve | accepted, amends 0013 and 0017; amended by 0021 |
 | [0020](0020-calibration-from-marks.md) | Calibration: 👍/👎 move a scenario on a camera a step quieter, never past a floor | accepted, amends 0013 |
+| [0021](0021-pre-filter-before-the-judge.md) | A pre-filter before the live judge: a local detector decides what waits for the model | accepted, amends 0019 |

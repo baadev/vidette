@@ -132,6 +132,21 @@ understanding:
     min_idle_slots: 1
     max_attempts: 3
     label_disputes: true          # disputed and uncertain clips become review drafts
+  triage:                         # the pre-filter before the live judge: docs/prefilter.md
+    enabled: false
+    detector: yolox               # yolox | none: order by motion only, skip nothing
+    models_dir: null              # default: people.models_dir, else ~/.cache/vidette/models
+    frames: 8                     # where the picture changed, per clip (2 to 16)
+    key_frames: true              # also the collector's key frames
+    threads: 2                    # CPU threads for the detector
+    skip: true                    # false: only the order (now / later)
+    vehicles: now                 # now | later: a vehicle that moves, nobody seen
+    later_max_age: 10m            # a later clip waits this long for an idle slot
+    usual_movement: true          # learn where things always move on each camera
+    person: 0.35                  # detector scores: a person,
+    possible_person: 0.2          # an unclear one (still judged now),
+    vehicle: 0.45                 # a vehicle,
+    animal: 0.35                  # an animal
 ```
 
 The v0.1 keys `provider` and `send` are rejected with a pointer here. `vidette validate`

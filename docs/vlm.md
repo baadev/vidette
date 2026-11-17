@@ -79,7 +79,10 @@ Only incidents that ended in the last 15 minutes are judged, one at a time, newe
 first: while the judge is busy, the most recent waiting incident is taken next and older
 ones wait until they are too old. A slow or shared model then answers about what is
 happening now, and a restart, a replay or a backfilled folder never turns into a burst of
-old alerts. Frames come from
+old alerts. With the [pre-filter](prefilter.md) on, every clip is looked at first by a
+local detector: clips with people (or moving vehicles) are judged first, clips where
+something moved but nobody was seen only while the model is idle, and clips with nobody
+in them and nothing but light or the usual movement are not judged at all. Frames come from
 the clip itself when there is one (chosen once for all policies, kept under
 `media_dir/judge-frames/<event id>/` and used for the Telegram album), else from
 Frigate's recordings over the incident (event snapshots if the camera does not record).

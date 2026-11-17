@@ -11,6 +11,36 @@ of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). 
 released; no images published from it; the last release is v0.1.3.
 
 ### Added
+- **A pre-filter before the live judge** ([docs/prefilter.md](docs/prefilter.md),
+  [ADR-0021](docs/architecture/adr/0021-pre-filter-before-the-judge.md)), opt-in
+  (`understanding.triage`): every clip-folder clip is looked at on the machine that runs
+  `vidette serve` before it waits for the model. An object detector (YOLOX-S, Apache-2.0,
+  from the OpenCV model zoo, pinned by sha256, through OpenCV DNN from the `vidette[people]`
+  extra; `vidette triage models` downloads it, `serve` never does) runs on up to 8 frames
+  where the picture changed and the collector's key frames (and a frame every 4 s on long
+  clips where nothing changed); the clip's activity map and the motion gate's facts say
+  how much changed and whether it was light. **now**: a person, a weaker person
+  candidate, a moving vehicle, anything not checked, judged first with people ahead of
+  vehicles; **later**: an animal or motion with nobody seen, judged only while the
+  model's slot is idle, for 10 minutes; **skip**: nobody found and only a light change,
+  tiny motion or the camera's usual movement (learned per camera from empty clips), or
+  an early window with nobody yet; never judged, the event keeps "not judged: …". Nothing
+  is skipped without a detector check; an early window with someone makes its whole clip
+  *now*, and so does a lamp switching on while things move. The decision is kept on the
+  event (`intent.triage`); deep analysis ranks the
+  clips the judge never reached by it and leaves skipped ones out, and waits only for
+  *now* clips. `/status` counts the classes. Replayed over a test deployment's 14 to 17
+  November (about 2,000 clips a day): 46 to 54 % *now*, 20 to 25 % *later*, 22 to 31 %
+  skipped; of the alerts, reviewed labels, waking verdicts and readable faces known, none
+  skipped; clips with a person reached by the judge 94 to 99 % of the time in a
+  simulation of its queue, against 40 to 50 % before ([measured](docs/prefilter.md#measured-on-a-test-deployment)).
+- **`vidette triage models | check | replay`**: the model; what the pre-filter would do
+  with clips; the pre-filter over a service's stored events (read-only, no model call,
+  observations cached): classes per day, what it would have skipped of everything known
+  (alerts, marks, reviewed labels, faces, people the judges counted, each listed), and a
+  simulation of the live queue next to what the service really judged.
+  `vidette eval --judge triage | triage-now` scores a labelled set: recall is the share of
+  alerts the pre-filter lets through. `vidette policy dry-run` counts what it skipped.
 - **`vidette policy dry-run`** ([docs/calibration.md](docs/calibration.md#dry-run-what-a-policy-would-have-done)):
   the last N days of stored verdicts, from Frigate and clip folders alike, routed again
   through the config's policy or a proposed one (`--policy-file`) and calibration

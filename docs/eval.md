@@ -68,6 +68,8 @@ frigate-severity        2   1   1   0     0  0.50 (0.09-0.91)    1.00 (0.21-1.00
 | `stored-live` | the live judge of a running Vidette said alert, read from its database: no model call | it did, then |
 | `stored-deep` | deep analysis said alert ([deep.md](deep.md)), read from the database | it did, then |
 | `stored-best` | the live verdict, or deep analysis' where the live judge gave none | it did, then |
+| `triage` | the [pre-filter](prefilter.md) would let the clip reach the judge (*now* or *later*): its recall is the share of alerts it would not skip, and must be 1.00 | no |
+| `triage-now` | the pre-filter would have the clip judged first | no |
 
 The baselines do not read your policy text; the VLM judges do ([vlm.md](vlm.md)). The
 point of the table is to see whether reading it beats the cheapest baseline by enough to
