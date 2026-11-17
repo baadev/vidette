@@ -14,10 +14,10 @@ alert is one clip of one camera; this page is about what Vidette does with the r
 
 ```
 🚨 Alert: critical
-📍 Street, 21:31:48
-👤 stranger #946 (small face)
+📍 Street, 22:14:05
+👤 stranger #12 (small face)
 💬 A person walks along the wall, stops at the door and reaches for it.
-🔗 Probably the same person (clothes and timing): Front door, about 21:30: A person at a parked car (the judge had let it pass)
+🔗 Probably the same person (clothes and timing): Front door, about 22:13: A person at a parked car (the judge had let it pass)
 ```
 
 When an alert goes out, the events of the other cameras that had a person within
