@@ -355,6 +355,8 @@ class ContinuousCollector(Collector):
 
         outcome = result.outcome
         self.state = "waiting"
+        if outcome in (Outcome.recorded, Outcome.busy):
+            self._answering_again()
         if outcome is Outcome.recorded:
             for other in Outcome:
                 self._streak[other] = 0

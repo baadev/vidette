@@ -107,7 +107,9 @@ With `--base-station`, a 404 means asleep: no TCP check (the port tells nothing)
 request every `--probe-every` (2 s with `--base-station`) without backoff, one log line per
 sleep. A woken stream is evidence (the camera's own sensor fired): it is kept down to
 `--wake-min` (0.5 s) even below `--min`, and after it ends the next look comes after
-`--base-reconnect` (1 s), never a growing backoff. A real
+`--base-reconnect` (1 s), never a growing backoff. A base station that refuses
+connections or sends no video (rebooting, RTSP switched off) is retried at most every 10 s,
+and the first answer after such an outage is logged with how long it lasted. A real
 second client (VLC, the Home Assistant RTSP integration) now looks like a camera that
 never wakes, so keep the one-client rule.
 

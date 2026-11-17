@@ -587,3 +587,24 @@ def test_cli_check_opens_no_rtsp_session(
     assert code == 0, out
     assert "rtsp://***@127.0.0.1:9/live0" in out and PASSWORD not in out
     assert "closed" in out and "next clip may take up to" in out
+
+
+def test_a_base_station_that_stops_answering_is_retried_within_seconds(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refused or silent base station: the wait never grows past base_retry_cap_s, and the
+    first answer after the outage is logged with how long it lasted."""
+    target = RtspTarget.parse("rtsp://127.0.0.1:8554/live", "t")
+    based = Collector(target, fast_settings(tmp_path / "a", base_station=True,
+                                            base_retry_cap_s=10.0))
+    single = Collector(target, fast_settings(tmp_path / "b"))
+    assert based._base_wait(Outcome.asleep, 300.0) == 10.0
+    assert based._base_wait(Outcome.silent, 4.0) == 4.0
+    assert based._base_wait(Outcome.busy, 300.0) == 300.0
+    assert single._base_wait(Outcome.asleep, 300.0) == 300.0
+    assert single._out_since is None and based._out_since is not None
+    with caplog.at_level(logging.INFO, logger="vidette.collect.collector"):
+        based._answering_again()
+        based._answering_again()
+    lines = [r.getMessage() for r in caplog.records if "answers again" in r.getMessage()]
+    assert len(lines) == 1 and based._out_since is None

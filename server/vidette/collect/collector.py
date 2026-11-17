@@ -101,6 +101,10 @@ class CollectSettings:
     # just slept may wake again at once (a person still there), and every second of
     # waiting is a second nobody records. Never grows (no backoff while it keeps waking).
     base_reconnect_s: float = 1.0
+    # A base station that refuses connections or sends no video (rebooting, RTSP switched
+    # off, Wi-Fi drop) is retried at most this far apart: the doubling backoff meant for a
+    # single camera left every camera blind for minutes after the base came back.
+    base_retry_cap_s: float = 10.0
     # serve's incident-mode file (vidette.incident.mode): while an alert's incident lasts,
     # everything a camera sees is kept. None: no incident mode.
     incident_file: Path | None = None
@@ -164,6 +168,7 @@ class Collector:
         self._last_save = 0.0
         self._disk_blocked: str | None = None
         self._early_id: str | None = None  # the id the early window of this session took
+        self._out_since: float | None = None  # wall time the base station stopped answering
         self._pruner = (
             None
             if settings.prune is None
@@ -420,6 +425,8 @@ class Collector:
                 self._streak[other] = 0
         self._streak[outcome] = self._streak.get(outcome, 0) + 1
         streak = self._streak[outcome]
+        if outcome in (Outcome.recorded, Outcome.busy):
+            self._answering_again()
 
         if outcome is Outcome.recorded:
             meta = await self._finalize(result)
@@ -472,7 +479,7 @@ class Collector:
                 format_duration(wait),
             )
         elif outcome is Outcome.silent:
-            wait = backoff(streak, settings.silent_backoff_s)
+            wait = self._base_wait(outcome, backoff(streak, settings.silent_backoff_s))
             self._log_streak(
                 outcome,
                 "camera accepted a session but sent no video for %s; #%d in a row, next try "
@@ -491,7 +498,7 @@ class Collector:
                 format_duration(wait),
             )
         elif outcome is Outcome.asleep:
-            wait = backoff(streak, settings.silent_backoff_s)
+            wait = self._base_wait(outcome, backoff(streak, settings.silent_backoff_s))
             self._log_streak(
                 outcome,
                 "camera unreachable (%s); #%d in a row, next try in %s",
@@ -504,6 +511,24 @@ class Collector:
             self._log_streak(outcome, "ffmpeg failed: %s; next try in %s", detail,
                              format_duration(wait))
         await self._wait(wait, stop, watched=watched)
+
+    def _base_wait(self, outcome: Outcome, wait: float) -> float:
+        """A base station that stopped answering is retried every few seconds, never minutes."""
+        if not self.settings.base_station or outcome not in (Outcome.asleep, Outcome.silent):
+            return wait
+        if self._out_since is None:
+            self._out_since = time.time()
+        return min(wait, self.settings.base_retry_cap_s)
+
+    def _answering_again(self) -> None:
+        """The base station answers again (video, or a 404 for a sleeping camera)."""
+        if self._out_since is None:
+            return
+        logger.info(
+            "base station answers again after %s out",
+            format_duration(max(0.0, time.time() - self._out_since)),
+        )
+        self._out_since = None
 
     async def _write_early(self, part: Path, started_wall: float, requested: float) -> None:
         """The early window of the recording in progress; never fails the recording."""
