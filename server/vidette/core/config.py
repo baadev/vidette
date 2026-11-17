@@ -429,6 +429,11 @@ class Sensitivity(StrEnum):
     balanced = "balanced"
     paranoid = "paranoid"
 
+    @property
+    def min_confidence(self) -> float:
+        """How sure the judge must be before an alert counts (below it: silent)."""
+        return {"relaxed": 0.75, "balanced": 0.5, "paranoid": 0.0}[self.value]
+
 
 class Wake(StrEnum):
     """Who gets woken for a verdict at a level (docs/telegram.md#levels)."""
@@ -566,6 +571,34 @@ class PolicyConfig(StrictModel):
             return Wake.unless_quiet
         found = self.scenario_level(scenario)
         return Wake.never if found is None else found[1].wake
+
+
+class CalibrationConfig(StrictModel):
+    """👍/👎 change who is woken for a scenario on a camera (docs/calibration.md, ADR-0020).
+
+    One step at a time, only after `marks` false alarms and no 👍 since the last change:
+    first a confidence bar (`bar`), then the digest only. Scenarios of a `wake: always`
+    level, and those named in `protect`, get at most a bar of `protected_bar` and never
+    leave the alerts. The policy file is never written; every change is stored, shown and
+    can be taken back."""
+
+    enabled: bool = True
+    marks: int = Field(default=4, ge=2, le=100)  # 👎 for one step, with no 👍 among them
+    window: str = "14d"  # marks older than this do not count
+    bar: float = Field(default=0.9, gt=0.0, le=1.0)  # the first step: wakes from this sure
+    protected_bar: float = Field(default=0.75, gt=0.0, le=1.0)  # the most for protected
+    protect: list[str] = Field(default_factory=list)  # more scenarios or levels kept loud
+
+    @model_validator(mode="after")
+    def _check(self) -> CalibrationConfig:
+        _duration(self.window, "calibration.window")
+        if self.protected_bar > self.bar:
+            raise ValueError("calibration.protected_bar must not be above calibration.bar")
+        return self
+
+    @property
+    def window_s(self) -> float:
+        return _duration(self.window, "window")
 
 
 def _default_people_dir() -> Path:
@@ -929,6 +962,7 @@ class VidetteConfig(StrictModel):
     clip_folders: list[ClipFolderConfig] = Field(default_factory=list)
     understanding: UnderstandingConfig = UnderstandingConfig()
     policies: list[PolicyConfig] = Field(default_factory=list)
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     people: PeopleConfig = Field(default_factory=PeopleConfig)
     notifications: NotificationsConfig = NotificationsConfig()
     cross_camera: CrossCameraConfig = Field(default_factory=CrossCameraConfig)
@@ -969,6 +1003,17 @@ class VidetteConfig(StrictModel):
                             "not in frigate.cameras (or a clip folder); add it there or use "
                             "cameras: all"
                         )
+        known = {
+            name
+            for policy in self.policies
+            for name in [*policy.levels, *policy.scenario_configs()]
+        }
+        unknown = [name for name in self.calibration.protect if name not in known]
+        if unknown:
+            raise ValueError(
+                f"calibration.protect names {unknown}, which no policy has as a level or a "
+                "scenario; use the names written under policies: levels"
+            )
         for rule in self.notifications.rules:
             for channel in rule.channels:
                 if channel not in self.notifications.channels:

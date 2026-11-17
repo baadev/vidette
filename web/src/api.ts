@@ -266,6 +266,36 @@ export type VlmSettings = {
   };
 };
 
+/** One calibration step (ADR-0020): a scenario on a camera made quieter, or taken back. */
+export type CalibrationStep = {
+  id: number;
+  at: number;
+  policy: string;
+  scenario: string;
+  scenario_title: string;
+  camera: string;
+  camera_name: string;
+  step_from: number;
+  step_to: number; // 0 as written, 1 a confidence bar, 2 the digest only
+  bar: number | null;
+  evidence: { down?: number; up?: number; reasons?: Record<string, number>; events?: string[] };
+  in_force: boolean;
+  reverted_at: number | null;
+  reverted_by: string | null;
+};
+
+export type CalibrationState = {
+  rule: {
+    enabled: boolean;
+    marks: number;
+    window: string;
+    bar: number;
+    protected_bar: number;
+    protected: string[];
+  };
+  steps: CalibrationStep[];
+};
+
 export class ApiError extends Error {
   status: number;
 
@@ -438,6 +468,16 @@ export const api = {
   /** Store the choice server-side; it wins over the config until changed again. */
   setVlmBackend(backend: VlmBackend): Promise<VlmSettings> {
     return putJson<VlmSettings>(`${BASE}/settings/vlm`, { backend });
+  },
+
+  /** Calibration from 👍/👎 (docs/calibration.md): the rule and every step it made. */
+  calibration(): Promise<CalibrationState> {
+    return getJson<CalibrationState>(`${BASE}/calibration`);
+  },
+
+  /** Take a step back (and the later steps of the same scenario and camera). */
+  revertCalibration(id: number): Promise<{ reverted: number[] }> {
+    return postJson<{ reverted: number[] }>(`${BASE}/calibration/${id}/revert`, {});
   },
 
   /** Known people (docs/people.md): read:config to look, write:config to change. */

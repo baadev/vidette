@@ -170,6 +170,28 @@ CREATE INDEX idx_deep_jobs_state ON deep_jobs(state, priority, started_at);
 CREATE INDEX idx_deep_jobs_day ON deep_jobs(day);
 """
 
+_V7_CALIBRATION: Final[str] = """
+-- Calibration (ADR-0020): 👍/👎 move one scenario on one camera a step quieter (a
+-- confidence bar, then the digest) or back. One row per step, never deleted: a row taken
+-- back keeps when and by whom (`reverted_*`), so every change stays auditable. The
+-- effective step of a key is `step_to` of its newest row not taken back (0 without one).
+CREATE TABLE calibration (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          REAL NOT NULL,
+    policy      TEXT NOT NULL,
+    scenario    TEXT NOT NULL,
+    camera      TEXT NOT NULL,
+    step_from   INTEGER NOT NULL,
+    step_to     INTEGER NOT NULL,  -- 0 as written, 1 a confidence bar, 2 the digest only
+    bar         REAL,              -- step 1: wakes only from this confidence
+    evidence    TEXT NOT NULL,     -- JSON: the marks that made it (counts, reasons, events)
+    reverted_at REAL,
+    reverted_by TEXT               -- web | telegram | cli | mark (a 👍 on what it hid)
+);
+CREATE INDEX idx_calibration_key ON calibration(policy, scenario, camera, id);
+CREATE INDEX idx_events_feedback ON events(feedback) WHERE feedback IS NOT NULL;
+"""
+
 MIGRATIONS: Final[list[str]] = [
     _V1_INITIAL,
     _V2_EVENTS,
@@ -177,6 +199,7 @@ MIGRATIONS: Final[list[str]] = [
     _V4_UPSTREAM,
     _V5_TELEGRAM,
     _V6_DEEP,
+    _V7_CALIBRATION,
 ]
 
 SCHEMA_VERSION: Final[int] = len(MIGRATIONS)

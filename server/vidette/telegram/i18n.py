@@ -42,6 +42,8 @@ EN: dict[str, str] = {
     "kb.stranger": "Stranger",
     "kb.undo_face": "Take it back",
     "kb.other_cameras": "📹 Other cameras",
+    "kb.cal_undo": "↩️ Undo",
+    "kb.cal_undo_n": "↩️ {n}",
     "face.small": "small",
     "face.unknown": "unknown",
     # why 👎: the reasons (vidette.telegram.reasons)
@@ -124,6 +126,8 @@ EN: dict[str, str] = {
     "why.known": "Without the test this would have gone to the digest: only our own people "
     "were recognized.",
     "why.plain": "Without the test this would have gone to the digest.",
+    "why.calibrated": "Without the test this would have gone to the digest: your 👍/👎 made "
+    "this quieter (/tuning).",
     "level.by_policy": "by the policy",
     "level.none": "none",
     "scenario.quiet": "quiet",
@@ -202,6 +206,7 @@ EN: dict[str, str] = {
     "digest.unjudged": "Not checked by the judge: {n} ({why}).",
     "digest.deep": "Second look: {clips}; {disputed} to labelling.",
     "digest.second_look": " (second look)",
+    "digest.calibrated": " · in the digest by your marks",
     "n.days": "day|days",
     "n.clips": "clip|clips",
     "n.events": "event|events",
@@ -228,6 +233,28 @@ EN: dict[str, str] = {
     "cmd.live": "live video (coming in the Vidette app)",
     "cmd.quiet": "quiet for an hour; /quiet off to end it",
     "cmd.help": "what the bot can do",
+    "cmd.tuning": "what your 👍/👎 changed, and undo",
+    # calibration (vidette.calibration, ADR-0020)
+    "cal.what": "{scenario} ({camera})",
+    "cal.why_one": "{times} 👎 “{reason}”",
+    "cal.why_mixed": "{times} 👎 ({reasons})",
+    "cal.no_reason": "no reason",
+    "cal.bar": "🎚 {what} now wakes you only when the judge is {bar} % sure or more: {why}.",
+    "cal.digest": "🎚 {what} is now in the digest only: {why}.",
+    "cal.restored": "🎚 {what} wakes you again as the policy says: you marked 👍 one it had "
+    "kept in the digest.",
+    "cal.undone": "↩️ Taken back: {what} now wakes you {how}.",
+    "cal.how.written": "as the policy says",
+    "cal.how.bar": "only from {bar} % sure",
+    "cal.how.digest": "only in the digest",
+    "cal.list_title": "🎚 <b>What your 👍/👎 changed</b>",
+    "cal.list_item": "{n}. {what}: {how} since {since} ({why})",
+    "cal.list_hint": "A numbered button takes that change back. Critical alerts never go to "
+    "the digest.",
+    "cal.list_empty": "🎚 Your 👍/👎 have not changed anything yet. After {marks} 👎 and no 👍 "
+    "on one kind of alert from one camera, it wakes you less often; critical alerts never go "
+    "to the digest.",
+    "cal.off": "🎚 Calibration from 👍/👎 is off (calibration.enabled: false).",
     "status.judge": "Judge: {judge}. Today {judged} with a verdict, {unjudged} without",
     "status.by_camera": "<b>Today by camera</b>",
     "status.last": ", last {time}",
@@ -245,6 +272,7 @@ EN: dict[str, str] = {
     "/status: cameras, today's events, the last alert and the digest\n"
     "/live: live video (coming in the Vidette app)\n"
     "/quiet: quiet for an hour (critical alerts still come), /quiet off: end it\n"
+    "/tuning: what your 👍/👎 changed, and undo\n"
     "Under an alert: 👍 right, 👎 false alarm (I'll ask why), Who is it?, Not sure, "
     "📹 Other cameras. Tap an answer to take it back.\n"
     "You can just ask: “where else was this person?” or “send the other cameras” in reply "
@@ -265,6 +293,8 @@ EN: dict[str, str] = {
     "toast.face_gone": "The event or the face is no longer available",
     "toast.person_gone": "The event, the face or the person is no longer available",
     "toast.failed": "Did not work: {error}",
+    "toast.cal_undone": "Taken back",
+    "toast.cal_gone": "Already taken back",
     "toast.decision_undone": "Decision taken back",
     "toast.no_alert_here": "this chat got no alert for this event; mark it in the web app",
     "prompt.what": "What was it? Reply to this message briefly.",
@@ -337,6 +367,8 @@ RU: dict[str, str] = {
     "kb.stranger": "Чужой",
     "kb.undo_face": "Отменить решение",
     "kb.other_cameras": "📹 Другие камеры",
+    "kb.cal_undo": "↩️ Отменить",
+    "kb.cal_undo_n": "↩️ {n}",
     "face.small": "мелкое",
     "face.unknown": "незнакомое",
     "reason.passing.button": "Прошёл мимо",
@@ -411,6 +443,7 @@ RU: dict[str, str] = {
     "why.quiet": "Без проверки это ушло бы в сводку: включена тишина.",
     "why.known": "Без проверки это ушло бы в сводку: узнаны только свои.",
     "why.plain": "Без проверки это ушло бы в сводку.",
+    "why.calibrated": "Без проверки это ушло бы в сводку: так настроили ваши 👍/👎 (/tuning).",
     "level.by_policy": "по политике",
     "level.none": "нет",
     "scenario.quiet": "тихо",
@@ -483,6 +516,7 @@ RU: dict[str, str] = {
     "digest.unjudged": "Не проверено судьёй: {n} ({why}).",
     "digest.deep": "Перепроверка: {clips}; {disputed} на разметку.",
     "digest.second_look": " (перепроверка)",
+    "digest.calibrated": " · в сводке по вашим отметкам",
     "n.days": "день|дня|дней",
     "n.clips": "ролик|ролика|роликов",
     "n.events": "событие|события|событий",
@@ -508,6 +542,25 @@ RU: dict[str, str] = {
     "cmd.live": "живое видео (будет в приложении Vidette)",
     "cmd.quiet": "тишина на час; /quiet off снять",
     "cmd.help": "что умеет бот",
+    "cmd.tuning": "что изменили ваши 👍/👎, и отмена",
+    "cal.what": "{scenario} ({camera})",
+    "cal.why_one": "{times} 👎 «{reason}»",
+    "cal.why_mixed": "{times} 👎 ({reasons})",
+    "cal.no_reason": "без причины",
+    "cal.bar": "🎚 {what} теперь будит, только если судья уверен на {bar} % и больше: {why}.",
+    "cal.digest": "🎚 {what} теперь только в сводке: {why}.",
+    "cal.restored": "🎚 {what} снова будит, как в правилах: вы отметили 👍 то, что было "
+    "только в сводке.",
+    "cal.undone": "↩️ Отменено: {what} теперь будит {how}.",
+    "cal.how.written": "как в правилах",
+    "cal.how.bar": "только от {bar} % уверенности",
+    "cal.how.digest": "только в сводке",
+    "cal.list_title": "🎚 <b>Что изменили ваши 👍/👎</b>",
+    "cal.list_item": "{n}. {what}: {how} с {since} ({why})",
+    "cal.list_hint": "Кнопка с номером отменяет изменение. Критичное никогда не уходит в сводку.",
+    "cal.list_empty": "🎚 Ваши 👍/👎 пока ничего не изменили. После {marks} 👎 без единого 👍 "
+    "на одном виде тревог одной камеры он будит реже; критичное никогда не уходит в сводку.",
+    "cal.off": "🎚 Настройка по 👍/👎 выключена (calibration.enabled: false).",
     "status.judge": "Судья: {judge}. Сегодня вердиктов {judged}, без вердикта {unjudged}",
     "status.by_camera": "<b>Сегодня по камерам</b>",
     "status.last": ", последнее {time}",
@@ -524,6 +577,7 @@ RU: dict[str, str] = {
     "/status: камеры, события за сегодня, последняя тревога и сводка\n"
     "/live: живое видео (будет в приложении Vidette)\n"
     "/quiet: тишина на час (критичное всё равно придёт), /quiet off: снять\n"
+    "/tuning: что изменили ваши 👍/👎, и отмена\n"
     "Под тревогой: 👍 верно, 👎 ложная (спрошу почему), Кто это?, Не знаю, 📹 Другие камеры. "
     "Ответ можно отменить, нажав на него.\n"
     "Можно просто спросить: «где ещё был этот человек?» или «пришли другие камеры» в ответ "
@@ -543,6 +597,8 @@ RU: dict[str, str] = {
     "toast.face_gone": "Событие или лицо уже недоступно",
     "toast.person_gone": "Событие, лицо или человек уже недоступны",
     "toast.failed": "Не вышло: {error}",
+    "toast.cal_undone": "Отменено",
+    "toast.cal_gone": "Уже отменено",
     "toast.decision_undone": "Решение отменено",
     "toast.no_alert_here": "по этому событию в этом чате не было тревоги; отметьте его в "
     "веб-приложении",

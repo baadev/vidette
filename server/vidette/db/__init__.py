@@ -248,6 +248,103 @@ def _push_subscription(row: sqlite3.Row) -> PushSubscriptionRow:
     )
 
 
+@dataclass(frozen=True)
+class CalibrationRow:
+    """One step of calibration (ADR-0020): a scenario on a camera made quieter or louder
+    by marks, or taken back. `evidence` decoded from JSON."""
+
+    id: int
+    at: float
+    policy: str
+    scenario: str
+    camera: str
+    step_from: int
+    step_to: int
+    bar: float | None
+    evidence: dict[str, Any]
+    reverted_at: float | None = None
+    reverted_by: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.reverted_at is None
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return self.policy, self.scenario, self.camera
+
+
+def _calibration(row: sqlite3.Row) -> CalibrationRow:
+    return CalibrationRow(
+        id=int(row["id"]),
+        at=float(row["at"]),
+        policy=str(row["policy"]),
+        scenario=str(row["scenario"]),
+        camera=str(row["camera"]),
+        step_from=int(row["step_from"]),
+        step_to=int(row["step_to"]),
+        bar=None if row["bar"] is None else float(row["bar"]),
+        evidence=json.loads(row["evidence"] or "{}"),
+        reverted_at=None if row["reverted_at"] is None else float(row["reverted_at"]),
+        reverted_by=row["reverted_by"],
+    )
+
+
+def _read_only(path: Path) -> sqlite3.Connection:
+    """The database opened for reading only, without migrations: a command-line tool
+    that looks at a running server's database never changes it."""
+    if not path.is_file():
+        raise FileNotFoundError(f"no database at {path}")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def read_events(
+    path: Path, *, since_ts: float | None = None, until_ts: float | None = None
+) -> list[EventRow]:
+    """Events (oldest first) from a database file, read-only (`vidette policy dry-run`,
+    `vidette eval --judge stored-live`)."""
+    clauses, params = [], []
+    if since_ts is not None:
+        clauses.append("started_at >= ?")
+        params.append(since_ts)
+    if until_ts is not None:
+        clauses.append("started_at < ?")
+        params.append(until_ts)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    with contextlib.closing(_read_only(path)) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM events{where} ORDER BY started_at, id", tuple(params)
+        ).fetchall()
+    return [_event(row) for row in rows]
+
+
+def read_calibration(path: Path) -> list[CalibrationRow]:
+    """Every calibration step (oldest first), read-only; empty for a database from
+    before calibration existed."""
+    with contextlib.closing(_read_only(path)) as conn:
+        try:
+            rows = conn.execute("SELECT * FROM calibration ORDER BY id").fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [_calibration(row) for row in rows]
+
+
+def read_alerted_events(path: Path, *, since_ts: float) -> set[str]:
+    """Events the Telegram bot sent an alert about (or folded into one), read-only."""
+    with contextlib.closing(_read_only(path)) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT event_id FROM telegram_messages WHERE event_id IS NOT NULL"
+                " AND kind IN ('alert', 'collapsed') AND created_at >= ?",
+                (since_ts,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return set()
+    return {str(row["event_id"]) for row in rows}
+
+
 class Database:
     """All methods are safe to call from any task; writes serialize internally."""
 
@@ -730,6 +827,79 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [_deep_job(row) for row in rows]
+
+    # --- calibration (ADR-0020) ----------------------------------------------------------------
+    async def feedback_events(self, *, since_ts: float) -> list[EventRow]:
+        """Events someone marked 👍/👎 that started after `since_ts`, oldest first."""
+        async with self._db.execute(
+            "SELECT * FROM events WHERE feedback IS NOT NULL AND started_at > ?"
+            " ORDER BY started_at, id",
+            (since_ts,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_event(row) for row in rows]
+
+    async def calibration_steps(self, *, limit: int | None = None) -> list[CalibrationRow]:
+        """Every calibration step, oldest first (with `limit`: the newest ones)."""
+        sql = "SELECT * FROM calibration ORDER BY id"
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            sql = "SELECT * FROM (SELECT * FROM calibration ORDER BY id DESC LIMIT ?) ORDER BY id"
+            params = (limit,)
+        async with self._db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [_calibration(row) for row in rows]
+
+    async def get_calibration_step(self, step_id: int) -> CalibrationRow | None:
+        async with self._db.execute("SELECT * FROM calibration WHERE id = ?", (step_id,)) as cur:
+            row = await cur.fetchone()
+        return None if row is None else _calibration(row)
+
+    async def add_calibration_step(
+        self,
+        key: tuple[str, str, str],
+        step_from: int,
+        step_to: int,
+        *,
+        bar: float | None,
+        evidence: dict[str, Any],
+    ) -> CalibrationRow:
+        policy, scenario, camera = key
+        async with self._write_lock:
+            cursor = await self._db.execute(
+                "INSERT INTO calibration (at, policy, scenario, camera, step_from, step_to, bar,"
+                " evidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (self._clock(), policy, scenario, camera, step_from, step_to, bar,
+                 json.dumps(evidence, ensure_ascii=False)),
+            )  # fmt: skip
+            await self._db.commit()
+            step_id = cursor.lastrowid
+        found = await self.get_calibration_step(int(step_id or 0))
+        assert found is not None
+        return found
+
+    async def revert_calibration_step(self, step_id: int, by: str) -> list[CalibrationRow]:
+        """Take a step back, and every later step of the same key still in force (they
+        were built on it). Returns the steps taken back now; empty when it was not in
+        force."""
+        step = await self.get_calibration_step(step_id)
+        if step is None or not step.active:
+            return []
+        now = self._clock()
+        async with self._write_lock:
+            await self._db.execute(
+                "UPDATE calibration SET reverted_at = ?, reverted_by = ? WHERE policy = ? AND"
+                " scenario = ? AND camera = ? AND id >= ? AND reverted_at IS NULL",
+                (now, by, step.policy, step.scenario, step.camera, step.id),
+            )
+            await self._db.commit()
+        async with self._db.execute(
+            "SELECT * FROM calibration WHERE policy = ? AND scenario = ? AND camera = ? AND"
+            " id >= ? AND reverted_at = ? ORDER BY id",
+            (step.policy, step.scenario, step.camera, step.id, now),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_calibration(row) for row in rows]
 
     # --- meta (key/value: schema version, VAPID keys, …) -------------------------------------
     async def get_meta(self, key: str) -> str | None:

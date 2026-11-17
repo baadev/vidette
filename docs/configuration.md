@@ -206,6 +206,26 @@ A policy with levels may raise a verdict when the same unknown face keeps coming
 Only a verdict that named a scenario of a lower level is raised; `other`, an abstention
 and anything at or above `raise_to` stay as the judge said.
 
+## `calibration`
+
+```yaml
+calibration:                      # 👍/👎 change who is woken (docs/calibration.md, ADR-0020)
+  enabled: true                   # false: marks only become labels
+  marks: 4                        # 👎 for one step, with no 👍 among them
+  window: 14d                     # older marks do not count
+  bar: 0.9                        # the first step: wakes only from this confidence
+  protected_bar: 0.75             # the most a protected scenario's bar can be raised to
+  protect: []                     # more scenarios or levels that never leave the alerts
+```
+
+Per scenario of a policy with levels, per camera: after `marks` counted 👎 and no 👍, one
+step quieter (a confidence bar, then the digest only); a 👍 on an alert a step kept in the
+digest takes it back. Every scenario of a `wake: always` level is protected: at most
+`protected_bar`, never the digest. Steps live in the database, never in this file;
+`/tuning`, the System page and `vidette policy calibration` show and undo them.
+`vidette validate` refuses a `protect` name no policy has and a `protected_bar` above
+`bar`.
+
 ## `people`
 
 Known people: local face recognition for people who agreed to be enrolled

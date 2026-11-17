@@ -11,6 +11,20 @@ of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). 
 released; no images published from it; the last release is v0.1.3.
 
 ### Added
+- **Calibration from 👍/👎** ([docs/calibration.md](docs/calibration.md),
+  [ADR-0020](docs/architecture/adr/0020-calibration-from-marks.md)): per scenario of a
+  policy and per camera, after 4 counted 👎 and no 👍 within 14 days, one step quieter:
+  first the alert wakes only when the judge is at least 90 % sure, then it goes to the
+  evening digest only (still confirmed, listed as "in the digest by your marks"). "The
+  recording froze", "Wrong camera" and "One of us" do not count; mostly "Right, but not
+  important" skips the bar. A 👍 on an alert a step kept in the digest takes it back at
+  once. Scenarios of a `wake: always` level (and `calibration.protect`) never go to the
+  digest and get a bar of at most 75 %. Steps are stored in a new `calibration` table with
+  their evidence (schema v7), never in the config; the bot says each one in one silent
+  line with an Undo button, `/tuning` lists them, the System page has a Calibration card
+  (`GET /api/v1/calibration`, `POST /api/v1/calibration/{id}/revert`), and `vidette policy
+  calibration [undo ID]` works from the command line. 👍/👎 from the web page now also
+  record a review and trigger calibration. Config: `calibration:` (on by default).
 - **The bot in English** (`notifications.telegram.language: en | ru`, default `en`): every
   message, button, toast, prompt, the digest, `/help` and the assistant's quick answers
   come from one catalog per language (`vidette.telegram.i18n`, English the reference,

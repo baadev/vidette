@@ -33,6 +33,11 @@ Guards, in the spirit of the prime directives:
   balanced 0.5, paranoid any; below it the policy counts as silent;
 - nothing here can crash the loop: failures become rate-limited `verdict.failed` events.
 
+Calibration (docs/calibration.md, ADR-0020): an alert of a scenario that a step of
+calibration made quieter on this camera is still confirmed, with `intent.calibration`
+saying so; the bot sends it to the digest. An early window such a step holds back waits
+for the whole clip.
+
 Known people (docs/people.md): with a face check configured, the incident's frames go
 through it once before the policies are judged. The report rides along to the judge
 (names for a local model only) and is kept in the event's `intent.people`, with face
@@ -53,6 +58,7 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from vidette.calibration.service import Calibrator
 from vidette.core.config import PolicyConfig, Sensitivity, VidetteConfig, VlmBackend, Wake
 from vidette.core.events import EventState, InProcessEventBus, Subscription
 from vidette.core.incidents import Incident
@@ -68,11 +74,7 @@ from vidette.verdicts.frames import first_video, frame_set
 logger = logging.getLogger(__name__)
 
 MAX_AGE_S = 900.0
-MIN_CONFIDENCE: dict[Sensitivity, float] = {
-    Sensitivity.relaxed: 0.75,
-    Sensitivity.balanced: 0.5,
-    Sensitivity.paranoid: 0.0,
-}
+MIN_CONFIDENCE: dict[Sensitivity, float] = {s: s.min_confidence for s in Sensitivity}
 ALBUM_MAX = 3  # frames kept for the alert's album: the subject, never an empty street
 ALBUM_FACES = 2  # of those, at most this many best moments of faces
 ALBUM_APART_S = 1.0  # two frames closer than this show the same moment
@@ -143,8 +145,10 @@ class VerdictWorker:
         max_age_s: float = MAX_AGE_S,
         clock: Callable[[], float] = time.time,
         people: FaceCheck | None = None,
+        calibration: Calibrator | None = None,
     ) -> None:
         self._people = people
+        self._calibration = calibration
         self._config = config
         self._bus = bus
         self._db = db
@@ -391,6 +395,8 @@ class VerdictWorker:
             # the first seconds alert only for levels that wake for anyone (ADR-0017): a
             # person who seems to stop in 8 s mostly walks on, and the whole clip says so
             alerting = [(p, v) for p, v in alerting if early_may_alert(p, v)]
+            if alerting and await self._calibrated(*alerting[0], incident.camera):
+                alerting = []  # a calibration step keeps it out of the alerts for now
             if not alerting:  # nothing yet: the whole clip decides
                 await self._db.update_event(row.id, intent=intent)
                 return await self._db.get_event(row.id)
@@ -403,6 +409,11 @@ class VerdictWorker:
         if alerting:
             policy, verdict = alerting[0]
             self.status.confirmed += 1
+            calibrated = (
+                None if early_alert else await self._calibrated(policy, verdict, row.camera)
+            )
+            if calibrated is not None:  # confirmed, but for the digest (ADR-0020)
+                intent["calibration"] = calibrated
             topic = "event.updated" if early_alert else "event.confirmed"
             return await self._settle(
                 row.id, EventState.confirmed, verdict.rationale, intent, policy.name, topic
@@ -425,6 +436,20 @@ class VerdictWorker:
         await self._db.update_event(row.id, summary=f"no verdict: {reasons}", intent=intent)
         self.status.undecided += 1
         return await self._db.get_event(row.id)
+
+    async def _calibrated(
+        self, policy: PolicyConfig, verdict: Verdict, camera: str
+    ) -> dict[str, Any] | None:
+        """The calibration step that sends this alert to the digest, as kept on the event
+        (`intent.calibration`); None when it wakes as the policy says."""
+        if self._calibration is None:
+            return None
+        found = await self._calibration.effect(
+            policy,
+            {"label": verdict.label, "level": verdict.level, "confidence": verdict.confidence},
+            camera,
+        )
+        return None if found is None else found.record()
 
     def _timeline(
         self,

@@ -186,6 +186,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     telegram_cli.add_arguments(telegram)
 
+    from vidette.calibration import cli as policy_cli
+
+    policy = subparsers.add_parser(
+        "policy",
+        help="list or take back calibration steps (docs/calibration.md)",
+    )
+    policy_cli.add_arguments(policy)
+
     from vidette.deep import cli as deep_cli
 
     deep = subparsers.add_parser(
@@ -195,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
     deep_cli.add_arguments(deep)
 
     args = parser.parse_args(argv)
+    if args.command == "policy":
+        return policy_cli.run(args)
     if args.command == "deep":
         return deep_cli.run(args)
     if args.command == "telegram":

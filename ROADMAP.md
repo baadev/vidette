@@ -80,7 +80,7 @@ numbers with the set's size, and nothing better than them.
 
 | Item | Status |
 |---|---|
-| Calibration: 👍/👎 adjusts a policy's threshold, with the change shown | 📐 |
+| Calibration: 👍/👎 move a scenario on a camera a step quieter (a confidence bar, then the digest) or back, never past the floor of critical scenarios; said in one line with Undo, `/tuning`, the System page, `vidette policy calibration` ([docs/calibration.md](docs/calibration.md), [ADR-0020](docs/architecture/adr/0020-calibration-from-marks.md)) | ✅ tested against a fake Telegram API and a temporary database |
 | Geometry from Frigate's tracked objects (approached, lingered, touched) as a cheap pre-filter before the VLM | 🔭 |
 | Snapshot and clip cache pruning in `media_dir` | 📐 |
 | Frigate's authenticated port (8971) | 🔭 |

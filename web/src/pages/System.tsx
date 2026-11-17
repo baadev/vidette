@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { UNAUTHORIZED_EVENT } from "../api";
 import { getPushState, subscribePush, unsubscribePush, type PushState } from "../push";
+import { CalibrationCard } from "./CalibrationCard";
 import { VerdictsCard } from "./VerdictsCard";
 
 type Health = { status: string; version: string };
@@ -201,6 +202,7 @@ export function SystemPage() {
       </section>
 
       <VerdictsCard />
+      <CalibrationCard />
 
       <section className="card">
         <h2>Who does what</h2>

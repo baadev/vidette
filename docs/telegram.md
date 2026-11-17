@@ -117,6 +117,10 @@ Critical scenarios stay what they are whoever does them: the elevated level is f
 people the face check did not recognize (`unless_known`), the critical one wakes for
 anyone.
 
+A step of [calibration](calibration.md) can send a scenario's alerts on one camera to the
+digest (all of them, or those the judge is less than 90 % sure of); never for a `wake:
+always` level.
+
 | `wake` | Now, in the alerts topic | Otherwise |
 |---|---|---|
 | `always` | always, also during `/quiet` and when the person is known | |
@@ -266,6 +270,10 @@ The reason is kept on the event (`intent.review`) and as the entry's `reason` in
   to the bot's question is read only in an allowed chat and only as a reply to that
   question; after a restart of the service, tap the button again.
 - `labels: false` keeps the feedback on the event only.
+- **Calibration** ([calibration.md](calibration.md)): after 4 👎 and no 👍 on one scenario
+  of one camera, that scenario on that camera wakes only when the judge is sure, later
+  only in the digest; critical scenarios never go to the digest. The bot says each change
+  in one line with an Undo button, and `/tuning` lists what is in force.
 
 ## The other cameras, and questions
 
@@ -310,6 +318,7 @@ always, also when nothing happened.
 | `/status` | cameras, events and alerts today, the last alert and where its time went, the judge; then today's digest so far | every allowed chat (the digest: recipients) |
 | `/live` | says that live view will be part of the Vidette app itself; no links to a separate restreamer | every allowed chat |
 | `/quiet` | quiet for `quiet_for` (1 h): `always` levels still alert, the rest is in the digest; `/quiet off` ends it | per chat |
+| `/tuning` | what your 👍/👎 changed ([calibration.md](calibration.md)), one Undo button per change | every allowed chat |
 | `/help` | what the bot does | every allowed chat |
 | any other text | a question for the assistant ([assistant.md](assistant.md)) | every allowed chat |
 

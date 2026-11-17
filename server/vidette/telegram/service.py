@@ -43,6 +43,7 @@ from pydantic import ValidationError
 
 from vidette.assistant.agent import Assistant
 from vidette.assistant.tools import Tools
+from vidette.calibration.service import Calibrator, Change, safe_review
 from vidette.clipfolder import clip_incident
 from vidette.core.config import (
     OTHER_SCENARIO,
@@ -90,7 +91,7 @@ REFRESH_TOPICS = frozenset({"event.updated", "event.dismissed"})  # the whole cl
 EARLY_MARK = ".early"  # a clip path inside a dataset's early windows
 MAX_DIGEST_EVENTS = 5000
 _FAILURE_EMIT_EVERY = 10
-COMMANDS = ("status", "live", "quiet", "help")  # descriptions: `cmd.<name>` in the catalog
+COMMANDS = ("status", "live", "quiet", "tuning", "help")  # `cmd.<name>` in the catalog
 QUIET_OFF_WORDS = frozenset({"off", "stop", "выкл", "стоп"})  # /quiet off, in any language
 UNJUDGED_REASONS = (  # what a verdict's summary says → `unjudged.<key>` in the catalog
     ("context size", "context"),
@@ -170,6 +171,7 @@ class TelegramService:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         gate_for: Callable[[VlmEndpoint], SlotGate] | None = None,
+        calibration: Calibrator | None = None,
     ) -> None:
         telegram = config.notifications.telegram
         if telegram is None:
@@ -183,6 +185,9 @@ class TelegramService:
         self.api = api or TelegramApi(telegram.token.get_secret_value(), base_url=telegram.api_url)
         self._people_store = people_store
         self._face_engine = face_engine
+        self.calibration = calibration  # 👍/👎 change who is woken (ADR-0020)
+        if calibration is not None:
+            calibration.announce = self.announce_calibration
         self._identities = identities
         # name prompts waiting for a reply: (chat, prompt message id) → (alert row, face,
         # status). In memory: after a restart the person taps the button again.
@@ -444,15 +449,20 @@ class TelegramService:
         people = (row.intent or {}).get("people")
         people = people if isinstance(people, Mapping) and "seen" in people else None
         persons = verdict.get("persons") if isinstance(verdict.get("persons"), int) else None
+        calibrated = say.calibrated(row.intent)
         sent: list[TelegramMessageRow] = []
         async with self._send_lock:
             for chat in self.tg.recipient_chats:
                 quiet_until = await self.quiet_until(chat)
                 quiet = quiet_until is not None and quiet_until > self._clock()
                 route = decide(wake, people, persons, quiet=quiet) if alert else "digest"
+                if route == "alert" and calibrated is not None:
+                    route = "digest"  # a step of calibration (ADR-0020); the digest lists it
                 note = None
                 if test and route != "alert":
                     note = self._why_digest(alert, wake, people, persons, quiet, verdict)
+                    if alert and calibrated is not None and note == t("why.plain"):
+                        note = t("why.calibrated")
                 elif route != "alert":
                     continue
                 message = await self._alert(chat, row, verdict, policy, test=test, note=note)
@@ -938,6 +948,8 @@ class TelegramService:
             )
             await self.db.set_meta(QUIET_KEY.format(chat=chat), repr(until or 0.0))
             await self.api.send_message(chat, say.quiet_text(until, now=now), thread_id=thread)
+        elif command == "tuning":
+            await self.send_tuning(chat, thread=thread)
         elif command in ("start", "help"):
             await self.api.send_message(chat, say.help_text(), thread_id=thread)
 
@@ -950,6 +962,11 @@ class TelegramService:
         if not self.allowed(chat):
             return  # never answer strangers, not even with an error
         parts = str(callback.get("data") or "").split(":")
+        if len(parts) == 3 and parts[0] == "c" and parts[1].isdigit() and parts[2] == "undo":
+            assert isinstance(chat, int)  # allowed() said so
+            said = await self.undo_calibration(int(parts[1]), chat, message)
+            await self.api.answer_callback_query(callback_id, said)
+            return
         if len(parts) < 3 or parts[0] != "a" or not parts[1].isdigit():
             await self.api.answer_callback_query(callback_id)
             return
@@ -982,6 +999,7 @@ class TelegramService:
                 toast = await self.answer(row, "wrong", reason=parts[3])
         elif code == "rn":
             await self._render(row.id, keyboard="main")
+            await safe_review(self.calibration)  # a 👎 without a reason counts too
         elif code == "undo":
             toast = await self.take_back(row)
         elif code == "p" and len(parts) == 5 and parts[3].isdigit() and parts[4].isdigit():
@@ -1215,6 +1233,8 @@ class TelegramService:
         await self.db.update_telegram_message(message.id, data=data)
         await self._render(message.id, keyboard=keyboard)
         self.status.answers += 1
+        if answer in ("right", "wrong") and keyboard == "main":
+            await safe_review(self.calibration)  # 👍/👎 may change who is woken
         return t("toast.marked", what=say.answer_button(data))
 
     async def take_back(self, message: TelegramMessageRow) -> str:
@@ -1554,6 +1574,91 @@ class TelegramService:
             return not exc.transient
         return True
 
+    # --- calibration (ADR-0020) -------------------------------------------------------------
+
+    def _calibration_what(self, policy: str, scenario: str, camera: str) -> str:
+        return t(
+            "cal.what",
+            scenario=self._scenario_title(self._policy(policy), scenario),
+            camera=self.camera_name(camera),
+        )
+
+    async def announce_calibration(self, changes: list[Change]) -> None:
+        """One short line per change to every recipient, silently, in the alerts topic,
+        with a button that takes it back."""
+        for change in changes:
+            row = change.row
+            what = self._calibration_what(row.policy, row.scenario, row.camera)
+            text = say.calibration_text(change.kind, what, row, change.evidence)
+            markup = None
+            if change.kind == "step":
+                markup = {"inline_keyboard": [[
+                    {"text": t("kb.cal_undo"), "callback_data": f"c:{row.id}:undo"}
+                ]]}  # fmt: skip
+            for chat in self.tg.recipient_chats:
+                try:
+                    await self.api.send_message(
+                        chat, text, thread_id=self._thread(chat, "alerts"),
+                        reply_markup=markup, silent=True, once=True,
+                    )  # fmt: skip
+                except TelegramError as exc:
+                    await self._failed("calibration", exc)
+
+    async def undo_calibration(
+        self, step_id: int, chat: int, message: Mapping[str, Any]
+    ) -> str | None:
+        """The button under an announcement or in /tuning: take that step back."""
+        if self.calibration is None:
+            return t("toast.cal_gone")
+        taken = await self.calibration.revert(step_id, "telegram")
+        if not taken:
+            return t("toast.cal_gone")
+        row = taken[0]
+        what = self._calibration_what(row.policy, row.scenario, row.camera)
+        message_id = message.get("message_id")
+        if isinstance(message_id, int):
+            states = await self.calibration.states()
+            state = states.get(row.key)
+            with contextlib.suppress(TelegramError):
+                await self.api.edit_message_text(
+                    chat, message_id,
+                    say.calibration_undone_text(what, state.step if state else 0,
+                                                state.bar if state else None),
+                )  # fmt: skip
+        return t("toast.cal_undone")
+
+    async def send_tuning(self, chat: int, *, thread: int | None) -> None:
+        """/tuning: what the marks changed and is in force, each with a button back."""
+        steps = await self.calibration.db.calibration_steps() if self.calibration else []
+        active = [row for row in steps if row.active]
+        latest: dict[tuple[str, str, str], Any] = {}
+        for row in active:
+            latest[row.key] = row  # the newest step of each key is the one in force
+        rows = sorted(latest.values(), key=lambda r: r.id)
+        if self.calibration is None or not self.calibration.enabled:
+            await self.api.send_message(chat, t("cal.off"), thread_id=thread)
+            return
+        if not rows:
+            text = t("cal.list_empty", marks=self.calibration.rules.marks)
+            await self.api.send_message(chat, text, thread_id=thread)
+            return
+        items = [
+            say.TuningItem(
+                what=self._calibration_what(row.policy, row.scenario, row.camera),
+                step=row.step_to, bar=row.bar, since=row.at, evidence=row.evidence,
+            )
+            for row in rows
+        ]  # fmt: skip
+        buttons = [
+            {"text": t("kb.cal_undo_n", n=n), "callback_data": f"c:{row.id}:undo"}
+            for n, row in enumerate(rows, start=1)
+        ]
+        await self.api.send_message(
+            chat, say.tuning_text(items, now=self._clock()), thread_id=thread,
+            reply_markup={"inline_keyboard": [buttons[i : i + 4]
+                                              for i in range(0, len(buttons), 4)]},
+        )  # fmt: skip
+
     # --- digest and status ---------------------------------------------------------------
 
     async def _digests(self) -> None:
@@ -1717,6 +1822,8 @@ class TelegramService:
                 title = self._level_title(policy, verdict.get("level"))
                 if known_only(people if isinstance(people, Mapping) else None, persons):
                     title += ", " + say.who_line(people, persons, names=self.tg.names)
+                if say.calibrated(row.intent) is not None:
+                    title += t("digest.calibrated")
                 # the deep look's words when there are some: more frames, plainer prose
                 description = deep.get("description") or verdict.get("rationale")
                 day.notable.append(

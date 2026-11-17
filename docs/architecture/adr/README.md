@@ -21,10 +21,11 @@ the old one (both stay). New ADRs land as PRs with a comment window. Template:
 | [0010](0010-clip-folders.md) | Clip folders as an incident source; `vidette collect` for wake-on-motion cameras | accepted, amends 0009; amended by 0011 and 0013 |
 | [0011](0011-continuous-collect.md) | `vidette collect --continuous`: a bounded ring and a motion gate, still a dataset tool | accepted, amends 0010 |
 | [0012](0012-known-people.md) | Known people: local face recognition (YuNet + SFace) that informs the judge | accepted, amends the roadmap's face-recognition scope; amended by 0013 and 0014 |
-| [0013](0013-telegram-bot.md) | A Telegram bot with feedback buttons; policy levels decide who wakes | accepted, amends 0010 and 0012 |
+| [0013](0013-telegram-bot.md) | A Telegram bot with feedback buttons; policy levels decide who wakes | accepted, amends 0010 and 0012; amended by 0020 |
 | [0014](0014-anonymous-identities.md) | Anonymous identities: unknown faces that come back, counted for the judge | accepted, amends 0012 and principle 4; amended by 0016 |
 | [0015](0015-truthful-timing-and-early-verdicts.md) | The camera's clock for clips, frames by packet, an early verdict per recording | accepted, amends 0010 and 0013 |
 | [0016](0016-every-face-reversible-decisions.md) | Every face gets an identity, its sharpest moment, and decisions that can be taken back | accepted, amends 0014 |
 | [0017](0017-subject-frames-other-cameras-and-questions.md) | Alerts that show their subject and can be argued with, the other cameras at that moment, and questions in plain words | accepted; amended by 0019 |
 | [0018](0018-identity-merge-pass.md) | A merge pass joins identities that are certainly one person, audited and reversible | accepted, amends 0014 and 0016 |
 | [0019](0019-deep-analysis.md) | Deep analysis: a second look at the day's clips, on one shared slot, inside serve | accepted, amends 0013 and 0017 |
+| [0020](0020-calibration-from-marks.md) | Calibration: 👍/👎 move a scenario on a camera a step quieter, never past a floor | accepted, amends 0013 |

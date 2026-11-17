@@ -154,6 +154,9 @@ alert ([docs/other-cameras.md](docs/other-cameras.md)).
 - **`vidette eval`**: precision, recall and false alarms per day with 95 % intervals,
   abstentions by reason, measured cost and latency, for VLM judges side by side with four
   model-free baselines ([docs/eval.md](docs/eval.md)).
+- **Calibration**: 👍/👎 quiet one scenario on one camera a step at a time (a confidence
+  bar, then the digest only), never a critical one; each step said in one line with an
+  Undo button ([docs/calibration.md](docs/calibration.md)).
 
 ### The web app
 
@@ -329,7 +332,7 @@ everything else: [ROADMAP.md](ROADMAP.md).
 | The bot in English (default) or Russian (`language: ru`), one catalog per language | ✅ tested in both languages |
 | A plain-language policy shown back as an inspectable spec | 📐 levels are written by hand |
 | Dry run of a policy over past events | 📐 |
-| Calibration from 👍 / 👎 | 📐 the answers are collected as labels |
+| Calibration from 👍 / 👎, never past the floor of critical scenarios | ✅ tested against fakes |
 | Published accuracy on a labelled set of real clips | 📐 needs the set |
 | v0.2.0 release with its own images | 📐 |
 

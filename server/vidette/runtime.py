@@ -4,7 +4,8 @@ Boot sequence (FastAPI lifespan calls start/stop):
 1. Database.connect (migrations).
 2. With `workers=True`: NotificationDispatcher and MqttPublisher (both no-ops without
    configured rules / broker), the EventIntake (incidents → event rows), the verdict
-   worker, the Telegram bot when `notifications.telegram` is set (ADR-0013), then the
+   worker (with calibration from 👍/👎, ADR-0020), the Telegram bot when
+   `notifications.telegram` is set (ADR-0013), then the
    Frigate source when `frigate:` is configured and the clip folders (ADR-0010).
    Frigate or its broker being unreachable never blocks boot: the source retries with
    backoff and reports through system events and /api/v1/system.
@@ -38,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from vidette.auth.service import AuthService
+from vidette.calibration.service import Calibrator
 from vidette.clipfolder import ClipFolderSource
 from vidette.core.config import VidetteConfig, VlmBackend, load_config
 from vidette.core.events import InProcessEventBus
@@ -132,6 +134,8 @@ class AppRuntime:
         self.identities: IdentityStore | None = None  # people.track_unknown (ADR-0014)
         if config.people.enabled:
             self._setup_people()
+        # 👍/👎 change who is woken (ADR-0020): steps stored in the database, never the config
+        self.calibration = Calibrator(config, self.db, emit=self.emit)
         self.verdicts = VerdictWorker(
             config,
             self.bus,
@@ -142,6 +146,7 @@ class AppRuntime:
             frames=self.frigate_client,
             media_dir=config.storage.media_dir,
             people=self.people_check,
+            calibration=self.calibration,
         )
         self.telegram: TelegramService | None = None
         telegram = config.notifications.telegram
@@ -156,6 +161,7 @@ class AppRuntime:
                 identities=self.identities,
                 judge_status=self.judge_line,
                 gate_for=self.gate_for,
+                calibration=self.calibration,
             )
         self.deep: DeepWorker | None = None
         if config.understanding.deep.enabled:

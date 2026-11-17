@@ -254,7 +254,8 @@ def test_draft_sheets_apply_and_eval(
     assert sheet.name == "sheet-0001-0003.png"
     assert struct.unpack(">II", sheet.read_bytes()[16:24])[0] == 1080
 
-    # Redrawing the sheets of pending entries works on its own (a local name used to shadow `pending`).
+    # Redrawing the sheets of pending entries works on its own (a local name used to shadow
+    # `pending`).
     sheet.unlink()
     assert main(["label", "sheets", str(root)]) == 0
     assert "3 entries to review on 1 contact sheet(s)" in capsys.readouterr().out

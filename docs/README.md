@@ -13,6 +13,7 @@ the top; absence of a banner means it describes reality.
 | Measure a policy | [eval.md](eval.md) |
 | Tell the judge who it saw (opt-in face recognition) | [people.md](people.md) |
 | Get alerts in Telegram, with buttons that teach it | [telegram.md](telegram.md) |
+| Let 👍/👎 quiet what keeps waking you | [calibration.md](calibration.md) |
 | See what every camera recorded at that moment | [other-cameras.md](other-cameras.md) |
 | Ask the bot in plain words, or connect an assistant over MCP | [assistant.md](assistant.md) |
 | Have the big model look again at the day's clips, overnight | [deep.md](deep.md) |

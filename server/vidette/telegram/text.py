@@ -538,3 +538,93 @@ def quiet_text(until: float | None, *, now: float) -> str:
 
 def help_text() -> str:
     return t("help")
+
+
+# --- calibration (ADR-0020) ------------------------------------------------------------------
+
+
+def calibrated(intent: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """The calibration step that sent an event's alert to the digest, when one did."""
+    found = (intent or {}).get("calibration")
+    if isinstance(found, Mapping) and found.get("route") == "digest":
+        return found
+    return None
+
+
+def percent(bar: float | None) -> str:
+    return "?" if bar is None else f"{round(bar * 100)}"
+
+
+def evidence_phrase(evidence: Mapping[str, Any]) -> str:
+    """ "4 times 👎 “walked past”", "6 times 👎 (walked past 4, no reason 2)"."""
+    raw = evidence.get("reasons")
+    counted: Counter[str] = Counter(
+        {str(k): int(v) for k, v in raw.items() if isinstance(v, int)}
+        if isinstance(raw, Mapping)
+        else {}
+    )
+    total = int(evidence.get("down") or sum(counted.values()))
+
+    def word(code: str) -> str:
+        found = reasons.BY_CODE.get(code)
+        return found.short if found is not None else t("cal.no_reason")
+
+    if len(counted) == 1:
+        [(code, _count)] = counted.items()
+        return t("cal.why_one", times=n("n.times", total), reason=word(code))
+    listed = ", ".join(f"{word(code)} {count}" for code, count in counted.most_common())
+    return t("cal.why_mixed", times=n("n.times", total), reasons=listed)
+
+
+def calibration_text(
+    kind: Literal["step", "restored"],
+    what: str,
+    row: Any,
+    evidence: Mapping[str, Any],
+) -> str:
+    """One plain line about a change: what wakes how now, and why."""
+    if kind == "restored":
+        return t("cal.restored", what=escape(what))
+    why = escape(evidence_phrase(evidence))
+    if row.step_to >= 2:
+        return t("cal.digest", what=escape(what), why=why)
+    return t("cal.bar", what=escape(what), bar=percent(row.bar), why=why)
+
+
+def how_phrase(step: int, bar: float | None) -> str:
+    if step >= 2:
+        return t("cal.how.digest")
+    if step == 1:
+        return t("cal.how.bar", bar=percent(bar))
+    return t("cal.how.written")
+
+
+def calibration_undone_text(what: str, step: int, bar: float | None) -> str:
+    return t("cal.undone", what=escape(what), how=how_phrase(step, bar))
+
+
+@dataclass(frozen=True)
+class TuningItem:
+    what: str
+    step: int
+    bar: float | None
+    since: float
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+
+def tuning_text(items: list[TuningItem], *, now: float) -> str:
+    """/tuning: what the marks changed and is in force, numbered like the buttons."""
+    lines = [t("cal.list_title")]
+    for number, item in enumerate(items, start=1):
+        lines.append(
+            t(
+                "cal.list_item",
+                n=number,
+                what=escape(item.what),
+                how=how_phrase(item.step, item.bar),
+                since=clock(item.since, now=now),
+                why=escape(evidence_phrase(item.evidence)),
+            )
+        )
+    lines.append(t("cal.list_hint"))
+    return truncate("\n".join(lines))

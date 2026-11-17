@@ -79,6 +79,12 @@ policies:
     #     scenarios:
     #       lingering_at_door: someone stays at the door with no visible errand
 
+# calibration:             # 👍/👎 change who is woken (docs/calibration.md); on by default
+#   marks: 4               # 👎 for one step (no 👍 among them): a confidence bar, then digest
+#   bar: 0.9               # the first step: wakes only from this confidence
+#   protected_bar: 0.75    # `wake: always` levels: never the digest, a bar of at most this
+#   protect: []            # more scenarios or levels kept loud
+
 # people:                  # known people: local face recognition, opt-in (docs/people.md)
 #   enabled: true          # needs `pip install 'vidette[people]'` and `vidette people models`
 #   dir: /config/people    # biometric data: outside any git repository, owner-only

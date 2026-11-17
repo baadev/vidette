@@ -159,6 +159,7 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
         )
 
     from vidette.api.routers.auth import router as auth_router
+    from vidette.api.routers.calibration import router as calibration_router
     from vidette.api.routers.events import router as events_router
     from vidette.api.routers.identities import router as identities_router
     from vidette.api.routers.mcp import router as mcp_router
@@ -170,6 +171,7 @@ def create_app(runtime: AppRuntime | None = None, *, workers: bool = True) -> Fa
     from vidette.api.routers.ws import router as ws_router
 
     app.include_router(auth_router)
+    app.include_router(calibration_router)
     app.include_router(events_router)
     app.include_router(identities_router)
     app.include_router(mcp_router)

@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from vidette.api.errors import problem
 from vidette.api.routers.people import EventPeopleOut, event_people
 from vidette.auth.deps import require_scope
+from vidette.calibration.service import safe_review
 from vidette.db import EventRow
 from vidette.events.payload import event_clip_url
 from vidette.ffmpeg import MediaToolError
@@ -209,9 +210,21 @@ async def event_clip(event_id: str, request: Request) -> FileResponse:
 
 @router.post("/events/{event_id}/feedback", status_code=204)
 async def event_feedback(event_id: str, body: FeedbackIn, request: Request) -> None:
-    updated = await _runtime(request).db.set_event_feedback(event_id, body.verdict)
+    """👍/👎 from the web app: the event's feedback and review (when it was given), then
+    calibration looks again (ADR-0020), as after an answer in Telegram."""
+    runtime = _runtime(request)
+    updated = await runtime.db.set_event_feedback(event_id, body.verdict)
     if not updated:
         raise problem(404, "Event not found", _EVENT_GONE)
+    row = await runtime.db.get_event(event_id)
+    if row is not None:
+        intent = dict(row.intent or {})
+        answer = "right" if body.verdict == "up" else "wrong"
+        review = intent.get("review")
+        if not isinstance(review, dict) or review.get("answer") != answer:
+            intent["review"] = {"answer": answer, "at": time.time(), "by": "web"}
+            await runtime.db.update_event(event_id, intent=intent)
+    await safe_review(getattr(runtime, "calibration", None))
 
 
 @router.post("/events/{event_id}/favorite", status_code=204)
