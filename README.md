@@ -32,10 +32,11 @@ trouble coming, and the one trusted to tell a passing farmer from an approaching
 > sends the alert to Telegram with the frames that show the person, and turns every
 > 👍 / 👎 into a labelled clip that `vidette eval` can score.
 >
-> **No accuracy numbers yet.** Every part below is tested against fakes (an RTSP camera, an
-> OpenAI-compatible model, the Telegram API), and the clip-folder path has been running on
-> a test deployment with a local model since November 2026. The first numbers will come
-> from `vidette eval` on a labelled set of real clips, with the set's size next to them.
+> **No accuracy figure yet worth the name.** Every part below is tested against fakes (an
+> RTSP camera, an OpenAI-compatible model, the Telegram API), and the clip-folder path has
+> been running on a test deployment with a local model since November 2026. The first
+> numbers from that deployment are in [docs/eval.md](docs/eval.md#first-numbers-on-a-test-deployment):
+> 32 reviewed clips, 3 of which should alert, so they describe that setup, not Vidette.
 
 ## Why
 
@@ -153,7 +154,8 @@ alert ([docs/other-cameras.md](docs/other-cameras.md)).
   ([docs/label.md](docs/label.md)).
 - **`vidette eval`**: precision, recall and false alarms per day with 95 % intervals,
   abstentions by reason, measured cost and latency, for VLM judges side by side with four
-  model-free baselines ([docs/eval.md](docs/eval.md)).
+  model-free baselines; or the verdicts a running service already gave, read from its
+  database with no model call, over several datasets at once ([docs/eval.md](docs/eval.md)).
 - **Calibration**: 👍/👎 quiet one scenario on one camera a step at a time (a confidence
   bar, then the digest only), never a critical one; each step said in one line with an
   Undo button ([docs/calibration.md](docs/calibration.md)).
@@ -327,13 +329,13 @@ everything else: [ROADMAP.md](ROADMAP.md).
 | Known people (opt-in) | 🚧 small faces on security cameras are often unreadable |
 | Anonymous identities with familiar and suspicious marks (opt-in, off by default) | 🚧 no accuracy figure; thresholds from one deployment |
 | `vidette label`: model drafts, phone contact sheets, replies by number | ✅ |
-| `vidette eval`: baselines, VLM judges side by side, intervals, cost | ✅ |
+| `vidette eval`: baselines, VLM judges side by side, intervals, cost; stored live and deep verdicts, several datasets, per day | ✅ |
 | Signed webhooks, Apprise (100+ services), web push, MQTT + Home Assistant discovery | ✅ on confirmed events only |
 | The bot in English (default) or Russian (`language: ru`), one catalog per language | ✅ tested in both languages |
 | A plain-language policy shown back as an inspectable spec | 📐 levels are written by hand |
 | Dry run of a policy over past events | 📐 |
 | Calibration from 👍 / 👎, never past the floor of critical scenarios | ✅ tested against fakes |
-| Published accuracy on a labelled set of real clips | 📐 needs the set |
+| Published accuracy on a labelled set of real clips | 🚧 first numbers on a test deployment (32 reviewed clips, 3 positives) |
 | v0.2.0 release with its own images | 📐 |
 
 ## The privacy promise

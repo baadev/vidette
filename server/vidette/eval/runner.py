@@ -6,7 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 
-from vidette.eval.dataset import Dataset
+from vidette.eval.dataset import Dataset, entry_day
 from vidette.eval.metrics import Outcome, Score, score
 from vidette.verdicts.base import Case, Judge, Verdict
 
@@ -65,6 +65,7 @@ async def run_judge(
                 tokens_in=verdict.tokens_in,
                 tokens_out=verdict.tokens_out,
                 abstain_reason=verdict.rationale if verdict.abstained else None,
+                day=entry_day(entry),
             )
         )
     return JudgeRun(

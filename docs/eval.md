@@ -6,9 +6,9 @@ alarms per day and what a VLM would cost at that volume. Nothing in this reposit
 an accuracy figure that did not come out of this command on a named dataset
 ([ADR-0009](architecture/adr/0009-intent-layer-over-frigate.md)).
 
-Status (v0.2, week 1): the harness, the dataset format and four model-free baseline judges
-work. The VLM judge, the one that actually reads your policy, arrives in week 2 and plugs
-into the same interface (`vidette.verdicts.base.Judge`).
+Status: the harness, the dataset format, four model-free baselines, the VLM judges and
+the stored-verdict judges work. First numbers on a test deployment are
+[below](#first-numbers-on-a-test-deployment).
 
 ## Try it
 
@@ -50,6 +50,8 @@ frigate-severity        2   1   1   0     0  0.50 (0.09-0.91)    1.00 (0.21-1.00
   model and wrong for a hosted one: look up your provider's price per image at your frame
   size.
 - A per-scenario table (`alerted / total`) and the ids of every false alarm and miss.
+- **By day**: false alarms and misses per judge for each calendar day the entries cover
+  (from their `at`), when they cover more than one.
 
 `--json` prints the same numbers for scripts and dashboards.
 
@@ -63,6 +65,9 @@ frigate-severity        2   1   1   0     0  0.50 (0.09-0.91)    1.00 (0.21-1.00
 | `frigate-genai` | Frigate's GenAI review summary (0.17+) rates the threat 1 or 2; abstains without a summary | no |
 | `vlm-local` | the VLM judge on your local backend (Ollama by default) answers `alert` | yes |
 | `vlm-cloud` | the VLM judge on your cloud backend answers `alert` | yes |
+| `stored-live` | the live judge of a running Vidette said alert, read from its database: no model call | it did, then |
+| `stored-deep` | deep analysis said alert ([deep.md](deep.md)), read from the database | it did, then |
+| `stored-best` | the live verdict, or deep analysis' where the live judge gave none | it did, then |
 
 The baselines do not read your policy text; the VLM judges do ([vlm.md](vlm.md)). The
 point of the table is to see whether reading it beats the cheapest baseline by enough to
@@ -70,6 +75,67 @@ pay for itself. VLM judges run only when named with `--judge`, read their backen
 `--config` (default `$VIDETTE_CONFIG`, then `~/.config/vidette/vidette.yaml`), and add a
 table of what each run measured: calls, images, tokens, cost from your prices, latency
 p50/p95.
+
+## Scoring what the service already said
+
+A running `vidette serve` keeps every verdict it gave. `stored-*` judges score those
+instead of asking a model again, so measuring costs nothing and takes no slot from a
+shared model server:
+
+```bash
+vidette eval ~/vidette-data/porch ~/vidette-data/garden \
+  --config ~/.config/vidette/serve.yaml --policy-from-config home \
+  --judge stored-live --judge stored-deep --judge always --judge never
+```
+
+- **Several datasets as one:** name them all; entry ids get their set's name as a prefix
+  (`porch.20260114-101500`), vocabularies merge, a policy is kept when every set has it
+  with the same `alert_on`, and per-day rates use the longest `observed_hours` (the sets
+  of one place run side by side).
+- **`--policy-from-config NAME`**: the ground truth of a service's policy with levels:
+  every scenario of a level that alerts (`wake` other than `never`), as far as the set's
+  vocabulary knows it. The stored verdicts are matched by the same policy name.
+- **`--db PATH`**: the database to read (default: the config's `storage.database`). It is
+  opened read-only; a running service is not disturbed.
+- An entry is matched to its event by the clip's path. A stored judge abstains, and the
+  report counts why, when the clip is **not in the database** (recorded before the service
+  watched the folder) or **not judged** (the live queue never reached it, deep analysis did
+  not look at it, or the judge gave no answer). An abstention counts as no alert, which
+  is what happened at home.
+- The stored `alert` is what the service decided then, under the policy as it was that
+  day; a policy edited since is not re-applied.
+- Only `status: reviewed` entries (and hand-written ones) are truth; machine drafts are
+  not scored unless `--include-drafts` says so, loudly.
+
+## First numbers on a test deployment
+
+Clip-folder cameras on a test deployment over its first four days (November 2026), the
+live judge a 27B vision model on a shared llama-server, a policy with three levels;
+scored with the stored judges, no model call. `frigate-severity` and `frigate-genai`
+abstain on every entry (no Frigate here) and are left out.
+The set is every clip a person reviewed: 32 entries, 3 of which should alert under the
+policy. It is small and it is skewed: 12 of the 32 are alerts the household answered in
+Telegram (so precision here is close to "of the alerts that got an answer, how many were
+right"), 20 are clips reviewed on contact sheets that were recorded before the service
+ran (every stored judge abstains on those), and recall rests on three clips.
+
+| judge | alerts | TP | FP | FN | abstained | precision (95 % CI) | recall (95 % CI) |
+|---|---|---|---|---|---|---|---|
+| stored-live | 12 | 2 | 10 | 1 | 20 | 0.17 (0.05 to 0.45) | 0.67 (0.21 to 0.94) |
+| stored-deep | 3 | 1 | 2 | 2 | 22 | 0.33 (0.06 to 0.79) | 0.33 (0.06 to 0.79) |
+| always | 32 | 3 | 29 | 0 | 0 | 0.09 (0.03 to 0.24) | 1.00 (0.44 to 1.00) |
+| never | 0 | 0 | 0 | 3 | 0 | n/a | 0.00 (0.00 to 0.56) |
+
+What the live service did over the same days (from its database, not from the set):
+most clips were never judged (the shared model judged about a third of them: newest
+first, older than 15 minutes dropped); of 18 alerts sent, the household marked 13 false
+and 1 right (precision of the answered alerts 0.07, 95 % CI 0.01 to 0.31), 4 got no
+answer. After the policy was reworded to ask for the act on the
+property (on the second day), the next 50 hours had 5 alerts: 3 marked false, 1 right,
+1 without an answer.
+
+Read these as a measurement of this one setup, not of Vidette: three positives cannot
+carry a recall figure.
 
 ## Dataset format
 

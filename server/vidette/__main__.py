@@ -101,7 +101,12 @@ def main(argv: list[str] | None = None) -> int:
         description="Score judges against a labelled dataset: precision, recall, false "
         "alarms per day and VLM cost. Without --judge, every built-in baseline runs.",
     )
-    evaluate.add_argument("dataset", type=Path, help="dataset dir (or its labels.yaml)")
+    evaluate.add_argument(
+        "dataset",
+        type=Path,
+        nargs="+",
+        help="dataset dir (or its labels.yaml); several are scored as one (docs/eval.md)",
+    )
     evaluate.add_argument(
         "--policy", action="append", default=None, help="policy name (repeatable; default all)"
     )
@@ -109,8 +114,23 @@ def main(argv: list[str] | None = None) -> int:
         "--judge",
         action="append",
         default=None,
-        help="always | never | frigate-severity | frigate-genai | vlm-local | vlm-cloud "
-        "(repeatable; default: the four baselines; VLM judges run only when named)",
+        help="always | never | frigate-severity | frigate-genai | vlm-local | vlm-cloud | "
+        "stored-live | stored-deep | stored-best (repeatable; default: the four baselines; "
+        "VLM judges run only when named; stored-* read what a service already said)",
+    )
+    evaluate.add_argument(
+        "--policy-from-config",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="score a policy of the config (--config): its alerting levels' scenarios are "
+        "the ground truth (repeatable)",
+    )
+    evaluate.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="the service's database for stored-* judges (default: the config's), read-only",
     )
     evaluate.add_argument(
         "--config",
@@ -220,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         from vidette.eval.metrics import CostModel
 
         if args.scaffold:
-            return eval_cli.cmd_scaffold(args.dataset)
+            return max(eval_cli.cmd_scaffold(path) for path in args.dataset)
         return eval_cli.cmd_eval(
             args.dataset,
             policies=args.policy,
@@ -230,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
             include_drafts=args.include_drafts,
             people=args.people,
             known_people=args.known_people,
+            from_config=args.policy_from_config,
+            database=args.db,
             cost=CostModel(
                 usd_per_call=args.usd_per_call,
                 usd_per_image=args.usd_per_image,

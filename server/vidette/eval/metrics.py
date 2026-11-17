@@ -59,6 +59,7 @@ class Outcome:
     tokens_in: int | None = None
     tokens_out: int | None = None
     abstain_reason: str | None = None
+    day: str | None = None  # the entry's local date (YYYY-MM-DD), when it has `at`
 
 
 @dataclass
@@ -81,6 +82,18 @@ class Confusion:
     @property
     def total(self) -> int:
         return self.tp + self.fp + self.fn + self.tn
+
+
+@dataclass
+class DayRow:
+    """One calendar day of a run: what happened to that day's entries."""
+
+    day: str
+    entries: int = 0
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+    abstained: int = 0
 
 
 @dataclass
@@ -108,6 +121,7 @@ class Score:
     tokens_in: int = 0
     tokens_out: int = 0
     abstain_reasons: dict[str, int] = field(default_factory=dict)
+    by_day: list[DayRow] = field(default_factory=list)  # entries with `at`, oldest first
 
     def latency(self, quantile: float) -> float | None:
         """Nearest-rank quantile of the measured latencies (None without VLM calls)."""
@@ -169,7 +183,18 @@ def score(outcomes: list[Outcome], *, observed_hours: float | None) -> Score:
         for o in outcomes
         if o.abstained
     )
+    dates: dict[str, DayRow] = {}
+    for outcome in outcomes:
+        if outcome.day is None:
+            continue
+        on_day = dates.setdefault(outcome.day, DayRow(outcome.day))
+        on_day.entries += 1
+        on_day.tp += int(outcome.alerted and outcome.expected)
+        on_day.fp += int(outcome.alerted and not outcome.expected)
+        on_day.fn += int(outcome.expected and not outcome.alerted)
+        on_day.abstained += int(outcome.abstained)
     return Score(
+        by_day=[dates[date] for date in sorted(dates)],
         confusion=confusion,
         observed_hours=observed_hours,
         vlm_calls=sum(outcome.vlm_calls for outcome in outcomes),

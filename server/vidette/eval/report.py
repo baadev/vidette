@@ -118,6 +118,22 @@ def render_text(dataset: Dataset, runs: Sequence[JudgeRun], cost: CostModel) -> 
                 cells = "".join(f"{f'{row.alerted}/{row.total}':>18}" for row in rows)
                 lines.append(f"{scenario:<{width}}{expected:<10}{cells}")
 
+        dates = sorted({d.day for run in policy_runs for d in run.score.by_day})
+        if len(dates) > 1:
+            lines += [
+                "",
+                f"{'by day: FP / FN':<18}{'entries':>8}"
+                + "".join(f"{run.judge:>18}" for run in policy_runs),
+            ]
+            for date in dates:
+                found = [
+                    next((d for d in run.score.by_day if d.day == date), None)
+                    for run in policy_runs
+                ]
+                entries = max((d.entries for d in found if d is not None), default=0)
+                cells = "".join(f"{'-' if d is None else f'{d.fp} / {d.fn}':>18}" for d in found)
+                lines.append(f"{date:<18}{entries:>8}{cells}")
+
         abstained = [
             f"  {run.judge} abstained on {run.score.abstained} "
             f"entr{'y' if run.score.abstained == 1 else 'ies'} ({_reasons(run)}); "
@@ -263,6 +279,17 @@ def render_json(dataset: Dataset, runs: Sequence[JudgeRun], cost: CostModel) -> 
                 ],
                 "false_alarms": run.score.false_alarms,
                 "misses": run.score.misses,
+                "by_day": [
+                    {
+                        "day": row.day,
+                        "entries": row.entries,
+                        "tp": row.tp,
+                        "fp": row.fp,
+                        "fn": row.fn,
+                        "abstained": row.abstained,
+                    }
+                    for row in run.score.by_day
+                ],
                 "measured": {
                     "cost_usd": run.score.cost_usd,
                     "tokens_in": run.score.tokens_in,

@@ -73,7 +73,8 @@ numbers with the set's size, and nothing better than them.
 | The other cameras at an event's moment: every clip around it on every clip-folder camera, the same person only by face, approximate time for cameras whose video arrives late, one mosaic video; in the event card and «📹 Другие камеры» ([docs/other-cameras.md](docs/other-cameras.md), [ADR-0017](docs/architecture/adr/0017-subject-frames-other-cameras-and-questions.md)) | 🚧 tested; stitched on real clips of a test deployment; Frigate events have no neighbours yet; the on-screen clock is not read (📐) |
 | Questions in plain words to the bot (tools over events, clips and identities; the local model by default, quick answers for the commonest), and the same read-only tools over MCP ([docs/assistant.md](docs/assistant.md)) | 🚧 tested against fakes; run against the real local model; answers take minutes on a shared model |
 | HA sensor via MQTT | 📐 (delivery plumbing ✅) |
-| First published numbers: `vidette eval` on the real set, VLM judge vs the four baselines | 📐 |
+| `vidette eval` on what a running service said: `stored-live` / `stored-deep` / `stored-best` from its database (no model call), a service's policy as ground truth (`--policy-from-config`), several datasets as one, false alarms and misses per day ([docs/eval.md](docs/eval.md#scoring-what-the-service-already-said)) | ✅ tested on temporary databases; run on a test deployment |
+| First published numbers: `vidette eval` on the real set, VLM judge vs the baselines | 🚧 first numbers on a test deployment's reviewed set, 32 clips with 3 positives ([docs/eval.md](docs/eval.md#first-numbers-on-a-test-deployment)); too few positives for a recall figure |
 | Release v0.2.0 with its own images (v0.1.x images untouched) | 📐 |
 
 ## Later

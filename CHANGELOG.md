@@ -11,6 +11,14 @@ of clips ([ADR-0009](docs/architecture/adr/0009-intent-layer-over-frigate.md)). 
 released; no images published from it; the last release is v0.1.3.
 
 ### Added
+- **`vidette eval` on stored verdicts** ([docs/eval.md](docs/eval.md#scoring-what-the-service-already-said)):
+  `--judge stored-live | stored-deep | stored-best` score what a running service already
+  said, read-only from its database (`--db`, default the config's), matched by clip path,
+  abstaining with "not in the database" or "not judged"; `--policy-from-config NAME` takes
+  a service's policy with levels as ground truth (its alerting scenarios); several
+  datasets are scored as one (`vidette eval A B C`, ids prefixed with the set's name);
+  the report adds false alarms and misses per day (text and JSON). First numbers on a
+  test deployment in docs/eval.md.
 - **Calibration from 👍/👎** ([docs/calibration.md](docs/calibration.md),
   [ADR-0020](docs/architecture/adr/0020-calibration-from-marks.md)): per scenario of a
   policy and per camera, after 4 counted 👎 and no 👍 within 14 days, one step quieter:

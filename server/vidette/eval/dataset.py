@@ -216,6 +216,99 @@ class Dataset:
         )
 
 
+def entry_day(entry: Entry) -> str | None:
+    """The entry's local calendar date (YYYY-MM-DD); naive times are read as UTC."""
+    if entry.at is None:
+        return None
+    at = entry.at if entry.at.tzinfo is not None else entry.at.replace(tzinfo=UTC)
+    return at.astimezone().date().isoformat()
+
+
+def union(datasets: list[Dataset]) -> Dataset:
+    """Several datasets scored as one (`vidette eval A B C`): the entries of all, their
+    ids prefixed with their set's name, media relative to the common parent directory.
+    Scenarios and aliases are merged; a policy is kept when every set has it with the
+    same `alert_on`. `observed_hours` is the longest: the sets of one place run side by
+    side (one per camera), so their per-day rates share one calendar."""
+    if len(datasets) == 1:
+        return datasets[0]
+    import os
+
+    root = Path(os.path.commonpath([str(d.root.resolve()) for d in datasets]))
+    scenarios: dict[str, str] = {}
+    aliases: dict[str, str] = {}
+    for dataset in datasets:
+        scenarios.update(dataset.labels.scenarios)
+        aliases.update(dataset.labels.aliases)
+    first = datasets[0].labels.policies
+    policies = {
+        name: policy
+        for name, policy in first.items()
+        if all(
+            name in d.labels.policies
+            and sorted(d.labels.policies[name].alert_on) == sorted(policy.alert_on)
+            for d in datasets
+        )
+    }
+    entries: list[Entry] = []
+    for dataset in datasets:
+        prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", dataset.labels.name).strip("-.") or "set"
+        relative = dataset.root.resolve().relative_to(root)
+        for entry in dataset.labels.entries:
+            entries.append(
+                entry.model_copy(
+                    update={
+                        "id": f"{prefix}.{entry.id}",
+                        "number": None,
+                        "media": [(relative / item).as_posix() for item in entry.media],
+                    }
+                )
+            )
+    if not policies:
+        raise DatasetError(
+            "the datasets share no policy with the same alert_on; give them one, or name a "
+            "service's policy with --policy-from-config"
+        )
+    hours = [d.labels.observed_hours for d in datasets]
+    known = [h for h in hours if h is not None]
+    try:
+        labels = Labels(
+            name="+".join(d.labels.name for d in datasets),
+            description=f"{len(datasets)} datasets scored as one",
+            license="; ".join(dict.fromkeys(d.labels.license for d in datasets)),
+            observed_hours=max(known) if known and len(known) == len(hours) else None,
+            scenarios=scenarios,
+            policies=policies,
+            aliases=aliases,
+            entries=entries,
+        )
+    except ValidationError as exc:
+        raise DatasetError(f"the datasets cannot be scored together: {exc}") from exc
+    return Dataset(root=root, labels=labels, include_drafts=datasets[0].include_drafts)
+
+
+def with_policy(
+    dataset: Dataset, name: str, description: str, alert_on: list[str], known_people: str
+) -> Dataset:
+    """The dataset with one more policy (`--policy-from-config`): its ground truth is the
+    scenarios that alert under a service's policy, those the set's vocabulary knows."""
+    known = [s for s in alert_on if s in dataset.labels.scenarios]
+    if not known:
+        raise DatasetError(
+            f"policy '{name}': none of its alerting scenarios ({', '.join(alert_on)}) is in "
+            f"the dataset's vocabulary"
+        )
+    policy = DatasetPolicy(
+        description=description,
+        alert_on=known,
+        known_people="quiet" if known_people == "quiet" else "judge",
+    )
+    labels = dataset.labels.model_copy(
+        update={"policies": {**dataset.labels.policies, name: policy}}
+    )
+    return Dataset(root=dataset.root, labels=labels, include_drafts=dataset.include_drafts)
+
+
 def entry_incident(entry: Entry) -> Incident:
     """The same Incident a live Frigate review would produce, built from the labels."""
     started = 0.0
