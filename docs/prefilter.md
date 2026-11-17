@@ -104,10 +104,10 @@ orders clips by motion and skips none, and a start-up warning says how to fetch 
 - **On every event**, `intent.triage`: the class, the reason in a few words, the facts
   (best person score, moving vehicles, frames looked at, how much changed) and how long
   the look took. A skipped event's summary is "not judged: …".
-- **The bot's `/status`** line counts them since the start: judged first, judged when
-  idle (and how many waited too long), not judged.
+- **The bot's `/status`** line counts them since the start: first in line, only when idle (and how
+  many waited too long), not judged.
 - **`vidette policy dry-run`** adds a line: of the events it looked at, how many were
-  judged first, when idle, or skipped ([calibration.md](calibration.md#dry-run-what-a-policy-would-have-done)).
+  *now*, *later* or skipped ([calibration.md](calibration.md#dry-run-what-a-policy-would-have-done)).
 - **`vidette triage check CLIP…`** says what it would do with clips, and why:
 
   ```

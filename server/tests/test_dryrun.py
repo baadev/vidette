@@ -132,4 +132,4 @@ def test_the_dry_run_counts_what_the_pre_filter_skipped() -> None:
     assert run.triaged and [e.triage for e in run.events] == ["now", "skip"]
     assert [e.route for e in run.events] == ["silent", "unjudged"]
     text = render_text(run)
-    assert "1 judged first, 0 when the model was idle, 1 skipped (nobody there)" in text
+    assert "1 now (first in line), 0 later (only while the model was idle), 1 skipped" in text

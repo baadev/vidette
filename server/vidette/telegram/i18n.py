@@ -281,7 +281,8 @@ EN: dict[str, str] = {
     "judge.line": "{backend} {model}; since start {judged}, old ones skipped {skipped}",
     "judge.error": "; error: {error}",
     "judge.triage": (
-        "; pre-filter: {now} judged first, {later} when idle ({expired} too old), {skip} not judged"
+        "; pre-filter: {now} first in line, {later} only when idle ({expired} waited too "
+        "long), {skip} not judged"
     ),
     # taps and replies
     "toast.gone": "This alert is no longer available",
@@ -589,8 +590,8 @@ RU: dict[str, str] = {
     "judge.line": "{backend} {model}; с запуска {judged}, пропущено старых {skipped}",
     "judge.error": "; ошибка: {error}",
     "judge.triage": (
-        "; предфильтр: {now} сразу, {later} в свободное время ({expired} не дождались), "
-        "{skip} без проверки"
+        "; предфильтр: {now} в первую очередь, {later} только в свободное время "
+        "({expired} не дождались), {skip} не отправлены судье"
     ),
     "toast.gone": "Эта тревога уже недоступна",
     "toast.who": "Кто это?",

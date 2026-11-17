@@ -349,10 +349,10 @@ def render_text(run: DryRun, *, camera_names: Mapping[str, str] | None = None) -
     if run.triaged:
         lines += [
             "",
-            "Pre-filter (docs/prefilter.md), events it looked at: "
-            f"{total.get('triage_now', 0)} judged first, {total.get('triage_later', 0)} "
-            f"when the model was idle, {total.get('triage_skip', 0)} skipped (nobody there); "
-            "skipped events are among the unjudged.",
+            "Pre-filter (docs/prefilter.md), of the events it looked at: "
+            f"{total.get('triage_now', 0)} now (first in line), {total.get('triage_later', 0)} "
+            f"later (only while the model was idle), {total.get('triage_skip', 0)} skipped "
+            "(nobody there; counted among the unjudged).",
         ]
     moved = run.moved()
     lines += ["", f"Calibration moved {len(moved)} alert(s) to the digest."]

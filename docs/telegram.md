@@ -315,7 +315,7 @@ always, also when nothing happened.
 
 | Command | What it does | Who |
 |---|---|---|
-| `/status` | cameras, events and alerts today, the last alert and where its time went, the judge (with the [pre-filter](prefilter.md) on, how many clips it had judged first, judged when idle and not judged); then today's digest so far | every allowed chat (the digest: recipients) |
+| `/status` | cameras, events and alerts today, the last alert and where its time went, the judge (with the [pre-filter](prefilter.md) on, how many clips it put first in line, only when idle, and not judged); then today's digest so far | every allowed chat (the digest: recipients) |
 | `/live` | says that live view will be part of the Vidette app itself; no links to a separate restreamer | every allowed chat |
 | `/quiet` | quiet for `quiet_for` (1 h): `always` levels still alert, the rest is in the digest; `/quiet off` ends it | per chat |
 | `/tuning` | what your 👍/👎 changed ([calibration.md](calibration.md)), one Undo button per change | every allowed chat |
