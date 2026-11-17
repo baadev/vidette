@@ -23,6 +23,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from html import escape
 from typing import Any
 
 import httpx
@@ -70,7 +71,83 @@ _TODAY = re.compile(
     r"|digest|summary|what\s+happened\s+today"
 )
 _HELP = re.compile(r"^(что\s+(ты\s+)?умеешь|помощь|help|/help|what\s+can\s+you\s+do)\??$")
+# "it was me, a test": the alert was right, and it was staged by one of us
+_STAGED = re.compile(
+    r"проверк|тест|симулир|инсцениров|специально|нарочно|понарошку"
+    r"|\btest|\bdrill|staged|on\s+purpose|simulat|pretend"
+)
+_ITS_US = re.compile(
+    r"это\s+(был[аи]?\s+)?(я|мы)\b|был[аи]?\s+(я|мы)\b|\bверно\b|\bправильно\b"
+    r"|it\s+was\s+(me|us)|that\s+was\s+(me|us)|\bright\b|\bcorrect\b"
+)
+# the other cameras, also "the second camera" (how it was asked on a test deployment)
+_OTHER_CAMERA = re.compile(
+    r"втор\w*\s+камер|друг\w*\s+камер|соседн\w*\s+камер|other\s+camera|second\s+camera"
+)
+_ASKS = re.compile(r"\?|почему|что\s+|где\s+|когда|как\s+|не\s+вижу|why|what|where|when|how")
 TOOL_RESULT_CHARS = 700  # a shared server's slot holds about 2000 tokens in all
+# What a model sometimes writes instead of an answer: its tool call or a tool's result
+# copied as text (17.11: «[tool_result]\n{"id": …}\n[/tool_result]» reached the chat).
+_TRANSCRIPT = re.compile(
+    r"\[(tool_result|tool_call|tool_response|function_call|function_result|tool)\]"
+    r".*?(\[/\1\]|$)"
+    r"|<(tool_call|tool_response|tool_result|function_call|function_result)>.*?(</\3>|$)"
+    r"|<\|[a-z_]{1,40}\|>",
+    re.S | re.I,
+)
+_FENCED_JSON = re.compile(r"```(?:json)?\s*[\[{].*?```", re.S)
+_ECHOED_CALL = re.compile(
+    r"(?:<tool_call>|\[tool_call\])\s*(\{.*?\})\s*(?:</tool_call>|\[/tool_call\]|$)", re.S
+)
+NUDGE = (
+    "Answer my question now in one to three plain sentences, from what the tools returned. "
+    "No JSON, no tool output, no markup."
+)
+
+
+def clean_answer(text: str) -> str:
+    """The model's words without any tool transcript: tool calls or results it copied as
+    text, special tokens, fenced or bare JSON, its thinking. Empty when nothing natural is
+    left (then the answer is asked for again, or said plainly by the code)."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    text = _TRANSCRIPT.sub("", text)
+    text = _FENCED_JSON.sub("", text)
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            json.loads(stripped)
+        except ValueError:
+            if stripped.count('"') >= 4 and stripped.count(":") >= 2:
+                return ""  # a cut-off JSON object is not an answer either
+        else:
+            return ""
+    return stripped
+
+
+def echoed_call(text: str) -> tuple[str, dict[str, Any]] | None:
+    """A tool call the model wrote as text (`<tool_call>{"name": …, "arguments": …}`)
+    instead of calling it: run it like a real one."""
+    match = _ECHOED_CALL.search(text)
+    if match is None:
+        return None
+    try:
+        call = json.loads(match.group(1))
+    except ValueError:
+        return None
+    if not isinstance(call, dict) or not isinstance(call.get("name"), str):
+        return None
+    args = call.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {}
+    return str(call["name"]), args if isinstance(args, dict) else {}
+
+
+def staged_by_us(lowered: str) -> bool:
+    """"It was me, a test": one of us staged it, and the alert was right."""
+    return bool(_STAGED.search(lowered) and _ITS_US.search(lowered))
 
 
 @dataclass
@@ -117,9 +194,32 @@ class Assistant:
     async def answer(self, text: str, *, event_id: str | None = None) -> Reply:
         self.tools.current = event_id
         self.tools.names = self.tools.names and self.config.assistant.backend == "local"
+        lowered = text.strip().lower()
+        prefix = ""
+        if event_id and staged_by_us(lowered):
+            # feedback first: right, staged by one of us (never a 👎 for calibration)
+            try:
+                await self.tools.call(
+                    "mark_event", {"event_id": CURRENT, "answer": "test"}
+                )
+                prefix = t("assistant.marked_test")
+            except ToolError as exc:
+                prefix = str(exc)
+        reply = await self._reply(text, lowered, event_id, marked=bool(prefix))
+        if prefix:
+            reply.text = f"{prefix}\n{reply.text}".strip()
+        return reply
+
+    async def _reply(self, text: str, lowered: str, event_id: str | None, *, marked: bool) -> Reply:
+        if event_id and _OTHER_CAMERA.search(lowered):
+            incident = await self._incident_reply()
+            if incident is not None:
+                return incident
         quick = await self._fast(text.strip(), event_id)
         if quick is not None:
             return quick
+        if marked and not _ASKS.search(lowered):
+            return Reply("", fast=True)  # only the feedback: nothing was asked
         endpoint = self.endpoint()
         if endpoint is None:
             return Reply(t("assistant.off") + can_do())
@@ -128,6 +228,23 @@ class Assistant:
         except _ModelError as exc:
             logger.info("assistant: %s", exc)
             return Reply(t("assistant.model_failed", error=exc) + can_do())
+
+    async def _incident_reply(self) -> Reply | None:
+        """What the other cameras saw around this alert, from its incident links
+        (ADR-0022), with their clips; None when the event has no incident record (the
+        mosaic of every camera answers then)."""
+        try:
+            detail = (await self.tools.call("event_detail", {"event_id": CURRENT})).data
+        except ToolError:
+            return None
+        links = detail.get("incident")
+        if not isinstance(links, list):
+            return None
+        if not links:
+            return Reply(t("assistant.incident_none"), fast=True)
+        result = await self.tools.call("incident_clips", {"event_id": CURRENT})
+        lines = [t("assistant.incident_head"), *(escape(str(link["line"])) for link in links)]
+        return Reply("\n".join(lines), result.media, fast=True)
 
     async def _fast(self, text: str, event_id: str | None) -> Reply | None:
         """The commonest questions, answered without the model."""
@@ -223,14 +340,28 @@ class Assistant:
         ]
         media: list[Media] = []
         calls = 0
+        nudged = False
         for step in range(self.config.assistant.max_steps + 1):
             final = step == self.config.assistant.max_steps
             message, used = await self._ask(endpoint, messages, final=final)
             calls += used
             requested = self._tool_requests(message)
+            raw = self._text(message)
+            if not requested and not final:
+                echoed = echoed_call(str(message.get("content") or ""))
+                if echoed is not None:  # a call written as text: run it all the same
+                    requested = [(f"echo{step}", echoed[0], echoed[1])]
             if not requested or final:
-                answer = self._text(message) or t("assistant.no_answer") + can_do()
-                return Reply(answer.strip(), media, model_calls=calls)
+                answer = clean_answer(raw)
+                if answer:
+                    return Reply(answer, media, model_calls=calls)
+                if not final and not nudged:
+                    # only a tool's call or result copied as text: once more, in words
+                    nudged = True
+                    messages.append({"role": "user", "content": NUDGE})
+                    continue
+                logger.info("assistant: the model gave no answer in words; a plain one")
+                return Reply(await self._fallback(event_id), media, model_calls=calls)
             messages.append(self._assistant_turn(message, requested))
             for call_id, name, args in requested[:2]:
                 try:
@@ -241,6 +372,26 @@ class Assistant:
                     content = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 messages.append(self._tool_turn(call_id, name, content[:TOOL_RESULT_CHARS]))
         return Reply(t("assistant.too_slow") + can_do(), media, model_calls=calls)
+
+    async def _fallback(self, event_id: str | None) -> str:
+        """A short plain answer from the facts when the model wrote none: what the event
+        was and the other cameras' links. Never the model's echo."""
+        if not event_id:
+            return t("assistant.no_answer") + can_do()
+        try:
+            detail = (await self.tools.call("event_detail", {"event_id": CURRENT})).data
+        except ToolError as exc:
+            return str(exc)
+        head = " · ".join(
+            str(detail[key]) for key in ("cam", "t", "what") if detail.get(key)
+        )
+        lines = [head] if head else []
+        if detail.get("description"):
+            lines.append(str(detail["description"]))
+        links = detail.get("incident")
+        if isinstance(links, list) and links:
+            lines += [str(link["line"]) for link in links if isinstance(link, dict)]
+        return "\n".join(lines) or t("assistant.no_answer") + can_do()
 
     async def _ask(
         self, endpoint: VlmEndpoint, messages: list[dict[str, Any]], *, final: bool
@@ -340,7 +491,7 @@ class Assistant:
             )}  # fmt: skip
         return {
             "role": "assistant",
-            "content": message.get("content") or "",
+            "content": clean_answer(str(message.get("content") or "")),
             "tool_calls": [
                 {"id": cid, "type": "function",
                  "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}

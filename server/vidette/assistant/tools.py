@@ -27,7 +27,7 @@ from typing import Any
 from vidette.core.config import OTHER_SCENARIO, PolicyConfig, VidetteConfig
 from vidette.db import Database, EventRow
 from vidette.ffmpeg import MediaToolError
-from vidette.linked import Linked, describe, find_around, find_linked, mosaic
+from vidette.linked import Linked, describe, find_around, find_linked, moment_of, mosaic
 from vidette.people.identities import IdentityStore
 from vidette.telegram import text as say
 from vidette.telegram.i18n import t
@@ -122,12 +122,12 @@ SPECS: list[dict[str, Any]] = [
     },
     {
         "name": "mark_event",
-        "description": "Mark an event like the alert buttons do.",
+        "description": "Mark an event like the alert buttons do; test: right, staged by us.",
         "parameters": {
             "type": "object",
             "properties": {
                 "event_id": {"type": "string"},
-                "answer": {"type": "string", "enum": ["right", "wrong", "unsure"]},
+                "answer": {"type": "string", "enum": ["right", "wrong", "unsure", "test"]},
                 "reason": {"type": "string", "description": "for wrong: passing, car_use, …"},
             },
             "required": ["event_id", "answer"],
@@ -210,6 +210,7 @@ class Tools:
             "send_clips": self.send_clips,
             "mark_event": self.mark_event,
             "today": self.today,
+            "incident_clips": self.incident_clips,  # not offered to the model
         }
         handler = handlers.get(name)
         if handler is None:
@@ -326,7 +327,65 @@ class Tools:
         if isinstance(stream, Mapping) and stream.get("interrupted"):
             detail["recording"] = "interrupted"
         detail["clip"] = bool(row.clip_path and Path(row.clip_path).is_file())
+        links = await self._incident_links(row)
+        if links is not None:
+            detail["incident"] = links
         return Result(detail)
+
+    async def _incident_links(self, row: EventRow) -> list[dict[str, Any]] | None:
+        """The other cameras' events tied to this one (ADR-0022), each with the plain line
+        the alert said; None when the event has no incident record."""
+        incident = (row.intent or {}).get("incident")
+        if not isinstance(incident, Mapping):
+            return None
+        if incident.get("role") == "linked":  # this one was linked to an alert: that alert
+            alert = await self.db.get_event(str(incident.get("alert")))
+            if alert is None:
+                return []
+            record = {
+                "event_id": alert.id, "camera": alert.camera,
+                "at": moment_of(alert), "evidence": incident.get("evidence") or "time",
+                "label": alerting_verdict(alert.intent, alert.policy).get("label"),
+                "rationale": alerting_verdict(alert.intent, alert.policy).get("rationale"),
+                "state": alert.state,
+            }  # fmt: skip
+            incident = {"role": "alert", "links": [record]}
+        policy_of = self._policy
+        lines = say.incident_lines(
+            incident, camera_name=self.camera_name,
+            titles=lambda label: self._label_title(policy_of(row.policy), label),
+            now=self._clock(), limit=6,
+        )  # fmt: skip
+        links = [link for link in incident.get("links") or [] if isinstance(link, Mapping)]
+        return [
+            {
+                "line": line, "event_id": link.get("event_id"),
+                "cam": self.camera_name(str(link.get("camera"))),
+                "same_person": link.get("evidence") in ("face", "look"),
+            }
+            for line, link in zip(lines, links, strict=False)
+        ]  # fmt: skip
+
+    def _label_title(self, policy: PolicyConfig | None, label: str | None) -> str:
+        if not label:
+            return ""
+        found = policy.scenario_configs().get(label) if policy is not None else None
+        return found.title if found is not None and found.title else label.replace("_", " ")
+
+    async def incident_clips(self, args: Mapping[str, Any]) -> Result:
+        """The clips of the other cameras' events tied to this one by a face or the
+        clothes (at most two), for the chat; nothing for the model."""
+        row = await self._event(args.get("event_id"))
+        links = await self._incident_links(row) or []
+        media: list[Media] = []
+        for link in links:
+            if not link.get("same_person") or len(media) >= 2:
+                continue
+            other = await self.db.get_event(str(link.get("event_id")))
+            if other is None or not other.clip_path or not Path(other.clip_path).is_file():
+                continue
+            media.append(Media(Path(other.clip_path), str(link["line"])))
+        return Result({"clips": len(media)}, media)
 
     def _linked_data(self, linked: Linked) -> dict[str, Any]:
         now = self._clock()
@@ -440,7 +499,7 @@ class Tools:
             raise ToolError(t("tool.mark_chat_only"))
         row = await self._event(args.get("event_id"))
         answer = str(args.get("answer") or "")
-        if answer not in ("right", "wrong", "unsure"):
+        if answer not in ("right", "wrong", "unsure", "test"):
             raise ToolError(t("tool.answer_values"))
         reason = args.get("reason")
         said = await self._mark(row.id, answer, str(reason) if reason else None)

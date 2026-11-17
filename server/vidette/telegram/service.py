@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from vidette.assistant.agent import Assistant
+from vidette.assistant.agent import Assistant, clean_answer
 from vidette.assistant.tools import Tools
 from vidette.calibration.service import Calibrator, Change, safe_review
 from vidette.clipfolder import clip_incident
@@ -1358,9 +1358,12 @@ class TelegramService:
                 )  # fmt: skip
                 placeholder = sent.get("message_id") if isinstance(sent, dict) else None
             reply = await work
+            # never the model's tool transcript (17.11: «[tool_result]{…}» reached the chat)
+            body = reply.text if reply.fast else escape(clean_answer(reply.text))
+            if not body.strip():
+                body = escape(t("assistant.no_answer").strip())
             answer = await self.api.send_message(
-                chat, say.truncate(escape(reply.text) if not reply.fast else reply.text),
-                thread_id=thread, reply_to=asked,
+                chat, say.truncate(body), thread_id=thread, reply_to=asked,
             )  # fmt: skip
             if isinstance(placeholder, int):
                 with contextlib.suppress(TelegramError):
@@ -1395,6 +1398,8 @@ class TelegramService:
             return t("toast.no_alert_here")
         if answer == "wrong" and reason not in reasons.BY_CODE:
             reason = None
+        if answer == "test":  # right, and staged by one of us: never a 👎 (ADR-0022)
+            return await self.answer(alert, "right", test=True)
         verdict: say.Answer = "unsure"
         if answer in ("right", "wrong"):
             verdict = "right" if answer == "right" else "wrong"
@@ -1415,6 +1420,7 @@ class TelegramService:
         reason: str | None = None,
         note: str | None = None,
         keyboard: str = "main",
+        test: bool = False,
     ) -> str:
         """Record one answer about the verdict: the event's feedback and review, a
         reviewed label (with the reason, when given), and the alert's buttons shrink to
@@ -1436,6 +1442,8 @@ class TelegramService:
         review: dict[str, Any] = {"answer": answer, "at": self._clock()}
         if reason:
             review["reason"] = reason
+        if test:
+            review["test"] = True  # staged by one of us: right, and kept apart in the numbers
         if note:
             review["note"] = note
         intent = dict(event.intent or {})
