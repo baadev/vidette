@@ -40,6 +40,8 @@ class ModelFile:
     size: int
     license: str
     what: str
+    command: str = "vidette people models"  # the command that downloads it
+    kind: str = "face model"  # how error messages name it
 
 
 DETECTOR = ModelFile(
@@ -115,12 +117,12 @@ def ensure_model(
         if not download:
             raise ModelError(
                 f"{path} does not match its checksum (damaged or replaced); delete it and "
-                "run `vidette people models`"
+                f"run `{spec.command}`"
             )
         say(f"  {spec.name} does not match its checksum; downloading it again")
     elif not download:
         raise ModelError(
-            f"face model {spec.name} is not downloaded; run `vidette people models` "
+            f"{spec.kind} {spec.name} is not downloaded; run `{spec.command}` "
             f"(it fetches {spec.size / 1e6:.1f} MB from github.com/opencv/opencv_zoo into "
             f"{models_dir})"
         )

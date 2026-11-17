@@ -117,3 +117,19 @@ def test_the_cli_dry_run_reads_the_database_read_only(
     data = json.loads(capsys.readouterr().out)
     assert sum(day.get("wake", 0) for day in data["days"].values()) == 0
     assert sum(day.get("silent", 0) for day in data["days"].values()) == 5
+
+
+def test_the_dry_run_counts_what_the_pre_filter_skipped() -> None:
+    from dataclasses import replace
+
+    judged = _row("judged", "dismissed", None, "passer_by", at=NOW - 3600)
+    skipped = _row("skipped", "observed", None, "passer_by", at=NOW - 1800)
+    rows = [
+        replace(judged, intent={**(judged.intent or {}), "triage": {"class": "now"}}),
+        replace(skipped, intent={"triage": {"class": "skip", "reason": "tiny"}}),
+    ]
+    run = replay(rows, _config(), since=NOW - 86400, until=NOW, mode="off")
+    assert run.triaged and [e.triage for e in run.events] == ["now", "skip"]
+    assert [e.route for e in run.events] == ["silent", "unjudged"]
+    text = render_text(run)
+    assert "1 judged first, 0 when the model was idle, 1 skipped (nobody there)" in text

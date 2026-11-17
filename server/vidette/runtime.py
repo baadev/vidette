@@ -65,6 +65,7 @@ from vidette.people.store import PeopleStore, StoreError
 from vidette.telegram import i18n
 from vidette.telegram.i18n import t
 from vidette.telegram.service import TelegramService
+from vidette.triage.service import Triager
 from vidette.verdicts.base import Judge
 from vidette.verdicts.vlm import VlmJudge
 from vidette.verdicts.worker import VerdictWorker
@@ -73,6 +74,7 @@ from vidette.vlm.client import VlmClient
 from vidette.vlm.endpoint import (
     BACKEND_META_KEY,
     VlmEndpoint,
+    VlmUnavailableError,
     effective_backend,
     endpoint_for,
     parse_choice,
@@ -136,6 +138,17 @@ class AppRuntime:
             self._setup_people()
         # 👍/👎 change who is woken (ADR-0020): steps stored in the database, never the config
         self.calibration = Calibrator(config, self.db, emit=self.emit)
+        # the pre-filter in front of the judge (ADR-0021): never downloads its model
+        self.triage: Triager | None = None
+        if config.understanding.triage.enabled:
+            self.triage = Triager.from_config(
+                config.understanding.triage, models_dir=config.people.models_dir
+            )
+            if self.triage.error is not None:
+                self.config_warnings.append(
+                    f"understanding.triage: {self.triage.error}; clips are ordered but none "
+                    "is skipped until the detector loads (`vidette triage models`)"
+                )
         self.verdicts = VerdictWorker(
             config,
             self.bus,
@@ -147,6 +160,8 @@ class AppRuntime:
             media_dir=config.storage.media_dir,
             people=self.people_check,
             calibration=self.calibration,
+            triage=self.triage,
+            slot_idle=self._slot_idle,
         )
         self.telegram: TelegramService | None = None
         telegram = config.notifications.telegram
@@ -181,6 +196,12 @@ class AppRuntime:
             "judge.line", backend=backend.value, model=model, judged=status.judged,
             skipped=status.skipped_old,
         )  # fmt: skip
+        if self.triage is not None:
+            seen = self.triage.line()
+            line += t(
+                "judge.triage", now=seen["now"], later=seen["later"], skip=seen["skip"],
+                expired=status.later_expired,
+            )  # fmt: skip
         if status.last_error:
             line += t("judge.error", error=status.last_error[:80])
         return line
@@ -227,6 +248,14 @@ class AppRuntime:
         stored = parse_choice(await self.db.get_meta(BACKEND_META_KEY))
         return effective_backend(self.config, stored)
 
+    def _slot_idle(self, backend: VlmBackend) -> bool:
+        """Whether the judge's model slot is free (the pre-filter's `later` clips)."""
+        try:
+            endpoint = endpoint_for(self.config, backend)
+        except VlmUnavailableError:
+            return False
+        return self.gate_for(endpoint).idle
+
     def gate_for(self, endpoint: VlmEndpoint) -> SlotGate:
         """The shared slot of one model server (vidette.vlm.gate)."""
         return self._gates.setdefault(endpoint.base_url, SlotGate())
@@ -264,7 +293,7 @@ class AppRuntime:
             media_dir=self.config.storage.media_dir,
             emit=self.emit,
             endpoint=endpoint,
-            live_busy=lambda: self.verdicts.working or self.verdicts.backlog > 0,
+            live_busy=lambda: self.verdicts.working or self.verdicts.urgent > 0,
         )
 
     async def _identity_merges(self) -> None:

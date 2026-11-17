@@ -411,9 +411,51 @@ class DeepConfig(StrictModel):
         return _duration(self.lookback, "lookback")
 
 
+class TriageConfig(StrictModel):
+    """The pre-filter in front of the live judge (docs/prefilter.md, ADR-0021): a look at
+    every clip with an object detector and the clip's own motion facts, before it waits
+    for the model. `now`: judged first, newest first (people, moving vehicles, anything
+    the detector half-saw); `later`: judged only when the model's slot is idle, dropped
+    from the live queue after `later_max_age` (deep analysis may still take it); `skip`:
+    never judged, with the reason kept on the event. A clip is skipped only after the
+    detector looked at it and found nobody; without a detector nothing is skipped."""
+
+    enabled: bool = False
+    detector: Literal["yolox", "none"] = "yolox"  # none: order by motion only, never skip
+    models_dir: Path | None = None  # default: people.models_dir, else ~/.cache/vidette/models
+    frames: int = Field(default=8, ge=2, le=16)  # where the picture changed, per clip
+    key_frames: bool = True  # also the collector's key frames (on disk, nothing to decode)
+    threads: int = Field(default=2, ge=1, le=16)  # CPU threads for the detector
+    skip: bool = True  # false: only the order (now / later), nothing skipped
+    vehicles: Literal["now", "later"] = "now"  # a vehicle that moves, nobody seen
+    later_max_age: str = "10m"  # a later clip waits this long for an idle slot
+    usual_movement: bool = True  # learn where things always move (a tree, an awning)
+    # Detector scores (0..1): a person from `person`; from `possible_person` it still
+    # counts as unclear (judged now); vehicles and animals from their own.
+    person: float = Field(default=0.35, ge=0.05, le=0.95)
+    possible_person: float = Field(default=0.2, ge=0.05, le=0.95)
+    vehicle: float = Field(default=0.45, ge=0.05, le=0.95)
+    animal: float = Field(default=0.35, ge=0.05, le=0.95)
+
+    @model_validator(mode="after")
+    def _check(self) -> TriageConfig:
+        if _duration(self.later_max_age, "understanding.triage.later_max_age") < 30:
+            raise ValueError("understanding.triage.later_max_age must be at least 30s")
+        if self.possible_person > self.person:
+            raise ValueError("understanding.triage.possible_person must not be above person")
+        if self.models_dir is not None:
+            self.models_dir = self.models_dir.expanduser()
+        return self
+
+    @property
+    def later_max_age_s(self) -> float:
+        return _duration(self.later_max_age, "later_max_age")
+
+
 class UnderstandingConfig(StrictModel):
     vlm: VlmConfig = VlmConfig()
     deep: DeepConfig = Field(default_factory=DeepConfig)
+    triage: TriageConfig = Field(default_factory=TriageConfig)
 
     @model_validator(mode="after")
     def _deep_backend(self) -> UnderstandingConfig:

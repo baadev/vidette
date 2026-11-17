@@ -64,6 +64,7 @@ class Replayed:
     step: int | None = None  # the calibration step that moved it (when it did)
     alerted: bool = False  # the bot really sent an alert about it
     feedback: str | None = None  # the 👍/👎 it got ("up" | "down")
+    triage: str | None = None  # the pre-filter's class: now | later | skip (docs/prefilter.md)
 
 
 @dataclass
@@ -86,7 +87,14 @@ class DryRun:
             row["alerted"] += int(event.alerted)
             row["marked_down"] += int(event.feedback == "down")
             row["marked_up"] += int(event.feedback == "up")
+            if event.triage is not None:
+                row[f"triage_{event.triage}"] += 1
         return dict(sorted(days.items()))
+
+    @property
+    def triaged(self) -> bool:
+        """Whether the pre-filter looked at any of these events."""
+        return any(event.triage is not None for event in self.events)
 
     def by_scenario(self) -> dict[tuple[str, str], Counter[str]]:
         rows: dict[tuple[str, str], Counter[str]] = {}
@@ -251,6 +259,8 @@ def _route(
         if found is not None:
             route, step = "digest", found.step_id
             hidden[row.id] = found.step_id
+    triage = (row.intent or {}).get("triage")
+    klass = triage.get("class") if isinstance(triage, dict) else None
     return Replayed(
         event_id=row.id,
         camera=row.camera,
@@ -262,6 +272,7 @@ def _route(
         step=step,
         alerted=row.id in alerted,
         feedback=row.feedback,
+        triage=klass if klass in ("now", "later", "skip") else None,
     )
 
 
@@ -335,6 +346,14 @@ def render_text(run: DryRun, *, camera_names: Mapping[str, str] | None = None) -
         total.update(row)
         lines.append(_day_line(day, row))
     lines.append(_day_line("total", total))
+    if run.triaged:
+        lines += [
+            "",
+            "Pre-filter (docs/prefilter.md), events it looked at: "
+            f"{total.get('triage_now', 0)} judged first, {total.get('triage_later', 0)} "
+            f"when the model was idle, {total.get('triage_skip', 0)} skipped (nobody there); "
+            "skipped events are among the unjudged.",
+        ]
     moved = run.moved()
     lines += ["", f"Calibration moved {len(moved)} alert(s) to the digest."]
     if run.steps:

@@ -86,7 +86,9 @@ class DeepStatus:
 
 
 def classify(row: EventRow, *, include_unjudged: bool) -> tuple[int, str] | None:
-    """Whether an event is worth a deep look, and how urgent: (priority, reason)."""
+    """Whether an event is worth a deep look, and how urgent: (priority, reason). An
+    event the live judge never reached is ranked by what the pre-filter saw, and one it
+    skipped (nobody there) is left out."""
     intent = row.intent or {}
     verdicts = [v for v in intent.get("verdicts") or [] if isinstance(v, dict)]
     people = intent.get("people") if isinstance(intent.get("people"), dict) else {}
@@ -108,8 +110,17 @@ def classify(row: EventRow, *, include_unjudged: bool) -> tuple[int, str] | None
         return P_PERSON, "person"
     if any(label.startswith(("car_", "vehicle")) for label in labels):
         return P_VEHICLE, "vehicle"
-    if not verdicts and include_unjudged:
-        return P_UNJUDGED, "never judged"
+    if not verdicts:  # the live judge never reached it: the pre-filter says what it saw
+        triage = intent.get("triage") if isinstance(intent.get("triage"), dict) else {}
+        reason = (triage or {}).get("reason")
+        if (triage or {}).get("class") == "skip":
+            return None  # nobody there (docs/prefilter.md): not worth a deep look either
+        if reason in ("person", "possible_person"):
+            return P_PERSON, "person (pre-filter), never judged"
+        if reason == "vehicle":
+            return P_VEHICLE, "vehicle (pre-filter), never judged"
+        if include_unjudged:
+            return P_UNJUDGED, "never judged"
     return None
 
 

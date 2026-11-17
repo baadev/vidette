@@ -56,6 +56,12 @@ class SlotGate:
     def live_waiting(self) -> int:
         return self._live_waiting
 
+    @property
+    def idle(self) -> bool:
+        """Nobody holds the slot and no live call waits for it (the pre-filter's `later`
+        clips are judged only then)."""
+        return not self._lock.locked() and not self._live_waiting
+
     @contextlib.asynccontextmanager
     async def live(self) -> AsyncIterator[None]:
         self._live_waiting += 1

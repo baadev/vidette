@@ -115,8 +115,9 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=None,
         help="always | never | frigate-severity | frigate-genai | vlm-local | vlm-cloud | "
-        "stored-live | stored-deep | stored-best (repeatable; default: the four baselines; "
-        "VLM judges run only when named; stored-* read what a service already said)",
+        "stored-live | stored-deep | stored-best | triage | triage-now (repeatable; default: "
+        "the four baselines; VLM judges run only when named; stored-* read what a service "
+        "already said; triage* is the pre-filter, docs/prefilter.md)",
     )
     evaluate.add_argument(
         "--policy-from-config",
@@ -223,7 +224,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     deep_cli.add_arguments(deep)
 
+    from vidette.triage import cli as triage_cli
+
+    triage = subparsers.add_parser(
+        "triage",
+        help="the pre-filter in front of the live judge: model, check clips, replay "
+        "(docs/prefilter.md)",
+    )
+    triage_cli.add_arguments(triage)
+
     args = parser.parse_args(argv)
+    if args.command == "triage":
+        return triage_cli.run(args)
     if args.command == "policy":
         return policy_cli.run(args)
     if args.command == "deep":

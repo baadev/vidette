@@ -22,6 +22,7 @@ from vidette.eval.metrics import CostModel
 from vidette.eval.report import render_json, render_text
 from vidette.eval.runner import Enrich, run_eval
 from vidette.eval.stored import STORED_JUDGES, StoredJudge
+from vidette.triage.judge import TRIAGE_JUDGES, TriageJudge
 from vidette.verdicts.base import Case, Judge
 from vidette.verdicts.baselines import BASELINES, baseline
 from vidette.vlm.endpoint import VlmUnavailableError
@@ -39,6 +40,8 @@ def _judges(
         if name in STORED_JUDGES:
             path = database or cli_config(config_path)[0].storage.database
             judges.append(StoredJudge.from_database(name, path))
+        elif name in TRIAGE_JUDGES:
+            judges.append(TriageJudge.from_config(name, cli_config(config_path)[0]))
         elif name in JUDGE_NAMES:
             config, _source = cli_config(config_path)
             judges.append(

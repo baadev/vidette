@@ -23,6 +23,7 @@ import json
 import logging
 import statistics
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -54,7 +55,17 @@ PIXEL_CHANGE = 18  # grey levels (of 255) a pixel must differ from the backgroun
 ACTIVE_SHARE = 0.004  # a candidate shows change when this share of pixels changed (~9 px)
 CACHE_FILE = "frames.json"
 
-__all__ = ["FrameSet", "frame_files", "frame_jpegs", "frame_set", "select_from_video", "spread"]
+__all__ = [
+    "Activity",
+    "FrameSet",
+    "activity_map",
+    "frame_files",
+    "frame_jpegs",
+    "frame_set",
+    "select_from_video",
+    "select_with_activity",
+    "spread",
+]
 
 
 def spread(items: list[Path], count: int) -> list[Path]:
@@ -87,25 +98,65 @@ def centred_indices(length: int, count: int) -> list[int]:
 # --- choosing frames from a video -----------------------------------------------------------
 
 
-def activity(thumbs: list[bytes]) -> list[float]:
-    """Per thumbnail, the share of its pixels that differ from the background (the
-    per-pixel median of all of them) once a global brightness change is taken out."""
+@dataclass(frozen=True)
+class Activity:
+    """Where and how much the picture changed over a clip, from its tiny grey key frames
+    (THUMB_W × THUMB_H): what the pre-filter (vidette.triage) reads next to the frames.
+
+    `shares`: per candidate frame, the share of pixels that differ from the background
+    once a global brightness change is taken out (`activity`). `shifts`: per candidate,
+    that global change, in grey levels (a light switched on, a cloud, the switch to
+    infrared). `cells`: the pixels of the thumbnail grid that changed in any active
+    candidate, as indices into the THUMB_W × THUMB_H grid, row by row."""
+
+    shares: list[float]
+    shifts: list[float]
+    cells: frozenset[int]
+
+    @property
+    def peak(self) -> float:
+        return max(self.shares, default=0.0)
+
+    @property
+    def light(self) -> float:
+        """The largest brightness change of a candidate from the background, 0 to 1."""
+        return max((abs(s) for s in self.shifts), default=0.0) / 255.0
+
+    @property
+    def active(self) -> int:
+        return sum(1 for share in self.shares if share >= ACTIVE_SHARE)
+
+
+def activity_map(thumbs: list[bytes]) -> Activity:
+    """`activity` with where it happened and the global brightness changes."""
     if not thumbs:
-        return []
+        return Activity([], [], frozenset())
     size = len(thumbs[0])
     if size == 0 or any(len(thumb) != size for thumb in thumbs):
-        return [0.0] * len(thumbs)
+        return Activity([0.0] * len(thumbs), [0.0] * len(thumbs), frozenset())
     background = [int(statistics.median(column)) for column in zip(*thumbs, strict=True)]
     bg_mean = sum(background) / size
     shares: list[float] = []
+    shifts: list[float] = []
+    cells: set[int] = set()
     for thumb in thumbs:
         shift = sum(thumb) / size - bg_mean
-        changed = sum(
-            1 for value, base in zip(thumb, background, strict=True)
+        changed = [
+            index for index, (value, base) in enumerate(zip(thumb, background, strict=True))
             if abs(value - base - shift) > PIXEL_CHANGE
-        )  # fmt: skip
-        shares.append(changed / size)
-    return shares
+        ]  # fmt: skip
+        share = len(changed) / size
+        shares.append(share)
+        shifts.append(round(shift, 2))
+        if share >= ACTIVE_SHARE:
+            cells.update(changed)
+    return Activity(shares, shifts, frozenset(cells))
+
+
+def activity(thumbs: list[bytes]) -> list[float]:
+    """Per thumbnail, the share of its pixels that differ from the background (the
+    per-pixel median of all of them) once a global brightness change is taken out."""
+    return activity_map(thumbs).shares
 
 
 def episodes(
@@ -190,6 +241,12 @@ async def _thumbs(video: Path, *, every: int | None, expected: int) -> list[byte
 async def candidate_scores(video: Path, found: Packets) -> tuple[list[int], list[float]]:
     """Candidate frame indices and their activity: the key frames when there are enough
     (cheap to decode), otherwise every n-th frame."""
+    candidates, mapped = await candidate_activity(video, found)
+    return candidates, mapped.shares
+
+
+async def candidate_activity(video: Path, found: Packets) -> tuple[list[int], Activity]:
+    """`candidate_scores` with the whole activity map (`activity_map`)."""
     keys = [index for index, key in enumerate(found.keys) if key]
     if len(keys) >= MIN_CANDIDATES:
         try:
@@ -200,12 +257,12 @@ async def candidate_scores(video: Path, found: Packets) -> tuple[list[int], list
             if len(keys) > MAX_CANDIDATES:
                 picked = spread_indices(len(keys), MAX_CANDIDATES)
                 keys, thumbs = [keys[i] for i in picked], [thumbs[i] for i in picked]
-            return keys, activity(thumbs)
+            return keys, activity_map(thumbs)
     total = len(found.times)
     every = max(1, -(-total // MAX_CANDIDATES))
     indices = list(range(0, total, every))
     thumbs = await _thumbs(video, every=every, expected=len(indices))
-    return indices, activity(thumbs)
+    return indices, activity_map(thumbs)
 
 
 async def select_from_video(
@@ -213,17 +270,27 @@ async def select_from_video(
 ) -> FrameSet:
     """Up to `count` real frames of `video` where the picture changed, as numbered JPEGs
     in `out_dir`, with their times, the clip's duration and its stream health."""
+    frames, _activity = await select_with_activity(video, count, out_dir, max_side=max_side)
+    return frames
+
+
+async def select_with_activity(
+    video: Path, count: int, out_dir: Path, *, max_side: int = 1280
+) -> tuple[FrameSet, Activity | None]:
+    """`select_from_video`, and the activity map the frames were chosen from (None when
+    the clip has too few frames or its thumbnails could not be decoded)."""
     info = await probe(video)
     found = await packets(video)
     out_dir.mkdir(parents=True, exist_ok=True)
     if len(found.times) < 2:  # nothing to choose from: the old way, instants on the timeline
         instants = frame_times(info.duration_s, count)
         files = await extract_frames(video, instants, out_dir, max_side=max_side)
-        return FrameSet(files, [*instants[: len(files)]], "spread", info.duration_s)
+        return FrameSet(files, [*instants[: len(files)]], "spread", info.duration_s), None
     health = measure(found.times, info.fps)
+    mapped: Activity | None = None
     try:
-        candidates, scores = await candidate_scores(video, found)
-        chosen, method = choose(len(found.times), candidates, scores, count)
+        candidates, mapped = await candidate_activity(video, found)
+        chosen, method = choose(len(found.times), candidates, mapped.shares, count)
     except MediaToolError as exc:
         logger.info("no activity map for %s (%s); frames spread over the clip", video.name, exc)
         chosen, method = centred_indices(len(found.times), count), "spread"
@@ -238,7 +305,7 @@ async def select_from_video(
         )
         paths.append(path)
         times.append(round(found.times[index] - origin, 2))
-    return FrameSet(paths, times, method, info.duration_s, health)
+    return FrameSet(paths, times, method, info.duration_s, health), mapped
 
 
 # --- the frames of a case -------------------------------------------------------------------

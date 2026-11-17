@@ -38,6 +38,18 @@ calibration made quieter on this camera is still confirmed, with `intent.calibra
 saying so; the bot sends it to the digest. An early window such a step holds back waits
 for the whole clip.
 
+The pre-filter (docs/prefilter.md, ADR-0021): with `understanding.triage` on, every
+incident is looked at before it waits (an object detector and the clip's own motion
+facts) and gets a class, kept on the event as `intent.triage`:
+
+    now    people, moving vehicles, anything half-seen: judged first, newest first
+    later  judged only while the model's slot is idle; after `later_max_age` it leaves
+           the queue (deep analysis may still take it)
+    skip   never judged: nobody there (light change, tiny or the usual movement), or an
+           early window with nobody yet; the event stays observed with the reason
+
+Without it every incident is `now`, as before.
+
 Known people (docs/people.md): with a face check configured, the incident's frames go
 through it once before the policies are judged. The report rides along to the judge
 (names for a local model only) and is kept in the event's `intent.people`, with face
@@ -68,6 +80,8 @@ from vidette.ffmpeg import MediaToolError, extract_frame
 from vidette.frigate.client import Frame
 from vidette.people.check import CropWriter, crop_writer
 from vidette.people.report import PeopleReport
+from vidette.triage.rules import RANK_LATER, TriageClass, rank
+from vidette.triage.service import Triager
 from vidette.verdicts.base import Case, FrameSet, Judge, Verdict, policy_text
 from vidette.verdicts.frames import first_video, frame_set
 
@@ -84,6 +98,9 @@ _FAILURE_EMIT_EVERY = 10
 EmitCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 BackendResolver = Callable[[], Awaitable[VlmBackend]]
 JudgeFactory = Callable[[VlmBackend], Judge]
+SlotIdle = Callable[[VlmBackend], bool]
+WAIT_FOR_SLOT_S = 2.0  # a later clip checks the slot again after this long
+WARM_LOOKBACK_S = 86400.0  # the usual movement is rebuilt from this much history
 
 
 class FaceCheck(Protocol):
@@ -107,6 +124,8 @@ class WorkerStatus:
     dismissed: int = 0
     undecided: int = 0  # every policy abstained: stays observed
     skipped_old: int = 0
+    later_judged: int = 0  # judged while the slot was idle (pre-filter class `later`)
+    later_expired: int = 0  # waited `later_max_age` without an idle slot
     failed: int = 0
     last_judged_at: float | None = None
     last_error: str | None = None
@@ -146,7 +165,19 @@ class VerdictWorker:
         clock: Callable[[], float] = time.time,
         people: FaceCheck | None = None,
         calibration: Calibrator | None = None,
+        triage: Triager | None = None,
+        slot_idle: SlotIdle | None = None,
     ) -> None:
+        self._triage = triage
+        self._slot_idle = slot_idle
+        self._later_max_age_s = (
+            config.understanding.triage.later_max_age_s if triage is not None else max_age_s
+        )
+        self._raw: dict[str, Incident] = {}  # off the bus, not looked at yet
+        self._pending: dict[str, Incident] = {}  # looked at, waiting for the judge
+        self._ranks: dict[str, int] = {}  # the pre-filter's order of each (triage.rules.rank)
+        self._decided: dict[str, int] = {}  # set by `triage`, taken by the intake
+        self._ready: asyncio.Event | None = None
         self._people = people
         self._calibration = calibration
         self._config = config
@@ -164,7 +195,9 @@ class VerdictWorker:
         self._judge_cache: dict[VlmBackend, Judge] = {}
         self._queued: dict[str, float] = {}  # incident key → when it was taken off the bus
         self.status = WorkerStatus()
-        self.backlog = 0  # incidents waiting to be judged (deep analysis waits for these)
+        self.backlog = 0  # incidents waiting to be looked at or judged
+        self.urgent = 0  # of those, not `later` (deep analysis waits for these)
+        self.taken: int | None = None  # the rank `next_incident` took last
         self.working = False  # judging one now
 
     @property
@@ -175,7 +208,7 @@ class VerdictWorker:
         if self._task is not None:
             return
         self._subscription = self._bus.subscribe("incident.*")
-        self._task = asyncio.create_task(self._pump(self._subscription), name="verdicts")
+        self._task = asyncio.create_task(self._run(self._subscription), name="verdicts")
 
     async def stop(self) -> None:
         task, self._task = self._task, None
@@ -187,31 +220,114 @@ class VerdictWorker:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    async def _pump(self, subscription: Subscription) -> None:
-        """Newest first: while the judge is busy, incidents pile up; the most recent one
-        is judged next, and older ones wait until they are too old (`max_age_s`). A slow
-        or shared model then answers about what is happening now, not 15 minutes ago."""
-        pending: dict[str, Incident] = {}
+    async def _run(self, subscription: Subscription) -> None:
+        """Two loops: the intake (off the bus, through the pre-filter) and the judge."""
+        self._ready = asyncio.Event()
+        if self._triage is not None:
+            await self._warm()
+        judge = asyncio.create_task(self._judge_loop(), name="verdicts:judge")
+        try:
+            await self._intake_loop(subscription)
+        finally:
+            judge.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await judge
+
+    async def _warm(self) -> None:
+        """The usual movement per camera from the decisions of the last day."""
+        assert self._triage is not None
+        try:
+            rows = await self._db.list_events(since_ts=self._clock() - WARM_LOOKBACK_S, limit=20000)
+            learned = self._triage.warm(rows)
+        except Exception:  # a cold memory only means fewer skips for a while
+            logger.exception("pre-filter: the usual movement could not be rebuilt")
+            return
+        if learned:
+            logger.info("pre-filter: usual movement learned from %d stored clip(s)", learned)
+
+    async def _intake_loop(self, subscription: Subscription) -> None:
+        """Newest first: a burst is looked at from its latest clip back."""
         while True:
-            if not pending:
-                self._take(pending, await subscription.get())
-            while True:  # everything that arrived while the last one was judged
+            if not self._raw:
+                self._take(self._raw, await subscription.get())
+            while True:  # everything that arrived meanwhile
                 try:
-                    self._take(pending, subscription.get_nowait())
+                    self._take(self._raw, subscription.get_nowait())
                 except asyncio.QueueEmpty:
                     break
-            incident = self.next_incident(pending)
-            self.backlog = len(pending)
-            if incident is None:
-                continue
-            self.working = True
+            self._count()
+            key = max(self._raw, key=lambda k: self._raw[k].ended_at or self._raw[k].started_at)
+            incident = self._raw.pop(key)
+            waiting = self._pending.get(incident.key)
+            if incident.partial and waiting is not None and not waiting.partial:
+                continue  # the whole clip is already waiting
+            klass: TriageClass | None = TriageClass.now
+            if self._triage is not None:
+                try:
+                    klass = await self.triage(incident)
+                except Exception as exc:  # a failed look never loses a clip
+                    logger.exception("pre-filter failed on %s", incident.source_id)
+                    await self._failed(f"pre-filter: {type(exc).__name__}: {exc}")
+                    klass = TriageClass.now
+            order = self._decided.pop(incident.key, None)
+            if klass is not None and klass is not TriageClass.skip:
+                self._enqueue(incident, rank(klass, None) if order is None else order)
+            self._count()
+
+    def _enqueue(self, incident: Incident, order: int) -> None:
+        waiting = self._pending.get(incident.key)
+        if incident.partial and waiting is not None and not waiting.partial:
+            return
+        self._pending[incident.key] = incident
+        self._ranks[incident.key] = order
+        self._count()
+        if self._ready is not None:
+            self._ready.set()
+
+    def _count(self) -> None:
+        later = sum(1 for k in self._pending if self._ranks.get(k, 0) >= RANK_LATER)
+        self.backlog = len(self._raw) + len(self._pending)
+        self.urgent = self.backlog - later
+
+    async def _judge_loop(self) -> None:
+        assert self._ready is not None
+        while True:
+            incident: Incident | None = None
             try:
-                await self.handle(incident)
+                idle = await self._idle() if self._pending else True
+                self._ready.clear()
+                incident = self.next_incident(self._pending, idle=idle)
+                taken = self.taken
+                self._count()
+                if incident is None:
+                    timeout = WAIT_FOR_SLOT_S if self._pending else None
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._ready.wait(), timeout=timeout)
+                    continue
+                self.working = True
+                row = await self.handle(incident)
+                if row is not None and taken is not None and taken >= RANK_LATER:
+                    self.status.later_judged += 1
             except Exception as exc:  # the loop survives anything
-                logger.exception("verdict worker failed on %s", incident.source_id)
+                where = incident.source_id if incident is not None else "the queue"
+                logger.exception("verdict worker failed on %s", where)
                 await self._failed(f"{type(exc).__name__}: {exc}")
+                if incident is None:
+                    await asyncio.sleep(WAIT_FOR_SLOT_S)
             finally:
                 self.working = False
+
+    async def _idle(self) -> bool:
+        """Whether the model's slot is free for a `later` clip (always, without a gate)."""
+        if self._slot_idle is None:
+            return True
+        backend = await self._backend()
+        return backend is not VlmBackend.none and self._slot_idle(backend)
+
+    def _best_rank(self, pending: dict[str, Incident]) -> int | None:
+        if not pending:
+            return None
+        return min(self._ranks.get(k, 0) for k in pending)
 
     def _take(self, pending: dict[str, Incident], message: tuple[str, dict[str, Any]]) -> None:
         """Closed incidents and early windows (partial) wait to be judged. An early window
@@ -229,17 +345,86 @@ class VerdictWorker:
         self._queued[incident.key] = self._clock()
         pending[incident.key] = incident
 
-    def next_incident(self, pending: dict[str, Incident]) -> Incident | None:
-        """Drop what is too old to judge, then take the most recent incident."""
+    def next_incident(self, pending: dict[str, Incident], *, idle: bool = True) -> Incident | None:
+        """Drop what is too old to judge, then take the most recent incident of the best
+        rank (triage.rules.rank: people, then moving vehicles, then `later`). A `later`
+        one is taken only when the model's slot is `idle`; it waits `later_max_age`, the
+        others `max_age_s`."""
         now = self._clock()
         for key, incident in list(pending.items()):
-            if now - (incident.ended_at or incident.started_at) > self._max_age_s:
+            later = self._ranks.get(key, 0) >= RANK_LATER
+            limit = self._later_max_age_s if later else self._max_age_s
+            if now - (incident.ended_at or incident.started_at) > limit:
                 del pending[key]
-                self.status.skipped_old += 1
-        if not pending:
+                self._ranks.pop(key, None)
+                if later:
+                    self.status.later_expired += 1
+                else:
+                    self.status.skipped_old += 1
+        best = self._best_rank(pending)
+        self.taken = None
+        if best is None or (best >= RANK_LATER and not idle):
             return None
-        key = max(pending, key=lambda k: pending[k].ended_at or pending[k].started_at)
+        keys = [k for k in pending if self._ranks.get(k, 0) == best]
+        key = max(keys, key=lambda k: pending[k].ended_at or pending[k].started_at)
+        self._ranks.pop(key, None)
+        self.taken = best
         return pending.pop(key)
+
+    def _judgeable(self, incident: Incident, row: EventRow) -> bool:
+        """Whether the event still needs this verdict (see `handle`)."""
+        phase = (row.intent or {}).get("phase")
+        if incident.partial:
+            return row.state == EventState.observed.value and phase is None
+        early_alert = row.state == EventState.confirmed.value and phase == "early"
+        return row.state == EventState.observed.value or early_alert
+
+    async def triage(self, incident: Incident) -> TriageClass | None:
+        """Look at one incident before it waits for the judge (vidette.triage), keep the
+        decision on its event, and return its class; None when there is nothing to
+        judge (no policy for the camera, too old, the event is gone or already
+        decided). With the judge switched off nothing is looked at."""
+        assert self._triage is not None
+        if not policies_for(self._config, incident.camera):
+            return None
+        if await self._backend() is VlmBackend.none:
+            return TriageClass.now  # `handle` leaves it observed, as without a pre-filter
+        if self._clock() - (incident.ended_at or incident.started_at) > self._max_age_s:
+            self.status.skipped_old += 1
+            return None
+        row = await self._row(incident)
+        if row is None or not self._judgeable(incident, row):
+            return None
+        case = Case(incident=incident, media=tuple(Path(m) for m in incident.media))
+        decision, observation = await self._triage.decide(
+            case, camera=incident.camera, partial=incident.partial
+        )
+        record = decision.record(observation, phase="early" if incident.partial else "final")
+        current = await self._db.get_event(row.id)  # the judge may have written since
+        intent = dict((current or row).intent or {})
+        previous = intent.get("triage")
+        klass = decision.klass
+        if not incident.partial and isinstance(previous, dict) and previous.get("phase") == "early":
+            record["early"] = {k: previous[k] for k in ("class", "why", "reason") if k in previous}
+            if previous.get("class") == TriageClass.now.value and klass is not TriageClass.now:
+                # someone was in its first seconds: the whole clip is judged like them
+                klass = TriageClass.now
+                record.update(
+                    {"class": klass.value, "why": f"early window: {previous.get('why')}",
+                     "reason": "early_" + str(previous.get("reason") or "now")}
+                )  # fmt: skip
+        summary = None
+        if klass is TriageClass.skip and not incident.partial and not intent.get("verdicts"):
+            summary = f"not judged: {decision.why}"
+        intent["triage"] = record
+        self._decided[incident.key] = rank(klass, str(record.get("reason")))
+        await self._db.update_event(row.id, intent=intent, summary=summary)
+        logger.info(
+            "pre-filter %s %s%s: %s (%s) in %.1f s",
+            row.id, incident.camera, " early" if incident.partial else "",
+            klass.value, record["why"], observation.seconds,
+        )  # fmt: skip
+        return klass
 
     async def _failed(self, error: str) -> None:
         self.status.failed += 1
@@ -398,7 +583,7 @@ class VerdictWorker:
             if alerting and await self._calibrated(*alerting[0], incident.camera):
                 alerting = []  # a calibration step keeps it out of the alerts for now
             if not alerting:  # nothing yet: the whole clip decides
-                await self._db.update_event(row.id, intent=intent)
+                await self._db.update_event(row.id, intent=await self._fresh(row.id, intent))
                 return await self._db.get_event(row.id)
             policy, verdict = alerting[0]
             self.status.confirmed += 1
@@ -433,7 +618,9 @@ class VerdictWorker:
                 row.id, EventState.confirmed, row.summary, kept, row.policy, "event.updated"
             )
         reasons = "; ".join(sorted({v.rationale or "no reason" for _p, v in results}))
-        await self._db.update_event(row.id, summary=f"no verdict: {reasons}", intent=intent)
+        await self._db.update_event(
+            row.id, summary=f"no verdict: {reasons}", intent=await self._fresh(row.id, intent)
+        )
         self.status.undecided += 1
         return await self._db.get_event(row.id)
 
@@ -478,6 +665,15 @@ class VerdictWorker:
             timeline["person_seen"] = incident.started_at + min(seen)
         return {key: round(value, 3) for key, value in timeline.items()}
 
+    async def _fresh(self, event_id: str, intent: dict[str, Any]) -> dict[str, Any]:
+        """`intent` with the pre-filter's newest decision on the event: the whole clip
+        may have been looked at while its early window was judged."""
+        current = await self._db.get_event(event_id)
+        triage = (current.intent or {}).get("triage") if current is not None else None
+        if triage is not None:
+            intent["triage"] = triage
+        return intent
+
     async def _settle(
         self,
         event_id: str,
@@ -487,6 +683,7 @@ class VerdictWorker:
         policy: str | None,
         topic: str,
     ) -> EventRow | None:
+        intent = await self._fresh(event_id, intent)
         await self._db.update_event(
             event_id, state=state.value, summary=summary, intent=intent, policy=policy
         )

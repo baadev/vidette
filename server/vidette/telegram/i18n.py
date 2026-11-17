@@ -280,6 +280,9 @@ EN: dict[str, str] = {
     "judge.off": "off (backend: none)",
     "judge.line": "{backend} {model}; since start {judged}, old ones skipped {skipped}",
     "judge.error": "; error: {error}",
+    "judge.triage": (
+        "; pre-filter: {now} judged first, {later} when idle ({expired} too old), {skip} not judged"
+    ),
     # taps and replies
     "toast.gone": "This alert is no longer available",
     "toast.who": "Who is it?",
@@ -585,6 +588,10 @@ RU: dict[str, str] = {
     "judge.off": "выключен (backend: none)",
     "judge.line": "{backend} {model}; с запуска {judged}, пропущено старых {skipped}",
     "judge.error": "; ошибка: {error}",
+    "judge.triage": (
+        "; предфильтр: {now} сразу, {later} в свободное время ({expired} не дождались), "
+        "{skip} без проверки"
+    ),
     "toast.gone": "Эта тревога уже недоступна",
     "toast.who": "Кто это?",
     "toast.why_false": "Почему ложная? Выберите причину",
